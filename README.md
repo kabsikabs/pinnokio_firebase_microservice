@@ -44,6 +44,9 @@ Le fichier `.github/workflows/deploy.yml`:
 
 Secrets requis dans GitHub:
 - `AWS_ROLE_TO_ASSUME`: ARN du rôle IAM assumable par OIDC GitHub
+- `ECS_SUBNET_IDS`: IDs des subnets privés (séparés par des virgules)
+- `ECS_SECURITY_GROUP_ID`: SG des tasks ECS
+- `ECS_TG_ARN` (optionnel): ARN du Target Group IP:8090 pour attacher automatiquement le service
 
 ### Exposition réseau / WebSocket
 - Application écoute sur le port `8090` (voir `Dockerfile` et `ecs-taskdef.json`).

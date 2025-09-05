@@ -36,6 +36,7 @@
         "logDriver": "awslogs",
         "options": {
           "awslogs-group": "/ecs/pinnokio_microservice",
+          "awslogs-create-group": "true",
           "awslogs-region": "us-east-1",
           "awslogs-stream-prefix": "ecs"
         }

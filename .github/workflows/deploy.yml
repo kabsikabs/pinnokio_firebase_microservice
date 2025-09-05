@@ -13,6 +13,9 @@ env:
   ECS_TASK_FAMILY: pinnokio_microservice
   CONTAINER_NAME: pinnokio_microservice
   IMAGE_TAG: ${{ github.sha }}
+  ECS_TG_ARN: arn:aws:elasticloadbalancing:us-east-1:654654322636:targetgroup/pinnokio-firebase-backend/18189f1dfb06bcef
+  # Optionnel: si vous souhaitez binder automatiquement le service à un TG IP:8090
+  # Fournir en secret GitHub: ECS_TG_ARN
 
 permissions:
   id-token: write
@@ -57,20 +60,34 @@ jobs:
         env:
           SUBNET_IDS: ${{ secrets.ECS_SUBNET_IDS }} # comma-separated private subnets
           SECURITY_GROUP_ID: ${{ secrets.ECS_SECURITY_GROUP_ID }}
+          TG_ARN: ${{ secrets.ECS_TG_ARN }}
         run: |
           set -e
+          # fallback sur la variable d'environnement globale si le secret n'est pas fourni
+          if [ -z "$TG_ARN" ] && [ -n "$ECS_TG_ARN" ]; then TG_ARN="$ECS_TG_ARN"; fi
           STATUS=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --query 'services[0].status' --output text || true)
           if [ "$STATUS" = "ACTIVE" ]; then
             echo "Service already exists"
           else
             echo "Creating ECS service $ECS_SERVICE in cluster $ECS_CLUSTER"
-            aws ecs create-service \
-              --cluster "$ECS_CLUSTER" \
-              --service-name "$ECS_SERVICE" \
-              --task-definition ${{ env.ECS_TASK_FAMILY }} \
-              --desired-count 1 \
-              --launch-type FARGATE \
-              --network-configuration "awsvpcConfiguration={subnets=[$(echo $SUBNET_IDS | sed 's/,/,/g')],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=DISABLED}"
+            if [ -n "$TG_ARN" ]; then
+              aws ecs create-service \
+                --cluster "$ECS_CLUSTER" \
+                --service-name "$ECS_SERVICE" \
+                --task-definition ${{ env.ECS_TASK_FAMILY }} \
+                --desired-count 1 \
+                --launch-type FARGATE \
+                --load-balancers targetGroupArn=$TG_ARN,containerName=${{ env.CONTAINER_NAME }},containerPort=8090 \
+                --network-configuration "awsvpcConfiguration={subnets=[$(echo $SUBNET_IDS | sed 's/,/,/g')],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=DISABLED}"
+            else
+              aws ecs create-service \
+                --cluster "$ECS_CLUSTER" \
+                --service-name "$ECS_SERVICE" \
+                --task-definition ${{ env.ECS_TASK_FAMILY }} \
+                --desired-count 1 \
+                --launch-type FARGATE \
+                --network-configuration "awsvpcConfiguration={subnets=[$(echo $SUBNET_IDS | sed 's/,/,/g')],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=DISABLED}"
+            fi
           fi
 
       - name: Deploy Amazon ECS service
