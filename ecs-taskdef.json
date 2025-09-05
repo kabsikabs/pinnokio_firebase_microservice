@@ -19,10 +19,11 @@
       ],
       "environment": [
         {"name": "AWS_REGION_NAME", "value": "us-east-1"},
-        {"name": "GOOGLE_PROJECT_ID", "value": ""},
-        {"name": "GOOGLE_SERVICE_ACCOUNT_SECRET", "value": ""},
+        {"name": "GOOGLE_PROJECT_ID", "value": "pinnokio-gpt"},
+        {"name": "FIREBASE_ADMIN_SECRET_NAME", "value": "pinnokio_firebase_admin"},
+        {"name": "GOOGLE_SERVICE_ACCOUNT_SECRET", "value": "service_account_key"},
         {"name": "AWS_SECRET_NAME", "value": ""},
-        {"name": "LISTENERS_REDIS_HOST", "value": ""},
+        {"name": "LISTENERS_REDIS_HOST", "value": "pinnokio-cache-7uum2j.serverless.use1.cache.amazonaws.com"},
         {"name": "LISTENERS_REDIS_PORT", "value": "6379"},
         {"name": "LISTENERS_REDIS_PASSWORD", "value": ""},
         {"name": "LISTENERS_REDIS_TLS", "value": "true"},
@@ -32,6 +33,7 @@
         {"name": "USE_LOCAL_REDIS", "value": "false"},
         {"name": "PORT", "value": "8090"}
       ],
+      
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
