@@ -1,0 +1,46 @@
+{
+  "family": "pinnokio_microservice",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/<ECSExecutionRole>",
+  "taskRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/<ECSTaskRole>",
+  "containerDefinitions": [
+    {
+      "name": "listeners",
+      "image": "REPLACE_IMAGE",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8090,
+          "hostPort": 8090,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {"name": "AWS_REGION_NAME", "value": "us-east-1"},
+        {"name": "GOOGLE_PROJECT_ID", "value": ""},
+        {"name": "GOOGLE_SERVICE_ACCOUNT_SECRET", "value": ""},
+        {"name": "AWS_SECRET_NAME", "value": ""},
+        {"name": "LISTENERS_REDIS_HOST", "value": ""},
+        {"name": "LISTENERS_REDIS_PORT", "value": "6379"},
+        {"name": "LISTENERS_REDIS_PASSWORD", "value": ""},
+        {"name": "LISTENERS_REDIS_TLS", "value": "true"},
+        {"name": "LISTENERS_REDIS_TLS_VERIFY", "value": "true"},
+        {"name": "LISTENERS_REDIS_DB", "value": "0"},
+        {"name": "LISTENERS_CHANNEL_PREFIX", "value": "user:"},
+        {"name": "USE_LOCAL_REDIS", "value": "false"},
+        {"name": "PORT", "value": "8090"}
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/pinnokio_microservice",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}
