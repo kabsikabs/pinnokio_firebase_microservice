@@ -4,8 +4,7 @@
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "256",
   "memory": "512",
-  "executionRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/<ECSExecutionRole>",
-  "taskRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/<ECSTaskRole>",
+  "executionRoleArn": "arn:aws:iam::654654322636:role/ecsTaskExecutionRole",
   "containerDefinitions": [
     {
       "name": "pinnokio_microservice",
