@@ -11,7 +11,7 @@ env:
   ECS_CLUSTER: pinnokio_cluster
   ECS_SERVICE: pinnokio_microservice
   ECS_TASK_FAMILY: pinnokio_microservice
-  CONTAINER_NAME: listeners
+  CONTAINER_NAME: pinnokio_microservice
   IMAGE_TAG: ${{ github.sha }}
 
 permissions:

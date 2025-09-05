@@ -8,7 +8,7 @@
   "taskRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/<ECSTaskRole>",
   "containerDefinitions": [
     {
-      "name": "listeners",
+      "name": "pinnokio_microservice",
       "image": "REPLACE_IMAGE",
       "essential": true,
       "portMappings": [
