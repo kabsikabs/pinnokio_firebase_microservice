@@ -28,9 +28,27 @@ def _build_client_with_optional_sa() -> secretmanager.SecretManagerServiceClient
     if _client_cache is not None:
         return _client_cache
 
+    # 1) Bootstrap direct via JSON fourni en env (idéal pour ECS)
+    sa_json_inline = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if sa_json_inline:
+        credentials = service_account.Credentials.from_service_account_info(json.loads(sa_json_inline))
+        _client_cache = secretmanager.SecretManagerServiceClient(credentials=credentials)
+        return _client_cache
+
+    # 2) Si un fichier ADC est fourni (GOOGLE_APPLICATION_CREDENTIALS), le client par défaut fonctionnera
+    #    On tente directement sans autre manipulation
+    try:
+        _client_cache = secretmanager.SecretManagerServiceClient()
+        # Appel no-op pour valider paresseusement si besoin (pas strictement nécessaire)
+        return _client_cache
+    except Exception:
+        _client_cache = None  # sécurité, on re-tente ci-dessous si secret name fourni
+
+    # 3) Dernier ressort: si on a le nom du secret contenant la clé SA dans GSM,
+    #    il faut déjà avoir des ADC valides pour y accéder. Cette voie convient pour
+    #    les environnements où ADC est disponible (ex: GCE/GKE, dev local configuré gcloud).
     sa_secret_name = os.getenv("GOOGLE_SERVICE_ACCOUNT_SECRET")
     if sa_secret_name:
-        # Bootstrap avec ADC pour récupérer la clé du compte de service
         bootstrap_client = secretmanager.SecretManagerServiceClient()
         sa_json = _access_secret(bootstrap_client, sa_secret_name)
         credentials = service_account.Credentials.from_service_account_info(json.loads(sa_json))
