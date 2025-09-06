@@ -35,7 +35,7 @@
         {"name": "PORT", "value": "8090"}
       ],
       "secrets": [
-        {"name": "GOOGLE_SERVICE_ACCOUNT_JSON", "valueFrom": "gcp_secret"}
+        {"name": "GOOGLE_SERVICE_ACCOUNT_JSON", "valueFrom": "arn:aws:secretsmanager:us-east-1:654654322636:secret:gcp_secret-m6RJpd"}
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
