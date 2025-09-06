@@ -56,7 +56,7 @@ jobs:
           container-name: ${{ env.CONTAINER_NAME }}
           image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
           environment-variables: |
-            GOOGLE_SERVICE_ACCOUNT_JSON=${{ secrets.GCP_SECRET }}
+            GOOGLE_SERVICE_ACCOUNT_JSON_B64=${{ secrets.GCP_SECRET_B64 }}
 
       - name: Ensure ECS service exists (create if missing)
         env:

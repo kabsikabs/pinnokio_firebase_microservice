@@ -102,3 +102,6 @@ def get_aws_credentials_from_gsm() -> dict:
         return {}
     data = get_secret(secret_name)
     return json.loads(data)
+
+
+
