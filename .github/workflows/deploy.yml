@@ -48,6 +48,27 @@ jobs:
           docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
           echo "image=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT
 
+      - name: Prepare base64 GCP secret
+        id: gcp_b64
+        shell: bash
+        run: |
+          set -e
+          python - << 'PY'
+import os, base64, json
+s = os.environ.get('GCP_SECRET', '')
+if s:
+    # Valider JSON puis encoder
+    json.loads(s)
+    b64 = base64.b64encode(s.encode('utf-8')).decode('utf-8')
+else:
+    b64 = ''
+out = os.environ['GITHUB_OUTPUT']
+with open(out, 'a', encoding='utf-8') as f:
+    f.write(f"b64={b64}\n")
+PY
+        env:
+          GCP_SECRET: ${{ secrets.GCP_SECRET }}
+
       - name: Render ECS task definition
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
@@ -56,7 +77,7 @@ jobs:
           container-name: ${{ env.CONTAINER_NAME }}
           image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
           environment-variables: |
-            GOOGLE_SERVICE_ACCOUNT_JSON=${{ secrets.GCP_SECRET }}
+            GOOGLE_SERVICE_ACCOUNT_JSON_B64=${{ steps.gcp_b64.outputs.b64 }}
 
       - name: Ensure ECS service exists (create if missing)
         env:

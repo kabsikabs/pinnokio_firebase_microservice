@@ -4,6 +4,7 @@ from typing import Optional
 
 from google.cloud import secretmanager
 from google.oauth2 import service_account
+import base64
 
 _client_cache: Optional[secretmanager.SecretManagerServiceClient] = None
 
@@ -29,6 +30,14 @@ def _build_client_with_optional_sa() -> secretmanager.SecretManagerServiceClient
         return _client_cache
 
     # 1) Bootstrap direct via JSON fourni en env (idéal pour ECS)
+    # Variante base64 pour éviter les problèmes d'injection dans les pipelines CI/CD
+    sa_json_inline_b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_B64")
+    if sa_json_inline_b64:
+        decoded = base64.b64decode(sa_json_inline_b64).decode("utf-8")
+        credentials = service_account.Credentials.from_service_account_info(json.loads(decoded))
+        _client_cache = secretmanager.SecretManagerServiceClient(credentials=credentials)
+        return _client_cache
+
     sa_json_inline = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     if sa_json_inline:
         credentials = service_account.Credentials.from_service_account_info(json.loads(sa_json_inline))
