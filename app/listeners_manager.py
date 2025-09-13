@@ -132,7 +132,14 @@ class ListenersManager:
             self.logger.info("user_detach uid=%s reason=%s", uid, reason)
         for u in unsubs:
             try:
-                u()
+                # Certains listeners renvoient un objet avec .close(), d'autres une fonction
+                if callable(u):
+                    u()  # type: ignore[misc]
+                elif hasattr(u, "close"):
+                    try:
+                        u.close()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
             except Exception as e:
                 self.logger.error("user_unsub_error uid=%s error=%s", uid, repr(e))
 
@@ -151,11 +158,9 @@ class ListenersManager:
             self.redis.publish(channel, json.dumps(payload))
         except Exception as e:
             self.logger.error("redis_publish_error uid=%s error=%s", uid, repr(e))
-        # WS (best-effort)
+        # WS (best-effort): utiliser une diffusion thread-safe vers la loop serveur
         try:
-            import anyio
-
-            anyio.from_thread.run(hub.broadcast, uid, payload)
+            hub.broadcast_threadsafe(uid, payload)
         except Exception as e:
             self.logger.error("ws_broadcast_error uid=%s error=%s", uid, repr(e))
         self.logger.info("publish type=%s uid=%s channel=%s", payload.get("type"), uid, channel)
@@ -310,10 +315,43 @@ class ListenersManager:
             self.logger.error("chat_attach_error uid=%s error=%s", uid, repr(e))
 
     def _start_chat_listener(self, uid: str, space_code: str, thread_key: str, mode: str = "job_chats") -> Optional[Callable[[], None]]:
-        """Écoute les messages d'un thread de chat dans RTDB et publie sur Redis."""
+        """Écoute les messages d'un thread de chat dans RTDB et publie sur Redis.
+
+        Sélection du chemin RTDB:
+        - Si mode explicite vaut "chats" ou "job_chats", on l'utilise tel quel.
+        - Si mode absent/"auto"/invalide: on tente d'abord chats/, puis fallback job_chats/.
+        """
         try:
-            path = f"{space_code}/{mode}/{thread_key}/messages"
-            ref = _get_rtdb_ref(path)
+            selected_mode = (mode or "auto").strip()
+            candidate_modes: List[str]
+            if selected_mode in ("chats", "job_chats"):
+                candidate_modes = [selected_mode]
+            else:
+                candidate_modes = ["chats", "job_chats"]
+
+            ref = None
+            chosen_mode = None
+            for m in candidate_modes:
+                path_try = f"{space_code}/{m}/{thread_key}/messages"
+                try:
+                    tmp_ref = _get_rtdb_ref(path_try)
+                    # Vérifier existence légère: lecture tête (peut renvoyer None si vide/non créé)
+                    _ = tmp_ref.get()
+                    ref = tmp_ref
+                    chosen_mode = m
+                    break
+                except Exception:
+                    # Essayer prochain mode
+                    continue
+
+            if ref is None:
+                # Dernière tentative: utiliser le dernier path pour forcer le listener (au cas où des events arrivent plus tard)
+                fallback_mode = candidate_modes[-1]
+                path_fallback = f"{space_code}/{fallback_mode}/{thread_key}/messages"
+                ref = _get_rtdb_ref(path_fallback)
+                chosen_mode = fallback_mode
+
+            self.logger.info("chat_path_resolved uid=%s space=%s thread=%s requested_mode=%s chosen_mode=%s", uid, space_code, thread_key, mode, chosen_mode)
 
             def _on_event(event):
                 try:

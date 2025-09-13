@@ -144,7 +144,7 @@ async def websocket_endpoint(ws: WebSocket):
         uid = ws.query_params.get("uid")
         space_code = ws.query_params.get("space_code")
         thread_key = ws.query_params.get("thread_key")
-        chat_mode = ws.query_params.get("mode") or "job_chats"
+        chat_mode = ws.query_params.get("mode") or "auto"
         if not uid:
             await ws.close()
             return
@@ -160,8 +160,13 @@ async def websocket_endpoint(ws: WebSocket):
         while True:
             # Lectures éventuellement inutilisées (backend peut ne rien envoyer)
             await ws.receive_text()
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as e:
+        try:
+            code = getattr(e, "code", None)
+            reason = getattr(e, "reason", None)
+            logger.info("ws_disconnect uid=%s code=%s reason=%s", ws.query_params.get("uid"), code, reason)
+        except Exception:
+            logger.info("ws_disconnect uid=%s", ws.query_params.get("uid"))
     except Exception as e:
         logger.error("ws_error error=%s", repr(e))
     finally:
