@@ -92,6 +92,25 @@ jobs:
             fi
           fi
 
+      - name: Attach correct Target Group to ECS service (update if exists)
+        env:
+          TG_ARN: ${{ secrets.ECS_TG_ARN }}
+        run: |
+          set -e
+          # fallback sur la variable d'environnement globale si le secret n'est pas fourni
+          if [ -z "$TG_ARN" ] && [ -n "$ECS_TG_ARN" ]; then TG_ARN="$ECS_TG_ARN"; fi
+          if [ -n "$TG_ARN" ]; then
+            echo "Updating ECS service to use TG: $TG_ARN"
+            aws ecs update-service \
+              --cluster "$ECS_CLUSTER" \
+              --service "$ECS_SERVICE" \
+              --load-balancers targetGroupArn="$TG_ARN",containerName="$CONTAINER_NAME",containerPort=8090 \
+              --force-new-deployment \
+              --region "$AWS_REGION"
+          else
+            echo "No TG ARN provided; skipping attach."
+          fi
+
       - name: Deploy Amazon ECS service
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
