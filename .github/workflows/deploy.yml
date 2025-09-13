@@ -13,7 +13,7 @@ env:
   ECS_TASK_FAMILY: pinnokio_microservice
   CONTAINER_NAME: pinnokio_microservice
   IMAGE_TAG: ${{ github.sha }}
-  ECS_TG_ARN: arn:aws:elasticloadbalancing:us-east-1:654654322636:targetgroup/pinnokio-firebase-backend/18189f1dfb06bcef
+  ECS_TG_ARN: arn:aws:elasticloadbalancing:us-east-1:654654322636:targetgroup/new-pinnokio-firebase-backend/6c7046f6f3969fee
   # Optionnel: si vous souhaitez binder automatiquement le service à un TG IP:8090
   # Fournir en secret GitHub: ECS_TG_ARN
 
