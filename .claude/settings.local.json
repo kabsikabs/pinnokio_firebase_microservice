@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/Cedri/Coding/pinnokio_app/pinnokio_app/listeners/**)",
+      "Read(//c/Users/Cedri/Coding/pinnokio_app/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

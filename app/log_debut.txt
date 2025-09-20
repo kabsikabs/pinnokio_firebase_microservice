@@ -1,0 +1,37 @@
+0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:46:11,532 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:46:11,563 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:46:56,590 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:46:56,614 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:47:41,632 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:47:41,655 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:48:26,678 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:48:26,682 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:49:11,722 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:49:11,728 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:49:56,759 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:49:56,760 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:50:41,762 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:50:41,769 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:51:26,944 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:51:26,945 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:52:11,997 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:52:12,012 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=online ttl=90
+time=2025-09-15 14:52:23,174 level=INFO logger=listeners.app message=ws_disconnect uid=7hQs0jluP5YUWcREqdi22NRFnU32 code=1000 reason=
+time=2025-09-15 14:52:23,392 level=INFO logger=listeners.ws message=ws_disconnect uid=7hQs0jluP5YUWcREqdi22NRFnU32 total=1
+INFO:     connection closed
+time=2025-09-15 14:52:23,893 level=INFO logger=listeners.app message=ws_disconnect uid=7hQs0jluP5YUWcREqdi22NRFnU32 code=1000 reason=
+time=2025-09-15 14:52:23,913 level=INFO logger=listeners.ws message=ws_disconnect uid=7hQs0jluP5YUWcREqdi22NRFnU32 total=0
+INFO:     connection closed
+time=2025-09-15 14:52:24,114 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=offline ttl=90
+time=2025-09-15 14:52:24,166 level=INFO logger=listeners.app message=presence_update uid=7hQs0jluP5YUWcREqdi22NRFnU32 status=offline ttl=90
+INFO:     127.0.0.1:42955 - "WebSocket /ws?uid=WdCdwNS2ElghGiAGlwS9ha72hrs1" [accepted]
+time=2025-09-15 14:52:40,082 level=INFO logger=listeners.ws message=ws_connect uid=WdCdwNS2ElghGiAGlwS9ha72hrs1 total=1
+INFO:     connection open
+time=2025-09-15 14:52:40,259 level=INFO logger=listeners.app message=presence_update uid=WdCdwNS2ElghGiAGlwS9ha72hrs1 status=online ttl=90
+INFO:     127.0.0.1:42958 - "WebSocket /ws?uid=WdCdwNS2ElghGiAGlwS9ha72hrs1" [accepted]
+time=2025-09-15 14:52:40,650 level=INFO logger=listeners.ws message=ws_connect uid=WdCdwNS2ElghGiAGlwS9ha72hrs1 total=2
+INFO:     connection open
+time=2025-09-15 14:52:40,726 level=INFO logger=listeners.app message=presence_update uid=WdCdwNS2ElghGiAGlwS9ha72hrs1 status=online ttl=90
+time=2025-09-15 14:53:25,325 level=INFO logger=listeners.app message=presence_update uid=WdCdwNS2ElghGiAGlwS9ha72hrs1 status=online ttl=90
+time=2025-09-15 14:53:25,798 level=INFO logger=listeners.app message=presence_update uid=WdCdwNS2ElghGiAGlwS9ha72hrs1 status=online ttl=90

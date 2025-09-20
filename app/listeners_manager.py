@@ -47,12 +47,29 @@ class ListenersManager:
         self.redis = get_redis()
         self._registry_unsub: Optional[Callable[[], None]] = None
         self._user_unsubs: Dict[str, List[Callable[[], None]]] = {}
+        self._workflow_unsubs: Dict[str, List[Callable[[], None]]] = {}  # Workflow listeners
+        self._workflow_cache: Dict[str, dict] = {}  # Cache des valeurs précédentes
         self._lock = threading.Lock()
+        self._workflow_enabled = self._get_workflow_config()
 
     @property
     def listeners_count(self) -> int:
         with self._lock:
             return len(self._user_unsubs)
+
+    @property
+    def workflow_listeners_count(self) -> int:
+        with self._lock:
+            return len(self._workflow_unsubs)
+
+    def _get_workflow_config(self) -> bool:
+        """Récupère la configuration du workflow listener depuis les variables d'environnement ou secrets."""
+        try:
+            # Vérifier d'abord les variables d'environnement
+            workflow_enabled = os.getenv("WORKFLOW_LISTENER_ENABLED", "true").lower()
+            return workflow_enabled in ("true", "1", "yes", "on")
+        except Exception:
+            return True  # Activé par défaut
 
     def start(self) -> None:
         self.logger.info("registry_watch start collection=listeners_registry")
@@ -77,16 +94,21 @@ class ListenersManager:
 
     def _on_registry_snapshot(self, docs, changes, read_time) -> None:  # type: ignore[no-untyped-def]
         try:
+            self.logger.info("registry_snapshot triggered changes_count=%s", len(changes))
             for change in changes:
                 doc: DocumentSnapshot = change.document
                 uid = doc.id
                 online = _is_online_and_not_expired(doc)
+                self.logger.info("registry_change uid=%s type=%s online=%s", uid, change.type.name, online)
                 if change.type.name in ("ADDED", "MODIFIED"):
                     if online:
+                        self.logger.info("registry_attach_trigger uid=%s", uid)
                         self._ensure_user_watchers(uid)
                     else:
+                        self.logger.info("registry_detach_trigger uid=%s reason=offline_or_expired", uid)
                         self._detach_user_watchers(uid, reason="offline_or_expired")
                 elif change.type.name == "REMOVED":
+                    self.logger.info("registry_detach_trigger uid=%s reason=registry_removed", uid)
                     self._detach_user_watchers(uid, reason="registry_removed")
         except Exception as e:
             self.logger.error("registry_snapshot error=%s", repr(e))
@@ -95,28 +117,46 @@ class ListenersManager:
         with self._lock:
             already = uid in self._user_unsubs
         if already:
+            self.logger.info("user_attach_skip uid=%s reason=already_attached", uid)
             return
-        self.logger.info("user_attach uid=%s", uid)
+        self.logger.info("user_attach_start uid=%s", uid)
         unsubs: List[Callable[[], None]] = []
         try:
+            self.logger.info("user_attach_firebase_query uid=%s", uid)
             q = (
                 self.db.collection("clients").document(uid)
                 .collection("notifications")
                 .where("read", "==", False)
             )
+            self.logger.info("user_attach_firebase_listener uid=%s", uid)
             unsub_notif = q.on_snapshot(lambda docs, changes, rt: self._on_notifications(uid, docs, changes, rt))  # type: ignore[arg-type]
             unsubs.append(unsub_notif)
+            self.logger.info("user_attach_notification_listener_attached uid=%s", uid)
 
+            self.logger.info("user_attach_publish_sync_notifications uid=%s", uid)
             self._publish_notifications_sync(uid)
 
             # Messages directs (Firebase Realtime Database)
+            self.logger.info("user_attach_rtdb_messages uid=%s", uid)
             unsub_msg = self._start_direct_messages_listener(uid)
             if unsub_msg:
                 unsubs.append(unsub_msg)
+                self.logger.info("user_attach_message_listener_attached uid=%s", uid)
             self._publish_messages_sync(uid)
+
+            # Workflow Listener (surveillance des documents task_manager)
+            if self._workflow_enabled:
+                self.logger.info("user_attach_workflow_listener uid=%s", uid)
+                workflow_unsubs = self._start_workflow_listener(uid)
+                if workflow_unsubs:
+                    unsubs.extend(workflow_unsubs)
+                    with self._lock:
+                        self._workflow_unsubs[uid] = workflow_unsubs
+                    self.logger.info("user_attach_workflow_listener_attached uid=%s listeners_count=%s", uid, len(workflow_unsubs))
 
             with self._lock:
                 self._user_unsubs[uid] = unsubs
+            self.logger.info("user_attach_complete uid=%s listeners_count=%s", uid, len(unsubs))
         except Exception as e:
             self.logger.error("user_attach_error uid=%s error=%s", uid, repr(e))
             for u in unsubs:
@@ -128,8 +168,14 @@ class ListenersManager:
     def _detach_user_watchers(self, uid: str, reason: str) -> None:
         with self._lock:
             unsubs = self._user_unsubs.pop(uid, [])
-        if unsubs:
-            self.logger.info("user_detach uid=%s reason=%s", uid, reason)
+            workflow_unsubs = self._workflow_unsubs.pop(uid, [])
+            # Nettoyer le cache workflow pour cet utilisateur
+            self._workflow_cache.pop(uid, None)
+
+        if unsubs or workflow_unsubs:
+            self.logger.info("user_detach uid=%s reason=%s listeners=%s workflow=%s", uid, reason, len(unsubs), len(workflow_unsubs))
+
+        # Détacher les listeners standards
         for u in unsubs:
             try:
                 # Certains listeners renvoient un objet avec .close(), d'autres une fonction
@@ -142,6 +188,23 @@ class ListenersManager:
                         pass
             except Exception as e:
                 self.logger.error("user_unsub_error uid=%s error=%s", uid, repr(e))
+
+        # Détacher les workflow listeners
+        for u in workflow_unsubs:
+            try:
+                if callable(u):
+                    u()  # type: ignore[misc]
+                elif hasattr(u, "close"):
+                    try:
+                        u.close()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+            except Exception as e:
+                self.logger.error("workflow_unsub_error uid=%s error=%s", uid, repr(e))
+
+    def publish(self, uid: str, payload: dict) -> None:
+        """Méthode publique pour publier des messages via Redis/WS"""
+        self._publish(uid, payload)
 
     def _publish(self, uid: str, payload: dict) -> None:
         evt_type = str(payload.get("type", ""))
@@ -216,9 +279,14 @@ class ListenersManager:
 
     def _on_notifications(self, uid: str, docs, changes, read_time) -> None:  # type: ignore[no-untyped-def]
         try:
+            self.logger.info("notifications_change_triggered uid=%s changes_count=%s", uid, len(changes))
+            for change in changes:
+                self.logger.info("notification_change uid=%s doc_id=%s type=%s", uid, change.document.id, change.type.name)
             # Pour compat historique, republier un snapshot complet formaté
             # à chaque changement (add/update/remove)
+            self.logger.info("notifications_resync_start uid=%s", uid)
             self._publish_notifications_sync(uid)
+            self.logger.info("notifications_resync_complete uid=%s", uid)
         except Exception as e:
             self.logger.error("notif_change_error uid=%s error=%s", uid, repr(e))
 
@@ -395,6 +463,174 @@ class ListenersManager:
             self.logger.error("chat_listener_error uid=%s error=%s", uid, repr(e))
             return None
 
+    def _start_workflow_listener(self, uid: str) -> List[Callable[[], None]]:
+        """Démarre le listener workflow pour un utilisateur donné.
+
+        Surveille tous les documents dans clients/{uid}/task_manager/ pour:
+        - Les changements dans document.initial_data (données de facture)
+        - Les changements dans APBookeeper_step_status (étapes de workflow)
+
+        Returns:
+            List[Callable]: Liste des fonctions de désabonnement
+        """
+        unsubs: List[Callable[[], None]] = []
+
+        try:
+            self.logger.info("workflow_listener_start uid=%s", uid)
+
+            # Initialiser le cache pour cet utilisateur
+            cache_key = uid
+            if cache_key not in self._workflow_cache:
+                self._workflow_cache[cache_key] = {}
+
+            # Surveiller tous les documents dans task_manager
+            task_manager_collection = (
+                self.db.collection("clients")
+                .document(uid)
+                .collection("task_manager")
+            )
+
+            def on_task_manager_snapshot(docs, changes, read_time):
+                try:
+                    self._on_workflow_changes(uid, docs, changes, read_time)
+                except Exception as e:
+                    self.logger.error("workflow_snapshot_error uid=%s error=%s", uid, repr(e))
+
+            # Attacher le listener sur toute la collection task_manager
+            unsub_workflow = task_manager_collection.on_snapshot(on_task_manager_snapshot)
+            unsubs.append(unsub_workflow)
+
+            self.logger.info("workflow_listener_attached uid=%s", uid)
+
+        except Exception as e:
+            self.logger.error("workflow_listener_error uid=%s error=%s", uid, repr(e))
+            # Nettoyer les listeners en cas d'erreur
+            for u in unsubs:
+                try:
+                    u()
+                except Exception:
+                    pass
+            return []
+
+        return unsubs
+
+    def _on_workflow_changes(self, uid: str, docs, changes, read_time) -> None:
+        """Traite les changements dans les documents task_manager."""
+        try:
+            for change in changes:
+                doc = change.document
+                job_id = doc.id
+                doc_data = doc.to_dict() or {}
+
+                # Traiter les changements de données de facture
+                self._process_invoice_changes(uid, job_id, doc_data)
+
+                # Traiter les changements d'étapes APBookeeper
+                self._process_step_changes(uid, job_id, doc_data)
+
+        except Exception as e:
+            self.logger.error("workflow_changes_error uid=%s error=%s", uid, repr(e))
+
+    def _process_invoice_changes(self, uid: str, job_id: str, doc_data: dict) -> None:
+        """Traite les changements dans les données de facture."""
+        try:
+            # Extraire les données de facture
+            document = doc_data.get("document", {})
+            initial_data = document.get("initial_data", {})
+
+            if not initial_data:
+                return
+
+            # Champs de facture à surveiller
+            invoice_fields = [
+                "invoiceReference", "recipient", "invoiceDescription",
+                "totalAmountDueVATExcluded", "totalAmountDueVATIncluded", "VATAmount",
+                "recipientAddress", "dueDate", "sender", "invoiceDate",
+                "currency", "VATPercentages", "sender_country",
+                "account_number", "account_name"
+            ]
+
+            # Construire la clé de cache
+            cache_key = f"{uid}_invoice_{job_id}"
+            previous_data = self._workflow_cache.get(cache_key, {})
+
+            # Détecter les changements
+            invoice_changes = {}
+            for field in invoice_fields:
+                current_value = initial_data.get(field)
+                previous_value = previous_data.get(field)
+
+                if current_value != previous_value:
+                    invoice_changes[field] = current_value
+
+            # Publier seulement s'il y a des changements
+            if invoice_changes:
+                self.logger.info("workflow_invoice_changes uid=%s job_id=%s changes=%s", uid, job_id, list(invoice_changes.keys()))
+
+                payload = {
+                    "type": "workflow.invoice_update",
+                    "uid": uid,
+                    "job_id": job_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "payload": {
+                        "invoice_changes": invoice_changes
+                    }
+                }
+
+                self._publish(uid, payload)
+
+                # Mettre à jour le cache
+                self._workflow_cache[cache_key] = initial_data.copy()
+
+        except Exception as e:
+            self.logger.error("invoice_changes_error uid=%s job_id=%s error=%s", uid, job_id, repr(e))
+
+    def _process_step_changes(self, uid: str, job_id: str, doc_data: dict) -> None:
+        """Traite les changements dans les étapes APBookeeper."""
+        try:
+            # Extraire les données d'étapes
+            step_status = doc_data.get("APBookeeper_step_status", {})
+
+            if not step_status:
+                return
+
+            # Construire la clé de cache
+            cache_key = f"{uid}_steps_{job_id}"
+            previous_steps = self._workflow_cache.get(cache_key, {})
+
+            # Détecter les changements d'étapes
+            step_changes = {}
+            for step_name, current_count in step_status.items():
+                previous_count = previous_steps.get(step_name, 0)
+
+                if current_count != previous_count:
+                    step_changes[step_name] = current_count
+
+            # Publier seulement s'il y a des changements
+            if step_changes:
+                self.logger.info("workflow_step_changes uid=%s job_id=%s changes=%s", uid, job_id, step_changes)
+
+                payload = {
+                    "type": "workflow.step_update",
+                    "uid": uid,
+                    "job_id": job_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "payload": {
+                        "step_changes": {
+                            "APBookeeper_step_status": step_changes
+                        }
+                    }
+                }
+
+                self._publish(uid, payload)
+
+                # Mettre à jour le cache
+                self._workflow_cache[cache_key] = step_status.copy()
+
+        except Exception as e:
+            self.logger.error("step_changes_error uid=%s job_id=%s error=%s", uid, job_id, repr(e))
+
+
 def _doc_payload(doc: DocumentSnapshot) -> dict:
     data = doc.to_dict() or {}
     data["doc_id"] = doc.id
@@ -492,6 +728,7 @@ def _format_message_item(msg: dict) -> dict:
       "timestamp": _safe_iso(msg.get("timestamp")),
       "additional_info": additional_info if isinstance(additional_info, str) else str(additional_info),
     }
+
 
 
 def _get_rtdb_ref(path: str):
