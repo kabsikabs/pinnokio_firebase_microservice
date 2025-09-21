@@ -57,6 +57,9 @@ jobs:
           image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
           environment-variables: |
             GOOGLE_SERVICE_ACCOUNT_JSON_B64=${{ secrets.GCP_SECRET_B64 }}
+            RPC_IDEMP_DISABLE=${{ secrets.RPC_IDEMP_DISABLE }}
+            RPC_IDEMP_DISABLE_METHODS=${{ secrets.RPC_IDEMP_DISABLE_METHODS }}
+            RPC_IDEMP_TTL=${{ secrets.RPC_IDEMP_TTL }}
 
       - name: Ensure ECS service exists (create if missing)
         env:
