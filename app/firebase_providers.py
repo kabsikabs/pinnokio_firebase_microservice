@@ -1869,7 +1869,7 @@ class FirebaseManagement:
                 'message': 'Une erreur est survenue lors de l\'initialisation du paiement'
             }
     
-    def _process_immediate_top_up(self, user_id: str,amount: float, transaction_ref: str=None) -> None:
+    def x_process_immediate_top_up(self, user_id: str,amount: float, transaction_ref: str=None) -> None:
         """
         Traite immédiatement un top-up sans passer par Stripe (méthode interne).
         Utilisée lorsque Stripe n'est pas configuré ou pour le mode de développement.
@@ -1906,6 +1906,48 @@ class FirebaseManagement:
             'last_updated': firestore.SERVER_TIMESTAMP
         }, merge=True)
     
+    def process_immediate_top_up(self, user_id: str,amount: float, transaction_ref: str=None) -> None:
+        """
+        Traite immédiatement un top-up sans passer par Stripe (méthode interne).
+        Utilisée lorsque Stripe n'est pas configuré ou pour le mode de développement.
+        
+        NOTE: En mode LOCAL/PROD, cette méthode est automatiquement déléguée au microservice
+        via le proxy RPC dans __getattribute__.
+        """
+        # Mettre à jour la transaction comme "added"
+        if transaction_ref:
+            transaction_ref.update({
+                'status': 'added',
+                'processed_at': firestore.SERVER_TIMESTAMP
+            })
+        
+        # Mettre à jour le solde actuel
+        balance_doc_ref = self.db.document(f"clients/{user_id}/billing/current_balance")
+        balance_doc = balance_doc_ref.get()
+        
+        # Initialiser les valeurs du solde
+        current_balance = 0.0
+        current_topping = 0.0
+        
+        if balance_doc.exists:
+            balance_data = balance_doc.to_dict()
+            current_balance = float(balance_data.get('current_balance', 0.0))
+            current_topping = float(balance_data.get('current_topping', 0.0))
+        
+        # Mettre à jour les valeurs
+        current_topping += amount
+        current_balance += amount
+        
+        # Enregistrer les nouvelles valeurs
+        balance_doc_ref.set({
+            'current_balance': current_balance,
+            'current_topping': current_topping,
+            'timestamp_topping': firestore.SERVER_TIMESTAMP,
+            'last_updated': firestore.SERVER_TIMESTAMP
+        }, merge=True)
+    
+
+
     def process_stripe_webhook(self, event_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Traite les webhooks Stripe pour compléter les transactions de top-up.
