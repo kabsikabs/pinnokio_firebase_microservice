@@ -11,7 +11,7 @@ from firebase_admin import credentials
 from google.cloud.firestore_v1.base_query import FieldFilter
 from .firebase_client import get_firestore, get_firebase_app
 from .tools.g_cred import get_secret
-
+import uuid
 try:
     import stripe  # type: ignore
 except Exception:  # stripe facultatif si non utilisé immédiatement
