@@ -1,0 +1,139 @@
+{
+  "family": "pinnokio_microservice_unified",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::654654322636:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "api_server",
+      "image": "REPLACE_IMAGE",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8090,
+          "hostPort": 8090,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {"name": "CONTAINER_TYPE", "value": "api"},
+        {"name": "AWS_REGION_NAME", "value": "us-east-1"},
+        {"name": "GOOGLE_PROJECT_ID", "value": "pinnokio-gpt"},
+        {"name": "FIREBASE_ADMIN_SECRET_NAME", "value": "pinnokio_firebase_admin"},
+        {"name": "GOOGLE_SERVICE_ACCOUNT_SECRET", "value": "service_account_key"},
+        {"name": "GOOGLE_APPLICATION_CREDENTIALS", "value": ""},
+        {"name": "AWS_SECRET_NAME", "value": ""},
+        {"name": "LISTENERS_REDIS_HOST", "value": "pinnokio-cache-7uum2j.serverless.use1.cache.amazonaws.com"},
+        {"name": "LISTENERS_REDIS_PORT", "value": "6379"},
+        {"name": "LISTENERS_REDIS_PASSWORD", "value": ""},
+        {"name": "LISTENERS_REDIS_TLS", "value": "true"},
+        {"name": "LISTENERS_REDIS_TLS_VERIFY", "value": "true"},
+        {"name": "LISTENERS_REDIS_DB", "value": "0"},
+        {"name": "LISTENERS_CHANNEL_PREFIX", "value": "user:"},
+        {"name": "USE_LOCAL_REDIS", "value": "false"},
+        {"name": "PORT", "value": "8090"},
+        {"name": "STRIPE_KEYS", "value": "stripe_api_keys"},
+        {"name": "STRIPE_SUCCESS_URL", "value": "https://app.pinnokio.com/payment-success"},
+        {"name": "STRIPE_CANCEL_URL", "value": "https://app.pinnokio.com/payment-canceled"},
+        {"name": "UNIFIED_REGISTRY_ENABLED", "value": "false"},
+        {"name": "REGISTRY_DEBUG", "value": "false"},
+        {"name": "CHROMA_HOST", "value": "35.180.247.70"},
+        {"name": "CHROMA_PORT", "value": "8000"},
+        {"name": "CHROMA_SSL", "value": "False"},
+        {"name": "OPENAI_PINNOKIO_SECRET", "value": "openai_pinnokio"}
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/pinnokio_microservice_unified",
+          "awslogs-create-group": "true",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "api"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8090/healthz || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      }
+    },
+    {
+      "name": "celery_worker",
+      "image": "REPLACE_IMAGE",
+      "essential": false,
+      "environment": [
+        {"name": "CONTAINER_TYPE", "value": "worker"},
+        {"name": "CELERY_CONCURRENCY", "value": "2"},
+        {"name": "CELERY_QUEUES", "value": "default,computation,llm"},
+        {"name": "AWS_REGION_NAME", "value": "us-east-1"},
+        {"name": "GOOGLE_PROJECT_ID", "value": "pinnokio-gpt"},
+        {"name": "FIREBASE_ADMIN_SECRET_NAME", "value": "pinnokio_firebase_admin"},
+        {"name": "GOOGLE_SERVICE_ACCOUNT_SECRET", "value": "service_account_key"},
+        {"name": "LISTENERS_REDIS_HOST", "value": "pinnokio-cache-7uum2j.serverless.use1.cache.amazonaws.com"},
+        {"name": "LISTENERS_REDIS_PORT", "value": "6379"},
+        {"name": "LISTENERS_REDIS_PASSWORD", "value": ""},
+        {"name": "LISTENERS_REDIS_TLS", "value": "true"},
+        {"name": "LISTENERS_REDIS_TLS_VERIFY", "value": "true"},
+        {"name": "LISTENERS_REDIS_DB", "value": "0"},
+        {"name": "USE_LOCAL_REDIS", "value": "false"},
+        {"name": "UNIFIED_REGISTRY_ENABLED", "value": "false"},
+        {"name": "REGISTRY_DEBUG", "value": "false"},
+        {"name": "CHROMA_HOST", "value": "35.180.247.70"},
+        {"name": "CHROMA_PORT", "value": "8000"},
+        {"name": "CHROMA_SSL", "value": "False"},
+        {"name": "OPENAI_PINNOKIO_SECRET", "value": "openai_pinnokio"}
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/pinnokio_microservice_unified",
+          "awslogs-create-group": "true",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "worker"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "celery -A app.task_service inspect ping || exit 1"],
+        "interval": 60,
+        "timeout": 10,
+        "retries": 3,
+        "startPeriod": 120
+      }
+    },
+    {
+      "name": "celery_beat",
+      "image": "REPLACE_IMAGE", 
+      "essential": false,
+      "environment": [
+        {"name": "CONTAINER_TYPE", "value": "beat"},
+        {"name": "AWS_REGION_NAME", "value": "us-east-1"},
+        {"name": "GOOGLE_PROJECT_ID", "value": "pinnokio-gpt"},
+        {"name": "FIREBASE_ADMIN_SECRET_NAME", "value": "pinnokio_firebase_admin"},
+        {"name": "GOOGLE_SERVICE_ACCOUNT_SECRET", "value": "service_account_key"},
+        {"name": "LISTENERS_REDIS_HOST", "value": "pinnokio-cache-7uum2j.serverless.use1.cache.amazonaws.com"},
+        {"name": "LISTENERS_REDIS_PORT", "value": "6379"},
+        {"name": "LISTENERS_REDIS_PASSWORD", "value": ""},
+        {"name": "LISTENERS_REDIS_TLS", "value": "true"},
+        {"name": "LISTENERS_REDIS_TLS_VERIFY", "value": "true"},
+        {"name": "LISTENERS_REDIS_DB", "value": "0"},
+        {"name": "USE_LOCAL_REDIS", "value": "false"},
+        {"name": "UNIFIED_REGISTRY_ENABLED", "value": "false"},
+        {"name": "REGISTRY_DEBUG", "value": "false"}
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/pinnokio_microservice_unified",
+          "awslogs-create-group": "true",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "beat"
+        }
+      }
+    }
+  ]
+}
+

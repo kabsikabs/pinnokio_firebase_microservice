@@ -9,3 +9,14 @@ grpcio==1.74.0
 tenacity==9.1.2
 pydantic>=2.11.0
 python-dotenv==1.1.1
+# ChromaDB dependencies (version compatible avec serveur existant)
+chromadb==0.4.14
+openai==0.28
+# Additional dependencies for ChromaDB
+numpy>=1.24.0
+pandas>=2.0.0
+requests>=2.31.0
+# Celery pour les tâches parallèles
+celery[redis]>=5.3.0
+# Stripe pour les paiements
+stripe==11.6.0

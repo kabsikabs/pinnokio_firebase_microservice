@@ -17,6 +17,7 @@ from .ws_hub import hub
 from google.cloud.firestore_v1 import SERVER_TIMESTAMP
 from .redis_client import get_redis
 from .firebase_providers import get_firebase_management, get_firebase_realtime
+from .chroma_vector_service import get_chroma_vector_service
 
 try:
     import redis  # type: ignore
@@ -262,9 +263,34 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
     if method.startswith("REGISTRY."):
         name = method.split(".", 1)[1]
         if name == "register_user":
-            return _registry_register_user, "REGISTRY"
+            # NOUVEAU: Utiliser le wrapper transparent (API identique)
+            from .registry_wrapper import get_registry_wrapper
+            return get_registry_wrapper().register_user, "REGISTRY"
         if name == "unregister_session":
-            return _registry_unregister_session, "REGISTRY"
+            # NOUVEAU: Utiliser le wrapper transparent (API identique)
+            from .registry_wrapper import get_registry_wrapper
+            return get_registry_wrapper().unregister_session, "REGISTRY"
+    if method.startswith("CHROMA_VECTOR."):
+        name = method.split(".", 1)[1]
+        target = getattr(get_chroma_vector_service(), name, None)
+        if callable(target):
+            return target, "CHROMA_VECTOR"
+    if method.startswith("TASK."):
+        name = method.split(".", 1)[1]
+        if name == "start_document_analysis":
+            return _start_document_analysis_task, "TASK"
+        if name == "start_vector_computation":
+            return _start_vector_computation_task, "TASK"
+        if name == "start_llm_conversation":
+            return _start_llm_conversation_task, "TASK"
+        if name == "get_task_status":
+            return _get_task_status, "TASK"
+    if method.startswith("UNIFIED_REGISTRY."):
+        name = method.split(".", 1)[1]
+        from .unified_registry import get_unified_registry
+        target = getattr(get_unified_registry(), name, None)
+        if callable(target):
+            return target, "UNIFIED_REGISTRY"
     raise KeyError(method)
 
 
@@ -539,6 +565,7 @@ async def _set_presence(uid: str, status: str = "online", ttl_seconds: int | Non
             except Exception:
                 ttl_seconds = 90
 
+        # ANCIEN système (maintenu pour compatibilité)
         db = get_firestore()
         doc = db.collection("listeners_registry").document(uid)
 
@@ -552,6 +579,17 @@ async def _set_presence(uid: str, status: str = "online", ttl_seconds: int | Non
             doc.set(payload, merge=True)
 
         await asyncio.to_thread(_write)
+        
+        # NOUVEAU système (si activé)
+        try:
+            from .registry_wrapper import get_registry_wrapper
+            wrapper = get_registry_wrapper()
+            if wrapper.unified_enabled:
+                wrapper.update_heartbeat(uid)
+        except Exception as e:
+            # Erreur silencieuse pour ne pas impacter l'ancien système
+            logger.debug("unified_heartbeat_error uid=%s error=%s", uid, repr(e))
+        
         logger.info("presence_update uid=%s status=%s ttl=%s", uid, status, ttl_seconds)
     except Exception as e:
         logger.error("presence_update_error uid=%s error=%s", uid, repr(e))
@@ -580,3 +618,114 @@ async def _presence_heartbeat(uid: str) -> None:
         pass
     except Exception as e:
         logger.error("presence_heartbeat_error uid=%s error=%s", uid, repr(e))
+
+
+# ===== Gestion des tâches parallèles =====
+
+def _start_document_analysis_task(user_id: str, document_data: dict, job_id: str) -> dict:
+    """Démarre une tâche d'analyse de document."""
+    try:
+        from .computation_tasks import compute_document_analysis
+        
+        task = compute_document_analysis.delay(user_id, document_data, job_id)
+        return {
+            "success": True,
+            "task_id": f"doc_analysis_{job_id}",
+            "celery_task_id": task.id,
+            "status": "queued",
+            "job_id": job_id
+        }
+    except Exception as e:
+        logger.error("start_document_analysis_error user_id=%s job_id=%s error=%s", user_id, job_id, repr(e))
+        return {
+            "success": False,
+            "error": str(e),
+            "job_id": job_id
+        }
+
+def _start_vector_computation_task(user_id: str, documents: list, collection_name: str) -> dict:
+    """Démarre une tâche de calcul vectoriel."""
+    try:
+        from .computation_tasks import compute_vector_embeddings
+        
+        task = compute_vector_embeddings.delay(user_id, documents, collection_name)
+        return {
+            "success": True,
+            "task_id": f"embeddings_{collection_name}",
+            "celery_task_id": task.id,
+            "status": "queued",
+            "collection_name": collection_name
+        }
+    except Exception as e:
+        logger.error("start_vector_computation_error user_id=%s collection=%s error=%s", user_id, collection_name, repr(e))
+        return {
+            "success": False,
+            "error": str(e),
+            "collection_name": collection_name
+        }
+
+def _start_llm_conversation_task(
+    user_id: str, 
+    company_id: str, 
+    prompt: str, 
+    conversation_id: str = None,
+    model: str = "gpt-4",
+    temperature: float = 0.7
+) -> dict:
+    """Démarre une tâche de conversation LLM."""
+    try:
+        from .computation_tasks import process_llm_conversation
+        import uuid
+        
+        if not conversation_id:
+            conversation_id = f"conv_{uuid.uuid4().hex[:12]}"
+        
+        task = process_llm_conversation.delay(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            company_id=company_id,
+            prompt=prompt,
+            model=model,
+            temperature=temperature
+        )
+        
+        return {
+            "success": True,
+            "conversation_id": conversation_id,
+            "task_id": f"llm_{conversation_id}",
+            "celery_task_id": task.id,
+            "status": "queued"
+        }
+    except Exception as e:
+        logger.error("start_llm_conversation_error user_id=%s company_id=%s error=%s", user_id, company_id, repr(e))
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+def _get_task_status(task_id: str) -> dict:
+    """Récupère le statut d'une tâche."""
+    try:
+        from .unified_registry import get_unified_registry
+        
+        registry = get_unified_registry()
+        task_registry = registry.get_task_registry(task_id)
+        
+        if not task_registry:
+            return {"success": False, "error": "Tâche non trouvée"}
+        
+        return {
+            "success": True,
+            "task_id": task_id,
+            "status": task_registry["task_info"]["status"],
+            "progress": task_registry["progress"],
+            "created_at": task_registry["task_info"]["created_at"],
+            "isolation": task_registry["isolation"]
+        }
+    except Exception as e:
+        logger.error("get_task_status_error task_id=%s error=%s", task_id, repr(e))
+        return {
+            "success": False,
+            "error": str(e),
+            "task_id": task_id
+        }

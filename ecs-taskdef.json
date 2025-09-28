@@ -32,7 +32,10 @@
         {"name": "LISTENERS_REDIS_DB", "value": "0"},
         {"name": "LISTENERS_CHANNEL_PREFIX", "value": "user:"},
         {"name": "USE_LOCAL_REDIS", "value": "false"},
-        {"name": "PORT", "value": "8090"}
+        {"name": "PORT", "value": "8090"},
+        {"name": "STRIPE_KEYS", "value": "stripe_keys"},
+        {"name": "STRIPE_SUCCESS_URL", "value": "https://www.pinnokioagent.com/payment-success/"},
+        {"name": "STRIPE_CANCEL_URL", "value": "https://www.pinnokioagent.com/payment-canceled/"}
       ],
       "logConfiguration": {
         "logDriver": "awslogs",

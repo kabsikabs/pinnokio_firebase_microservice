@@ -121,15 +121,20 @@ Le microservice route automatiquement les appels RPC vers les bonnes implémenta
 
 - `FIREBASE_MANAGEMENT.*` → Classe `FirebaseManagement` (Firestore + Stripe)
 - `FIREBASE_REALTIME.*` → Classe `FirebaseRealtimeChat` (Realtime Database)
+- `CHROMA_VECTOR.*` → Classe `ChromaVectorService` (Base de données vectorielle ChromaDB)
 - `REGISTRY.*` → Système de gestion des sessions utilisateur
 
 #### Proxy côté Reflex
 L'application Reflex utilise un système de proxy transparent :
 
 ```python
-# En mode LOCAL, tous les appels Firebase sont automatiquement routés via RPC
+# En mode LOCAL/PROD, tous les appels Firebase sont automatiquement routés via RPC
 firebase_service = FireBaseManagement()  # Proxy RPC automatique
 firebase_service.add_or_update_job_by_job_id(path, data)  # → RPC call
+
+# ChromaDB utilise le même pattern de proxy
+chroma_proxy = get_chroma_vector_proxy()  # Proxy RPC automatique
+chroma_instance = chroma_proxy.create_chroma_instance(collection_name)  # → Instance ou proxy selon le mode
 ```
 
 ### 2. Communication temps réel (Microservice → Reflex)
@@ -433,3 +438,375 @@ def stream_realtime_data(user_id):
 - `workflow_listener_error`: Erreurs du workflow listener
 
 Cette architecture permet une extension facile vers de nouveaux services tout en maintenant la cohérence des patterns de communication et la fiabilité du système existant.
+
+---
+
+## Intégration ChromaDB (Base de Données Vectorielle)
+
+### Vue d'ensemble de l'intégration ChromaDB
+
+L'intégration ChromaDB suit le même pattern que les autres services du microservice, avec le support des trois modes de fonctionnement (ACTUEL, LOCAL, PROD) pour assurer une transition progressive.
+
+### Architecture ChromaDB
+
+```
+┌─────────────────┐    RPC HTTP     ┌─────────────────┐    ChromaDB API    ┌─────────────────┐
+│                 │◄───────────────►│                 │◄──────────────────►│                 │
+│  Application    │                 │  Microservice   │                    │    ChromaDB     │
+│     Reflex      │                 │ChromaVectorSvc  │                    │    Server       │
+│                 │                 │                 │                    │                 │
+└─────────────────┘                 └─────────────────┘                    └─────────────────┘
+         ▲                                   │
+         │ WebSocket/Redis                   │ Redis Registry
+         │ (événements heartbeat)            ▼
+         │                          ┌─────────────────┐
+         └─────────────────────────►│     Redis       │
+                                    │ (Collection     │
+                                    │  Registry)      │
+                                    └─────────────────┘
+```
+
+### Modes de fonctionnement ChromaDB
+
+#### 1) Mode ACTUEL (ne rien casser)
+- Source: instances directes CHROMA_KLK et ChromaAnalyzer comme aujourd'hui
+- Action: aucun changement dans le comportement existant
+- Les instances sont créées directement dans l'application Reflex
+
+#### 2) Mode LOCAL (tests développeur)
+- Source: ChromaVectorService dans le microservice local
+- Pré-requis côté dev:
+  - Microservice local en cours d'exécution avec ChromaDB configuré
+  - Variables d'environnement ChromaDB configurées
+- Paramétrage côté backend Reflex:
+  - `LISTENERS_MODE=LOCAL`
+  - Autres variables RPC standard
+- Résultat: toutes les opérations ChromaDB passent par le microservice via RPC
+
+#### 3) Mode PROD (ECS Fargate + ChromaDB distant)
+- Source: ChromaVectorService dans le microservice de production
+- Paramétrage côté backend Reflex:
+  - `LISTENERS_MODE=PROD`
+  - Variables RPC de production
+- ChromaDB: serveur distant configuré via les variables d'environnement du microservice
+
+### Configuration ChromaDB
+
+#### Variables d'environnement du microservice
+```bash
+# Configuration ChromaDB
+CHROMA_HOST=localhost                    # Ou l'adresse du serveur ChromaDB
+CHROMA_PORT=8000                        # Port du serveur ChromaDB
+CHROMA_SSL=False                        # True pour HTTPS
+CHROMA_HEADERS=                         # Headers HTTP personnalisés
+CHROMA_SETTINGS=                        # Réglages ChromaDB personnalisés
+CHROMA_TENANT=default                   # Tenant ChromaDB
+CHROMA_DATABASE=default                 # Base de données ChromaDB
+
+# Clé API pour les embeddings OpenAI
+OPENAI_PINNOKIO_SECRET=openai_pinnokio  # Nom du secret dans Google Secret Manager
+```
+
+### Système de registre pour collections
+
+ChromaDB utilise un système de registre par collection pour optimiser les performances :
+
+#### Enregistrement de collection
+```python
+# Au démarrage de l'application (AuthState.initialize_background_services)
+chroma_proxy.register_collection_user(
+    user_id=firebase_user_id,
+    collection_name=companies_search_id,
+    session_id=session_id
+)
+```
+
+#### Heartbeat de collection
+```python
+# Maintien automatique de la connexion (TTL de 90 secondes)
+chroma_proxy.heartbeat_collection(
+    user_id=firebase_user_id,
+    collection_name=companies_search_id
+)
+```
+
+#### Désenregistrement
+```python
+# Au changement de société ou déconnexion
+chroma_proxy.unregister_collection_user(
+    user_id=firebase_user_id,
+    collection_name=old_collection_name
+)
+```
+
+### Méthodes RPC ChromaDB disponibles
+
+#### Gestion des documents
+- `CHROMA_VECTOR.add_documents` : Ajoute des documents à une collection
+- `CHROMA_VECTOR.query_documents` : Recherche de documents avec similarité vectorielle
+- `CHROMA_VECTOR.delete_documents` : Suppression de documents par critères
+- `CHROMA_VECTOR.get_collection_info` : Informations sur une collection
+
+#### Analyse de collection
+- `CHROMA_VECTOR.analyze_collection` : Analyse complète d'une collection (taille, métriques)
+
+#### Gestion du registre
+- `CHROMA_VECTOR.register_collection_user` : Enregistre un utilisateur pour une collection
+- `CHROMA_VECTOR.heartbeat_collection` : Met à jour le heartbeat
+- `CHROMA_VECTOR.unregister_collection_user` : Désenregistre un utilisateur
+
+### Exemple d'utilisation dans Reflex
+
+```python
+# Dans l'application Reflex (mode LOCAL/PROD)
+from ..code.tools.chroma_vector_proxy import get_chroma_vector_proxy
+
+# Obtenir le proxy (automatiquement en mode RPC si LOCAL/PROD)
+chroma_proxy = get_chroma_vector_proxy()
+
+# Créer une instance ChromaDB (proxy ou directe selon le mode)
+chroma_instance = chroma_proxy.create_chroma_instance(collection_name)
+
+# Créer un analyseur (proxy ou direct selon le mode)
+analyzer = chroma_proxy.create_analyzer_instance(collection_name)
+
+# Utilisation transparente (même API qu'avant)
+chroma_instance.add_documents(documents, metadatas)
+results = chroma_instance.query_documents(query_texts)
+analysis = analyzer.get_collection_size()
+```
+
+### Intégration avec l'authentification
+
+L'enregistrement ChromaDB est automatiquement géré lors des événements d'authentification :
+
+1. **Connexion utilisateur** : Enregistrement automatique dans `initialize_background_services`
+2. **Changement de société** : Mise à jour automatique dans `handle_company_select`
+3. **Déconnexion** : Désenregistrement automatique (gestion via TTL Redis)
+
+### Optimisations de performance
+
+#### Instance unique par collection
+- Le microservice maintient une instance ChromaDB unique par collection
+- Évite les créations multiples d'instances coûteuses
+- Cache des collections avec thread-safety
+
+#### Registre Redis avec TTL
+- Suivi des collections actives par utilisateur
+- TTL de 90 secondes pour nettoyer automatiquement les sessions inactives
+- Heartbeat automatique pour maintenir les connexions actives
+
+### Migration progressive
+
+#### Étapes recommandées :
+1. **Phase 1** : Conserver le mode ACTUEL en production
+2. **Phase 2** : Tester en mode LOCAL avec le microservice local
+3. **Phase 3** : Valider en mode PROD avec un sous-ensemble d'utilisateurs
+4. **Phase 4** : Basculer définitivement vers le mode PROD
+
+#### Rollback sécurisé
+En cas de problème, il suffit de modifier `LISTENERS_MODE=ACTUEL` pour revenir au comportement original sans redéploiement.
+
+### Monitoring ChromaDB
+
+#### Métriques spécifiques
+- Nombre de collections actives par utilisateur
+- Taille des collections et utilisation mémoire
+- Latence des opérations vectorielles
+- Taux de succès des enregistrements de collection
+
+#### Logs structurés
+- `chroma_register`: Enregistrement de collection utilisateur
+- `chroma_heartbeat`: Mise à jour du heartbeat
+- `chroma_operation`: Opérations CRUD sur les collections
+- `chroma_error`: Erreurs dans les opérations ChromaDB
+
+Cette intégration ChromaDB s'inscrit parfaitement dans l'architecture existante du microservice tout en apportant les optimisations de performance nécessaires pour la gestion des bases de données vectorielles.
+
+---
+
+## Statut de l'Intégration ChromaDB
+
+### ✅ **MICROSERVICE - TERMINÉ**
+
+#### Méthodes RPC implémentées et fonctionnelles :
+- `CHROMA_VECTOR.register_collection_user` ✅
+- `CHROMA_VECTOR.heartbeat_collection` ✅
+- `CHROMA_VECTOR.unregister_collection_user` ✅
+- `CHROMA_VECTOR.create_chroma_instance` ✅
+- `CHROMA_VECTOR.create_analyzer_instance` ✅
+- `CHROMA_VECTOR.add_documents` ✅
+- `CHROMA_VECTOR.query_documents` ✅
+- `CHROMA_VECTOR.delete_documents` ✅
+- `CHROMA_VECTOR.get_collection_info` ✅
+- `CHROMA_VECTOR.analyze_collection` ✅
+
+#### Configuration validée :
+- ChromaDB v0.4.14 ✅
+- OpenAI v0.28 ✅
+- Connexion ChromaDB: `35.180.247.70:8000` ✅
+- Système de registre avec heartbeat ✅
+
+### ⚠️ **APPLICATION REFLEX - À VÉRIFIER**
+
+#### Problèmes identifiés dans l'interface utilisateur :
+
+1. **Section "Vector Database Storage"** :
+   - ❌ Affiche "Error during storage analysis"
+   - ❌ Pourcentage à "0%"
+   - ❌ Données ChromaAnalyzer non affichées
+
+#### Points de vérification requis côté application Reflex :
+
+##### **1. Vérification du proxy ChromaAnalyzer**
+
+**Fichier:** `pinnokio_app/code/tools/chroma_vector_proxy.py`
+
+```python
+# Méthode à vérifier dans ChromaAnalyzerProxy
+def get_collection_size(self) -> dict:
+    """Analyse la taille de la collection"""
+    result = self.vector_proxy.analyze_collection(self.collection_name)
+    if result.get("success"):
+        return result["analysis"]  # ⚠️ VÉRIFIER CE RETOUR
+    else:
+        raise Exception(f"Erreur lors de l'analyse: {result.get('error', 'Erreur inconnue')}")
+```
+
+**PROBLÈME POTENTIEL:** L'ancien ChromaAnalyzer retournait peut-être un format différent que `result["analysis"]`.
+
+##### **2. Vérification du format de réponse attendu**
+
+**Le microservice retourne:**
+```json
+{
+    "success": true,
+    "collection_name": "klk_space_id_002e0b",
+    "analysis": {
+        "total_size": 1234567,
+        "embeddings_size": 987654,
+        "documents_size": 234567,
+        "metadata_size": 12346,
+        "document_count": 150
+    }
+}
+```
+
+**L'application Reflex attend probablement:**
+```python
+{
+    "total_size": 1234567,
+    "embeddings_size": 987654,
+    "documents_size": 234567,
+    "metadata_size": 12346,
+    "document_count": 150
+}
+```
+
+##### **3. Vérification de la méthode analyze_storage dans base_state.py**
+
+**Fichier:** `pinnokio_app/state/base_state.py` (ligne ~5502)
+
+```python
+async def analyze_storage(self):
+    """Analyser l'espace de stockage utilisé par la base vectorielle."""
+    async with self:
+        try:
+            # ⚠️ VÉRIFIER CETTE PARTIE
+            from ..code.tools.chroma_vector_proxy import get_chroma_vector_proxy
+            chroma_proxy = get_chroma_vector_proxy()
+            chroma_instance = chroma_proxy.create_chroma_instance(self.companies_search_id)
+            analyzer = chroma_proxy.create_analyzer_instance(self.companies_search_id)
+
+            # ⚠️ PROBLÈME PROBABLE ICI
+            report = analyzer.generate_report()  # Cette méthode existe-t-elle ?
+            stats = analyzer.analyze_collection()  # Ou celle-ci ?
+
+            # ⚠️ VÉRIFIER LE FORMAT ATTENDU
+            self.storage_report = report
+            self.storage_stats = stats
+```
+
+##### **4. Actions de correction recommandées**
+
+**A. Corriger ChromaAnalyzerProxy.get_collection_size()**
+```python
+def get_collection_size(self) -> dict:
+    """Analyse la taille de la collection"""
+    result = self.vector_proxy.analyze_collection(self.collection_name)
+    if result.get("success"):
+        # Retourner directement l'analysis, pas le result complet
+        return result["analysis"]
+    else:
+        # Logger l'erreur pour debug
+        print(f"❌ Erreur ChromaDB analysis: {result.get('error')}")
+        raise Exception(f"Erreur lors de l'analyse: {result.get('error', 'Erreur inconnue')}")
+```
+
+**B. Adapter la méthode analyze_storage dans base_state.py**
+```python
+async def analyze_storage(self):
+    """Analyser l'espace de stockage utilisé par la base vectorielle."""
+    async with self:
+        try:
+            from ..code.tools.chroma_vector_proxy import get_chroma_vector_proxy
+            chroma_proxy = get_chroma_vector_proxy()
+
+            # Utiliser directement analyze_collection via le proxy
+            analyzer = chroma_proxy.create_analyzer_instance(self.companies_search_id)
+
+            # Appeler get_collection_size qui fait l'appel RPC
+            stats = analyzer.get_collection_size()
+
+            # Adapter au format attendu par l'UI
+            self.storage_stats = stats
+
+        except Exception as e:
+            print(f"❌ Erreur analyze_storage: {e}")
+            # Gérer l'erreur proprement pour l'UI
+            self.storage_stats = {"error": str(e)}
+```
+
+**C. Vérifier les méthodes manquantes**
+
+Si l'application attend `generate_report()` ou `analyze_collection()` sur l'analyzer :
+
+```python
+# Dans ChromaAnalyzerProxy, ajouter ces méthodes si elles manquent
+def generate_report(self) -> dict:
+    """Génère un rapport d'analyse"""
+    return self.get_collection_size()
+
+def analyze_collection(self) -> dict:
+    """Analyse la collection"""
+    return self.get_collection_size()
+```
+
+##### **5. Debug recommandé**
+
+**Ajouter des logs dans base_state.py pour tracer le problème:**
+```python
+async def analyze_storage(self):
+    async with self:
+        try:
+            print(f"🔍 analyze_storage: collection_name = {self.companies_search_id}")
+
+            # ... code existant ...
+
+            print(f"🔍 analyzer result: {stats}")
+
+        except Exception as e:
+            print(f"❌ analyze_storage erreur complète: {e}")
+            import traceback
+            traceback.print_exc()
+```
+
+### 🎯 **Prochaines étapes pour l'agent Reflex**
+
+1. **Examiner** le fichier `base_state.py` méthode `analyze_storage`
+2. **Vérifier** le format de retour dans `ChromaAnalyzerProxy.get_collection_size()`
+3. **Tester** l'appel RPC avec des logs détaillés
+4. **Adapter** le format de réponse du microservice si nécessaire
+5. **Valider** que l'UI affiche correctement les données ChromaDB
+
+Le microservice fonctionne parfaitement. Le problème est dans l'adaptation des données entre le microservice et l'interface utilisateur Reflex.

@@ -1,5 +1,6 @@
 from __future__ import annotations
-
+import time
+import re
 import json
 import os
 import threading
@@ -12,6 +13,7 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 from .firebase_client import get_firestore, get_firebase_app
 from .tools.g_cred import get_secret
 import uuid
+
 try:
     import stripe  # type: ignore
 except Exception:  # stripe facultatif si non utilisé immédiatement
@@ -91,20 +93,33 @@ class FirebaseManagement:
 
     def _initialize_stripe(self):
         try:
+            # Initialiser les attributs par défaut
+            self.stripe_api_key = None
+            self.stripe_success_url = os.getenv("STRIPE_SUCCESS_URL", "http://localhost:3000/payment-success")
+            self.stripe_cancel_url = os.getenv("STRIPE_CANCEL_URL", "http://localhost:3000/payment-canceled")
+            
             secret_name = os.getenv("STRIPE_KEYS")
             if not secret_name:
+                print("⚠️  STRIPE_KEYS non configuré - Stripe désactivé")
                 return
+                
             keys_json = get_secret(secret_name)
             stripe_keys = json.loads(keys_json)
             self.stripe_api_key = stripe_keys.get("stripe_prod_key")
+            
             if stripe and self.stripe_api_key and not getattr(stripe, "_pinnokio_configured", False):
                 stripe.api_key = self.stripe_api_key
                 stripe._pinnokio_configured = True  # type: ignore[attr-defined]
-            self.stripe_success_url = os.getenv("STRIPE_SUCCESS_URL", "http://localhost:3000/payment-success")
-            self.stripe_cancel_url = os.getenv("STRIPE_CANCEL_URL", "http://localhost:3000/payment-canceled")
+                print("✅ Stripe configuré avec succès")
+            elif not stripe:
+                print("⚠️  Module stripe non disponible")
+            elif not self.stripe_api_key:
+                print("⚠️  Clé API Stripe manquante dans le secret")
+                
         except Exception as e:
             print(f"❌ Erreur lors de l'initialisation Stripe: {e}")
-            raise
+            # Ne pas lever l'exception - continuer sans Stripe
+            self.stripe_api_key = None
 
     @property
     def firestore_client(self):
@@ -1799,6 +1814,12 @@ class FirebaseManagement:
             
             # Créer une session de paiement Stripe
             try:
+                # Vérifier que Stripe est disponible et configuré
+                if not stripe:
+                    raise Exception("Module Stripe non disponible")
+                if not self.stripe_api_key:
+                    raise Exception("Clé API Stripe non configurée")
+                
                 # Conversion du montant en centimes pour Stripe
                 amount_in_cents = int(amount * 100)
                 
@@ -7735,7 +7756,7 @@ class FirebaseRealtimeChat:
         else:  # Par défaut, utilisez 'job_chats'
             return f'{space_code}/job_chats/{thread_key}'
     
-    def create_chat(self,user_id: str, space_code: str, thread_name: str, mode: str = 'chats') -> dict:
+    def create_chat(self,user_id: str, space_code: str, thread_name: str, mode: str = 'chats', chat_mode: str = 'general_chat',thread_key:str=None) -> dict:
         """
         Crée un nouveau thread de chat dans Firebase Realtime Database.
         
@@ -7743,15 +7764,27 @@ class FirebaseRealtimeChat:
             space_code (str): Code de l'espace (typiquement le companies_search_id)
             thread_name (str): Nom du nouveau thread/chat
             mode (str): Mode de groupement ('job_chats' ou 'chats')
+            chat_mode (str): Mode de fonctionnement du chat ('general_chat', 'onboarding_chat', etc.)
             
         Returns:
             dict: Informations sur le thread créé (thread_key, success, etc.)
         """
+        mode_env = os.getenv("LISTENERS_MODE", "ACTUEL").strip().upper()
+        if mode_env in ["LOCAL", "PROD"]:
+            try:
+                if os.getenv("LISTENERS_DEBUG", "false").lower() == "true":
+                    print(f"[FBR→RPC] create_chat uid={user_id} space={space_code} chat_mode={chat_mode}")
+            except Exception:
+                pass
+            return self._rpc("create_chat", user_id, space_code, thread_name, mode, chat_mode)
         try:
             
             
             # Générer un thread_key unique basé sur le timestamp et le nom
-            thread_key = f"{int(time.time())}_{re.sub(r'[^a-zA-Z0-9]', '_', thread_name)}"
+            if not thread_key:
+                thread_key = f"{int(time.time())}_{re.sub(r'[^a-zA-Z0-9]', '_', thread_name)}"
+            else:
+                thread_key = thread_key
             
             # Construire le chemin complet pour le nouveau thread
             path = f"{space_code}/{mode}/{thread_key}"
@@ -7759,8 +7792,10 @@ class FirebaseRealtimeChat:
             # Créer la structure initiale du thread
             thread_data = {
                 "thread_name": thread_name,
+                "thread_key": thread_key,
                 "created_at": str(datetime.now()),
                 "created_by": user_id,
+                "chat_mode": chat_mode,  # Ajouter le chat_mode dans les données du thread
                 "messages": {}  # Messages vides au départ
             }
             
@@ -7774,6 +7809,7 @@ class FirebaseRealtimeChat:
                 "success": success,
                 "thread_key": thread_key,
                 "mode": mode,
+                "chat_mode": chat_mode,
                 "name": thread_name,
                 "last_activity": str(datetime.now()),
                 "message_count": 0
@@ -7784,6 +7820,7 @@ class FirebaseRealtimeChat:
             import traceback
             traceback.print_exc()
             return {"success": False, "error": str(e)}
+
 
     def delete_chat(self, space_code: str, thread_key: str, mode: str = 'chats') -> bool:
         """
@@ -7823,6 +7860,55 @@ class FirebaseRealtimeChat:
             traceback.print_exc()
             return False
 
+    def rename_chat(self, space_code: str, thread_key: str, new_name: str, mode: str = 'chats') -> bool:
+        """
+        Renomme un thread de chat dans Firebase Realtime Database.
+        
+        Args:
+            space_code (str): Code de l'espace
+            thread_key (str): Identifiant du thread à renommer
+            new_name (str): Nouveau nom du thread
+            mode (str): Mode de groupement ('job_chats' ou 'chats')
+            
+        Returns:
+            bool: True si le renommage a réussi, False sinon
+        """
+        mode_env = os.getenv("LISTENERS_MODE", "ACTUEL").strip().upper()
+        if mode_env in ["LOCAL", "PROD"]:
+            try:
+                if os.getenv("LISTENERS_DEBUG", "false").lower() == "true":
+                    print(f"[FBR→RPC] rename_chat space={space_code} thread={thread_key} name={new_name}")
+            except Exception:
+                pass
+            return self._rpc("rename_chat", space_code, thread_key, new_name, mode)
+        try:
+            print(f"✏️ Renommage du chat: {thread_key} → '{new_name}' (mode: {mode})")
+            
+            # Construire le chemin complet
+            path = f"{space_code}/{mode}/{thread_key}"
+            
+            # Référence au thread
+            thread_ref = self.db.child(path)
+            
+            # Vérifier si le thread existe
+            thread_data = thread_ref.get()
+            if thread_data is None:
+                print(f"⚠️ Le thread {thread_key} n'existe pas")
+                return False
+            
+            # Mettre à jour le thread_name dans les métadonnées
+            thread_ref.child("thread_name").set(new_name)
+            print(f"✅ Chat {thread_key} renommé avec succès en '{new_name}'")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Erreur lors du renommage du chat: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+
 
     def get_all_threads(self, space_code: str, mode: str = 'job_chats') -> Dict[str, Dict]:
         """
@@ -7835,6 +7921,14 @@ class FirebaseRealtimeChat:
         Returns:
             Dict[str, Dict]: Dictionnaire des threads avec leurs métadonnées
         """
+        mode_env = os.getenv("LISTENERS_MODE", "ACTUEL").strip().upper()
+        if mode_env in ["LOCAL", "PROD"]:
+            try:
+                if os.getenv("LISTENERS_DEBUG", "false").lower() == "true":
+                    print(f"[FBR→RPC] get_all_threads space={space_code}")
+            except Exception:
+                pass
+            return self._rpc("get_all_threads", space_code, mode)
         try:
             print(f"📚 Récupération de tous les threads pour l'espace: {space_code}, mode: {mode}")
             
@@ -7860,6 +7954,7 @@ class FirebaseRealtimeChat:
                     thread_info = {
                         'thread_key': thread_key,
                         'thread_name': thread_data.get('thread_name', thread_key),
+                        'chat_mode': thread_data.get('chat_mode', 'general_chat'),  # ✅ Récupérer le chat_mode
                         'message_count': len(thread_data.get('messages', {})),
                         'last_activity': self._get_last_activity(thread_data.get('messages', {}))
                     }
@@ -7876,6 +7971,8 @@ class FirebaseRealtimeChat:
             print("  Traceback:")
             print(traceback.format_exc())
             return {}
+
+
 
     def _get_last_activity(self, messages: Dict) -> str:
         """

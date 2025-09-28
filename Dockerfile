@@ -5,15 +5,27 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
+# Installation des dépendances système (ajout de curl pour health checks)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir --upgrade pip
 
+# Installation des dépendances Python
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copie du code de l'application
 COPY app ./app
+COPY start.sh ./start.sh
+
+# Permissions d'exécution pour le script
+RUN chmod +x start.sh
 
 EXPOSE 8090
 ENV PORT=8090
+ENV CONTAINER_TYPE=api
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8090"]
+# Utilisation du script de démarrage flexible
+CMD ["./start.sh"]
