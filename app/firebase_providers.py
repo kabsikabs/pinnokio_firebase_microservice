@@ -3147,6 +3147,63 @@ class FirebaseManagement:
         print("[DEBUG] Listener pour statuts de transactions attaché avec succès au document")
         
         return document_watch
+
+    # ========== Transaction Status Listeners (Nouveau système) ==========
+
+    def start_transaction_listener(self, user_id: str, batch_id: str, initial_statuses: dict, callback=None) -> bool:
+        """Démarre un listener de transaction status via le système unifié de listeners.
+        
+        Cette méthode remplace watch_transaction_status_changes pour résoudre l'erreur
+        'Object of type function is not JSON serializable' en déléguant vers ListenersManager.
+        
+        Args:
+            user_id (str): ID de l'utilisateur Firebase
+            batch_id (str): ID du batch de transactions (ex: bank_batch_7196d7f1d5)
+            initial_statuses (dict): Statuts initiaux des transactions {"transaction_id": "status", ...}
+            callback: Ignoré côté microservice (utilisé seulement côté Reflex pour BusConsumer)
+            
+        Returns:
+            bool: True si le listener a été démarré avec succès, False sinon
+        """
+        try:
+            # Log informatif si un callback est passé (pour debugging)
+            if callback is not None:
+                print(f"ℹ️ Callback ignoré côté microservice pour user_id={user_id}, batch_id={batch_id} (utilisation Redis pub/sub)")
+            
+            # Déléguer vers ListenersManager qui gère tous les listeners de manière centralisée
+            from .main import listeners_manager
+            if listeners_manager:
+                return listeners_manager.start_transaction_status_listener(user_id, batch_id, initial_statuses, callback)
+            else:
+                print("❌ ListenersManager non disponible")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Erreur lors du démarrage du transaction listener: {e}")
+            return False
+
+    def stop_transaction_listener(self, user_id: str, batch_id: str) -> bool:
+        """Arrête un listener de transaction status.
+        
+        Args:
+            user_id (str): ID de l'utilisateur Firebase
+            batch_id (str): ID du batch de transactions
+            
+        Returns:
+            bool: True si le listener a été arrêté avec succès, False sinon
+        """
+        try:
+            # Déléguer vers ListenersManager
+            from .main import listeners_manager
+            if listeners_manager:
+                return listeners_manager.stop_transaction_status_listener(user_id, batch_id)
+            else:
+                print("❌ ListenersManager non disponible")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Erreur lors de l'arrêt du transaction listener: {e}")
+            return False
     
     def get_open_job_id(self,user_id,departement, space_id):
         """

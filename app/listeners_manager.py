@@ -49,8 +49,10 @@ class ListenersManager:
         self._user_unsubs: Dict[str, List[Callable[[], None]]] = {}
         self._workflow_unsubs: Dict[str, List[Callable[[], None]]] = {}  # Workflow listeners
         self._workflow_cache: Dict[str, dict] = {}  # Cache des valeurs précédentes
+        self._transaction_listeners: Dict[str, Dict] = {}  # Transaction status listeners {listener_key: {watch, state}}
         self._lock = threading.Lock()
         self._workflow_enabled = self._get_workflow_config()
+        self._transaction_listener_enabled = self._get_transaction_listener_config()
 
     @property
     def listeners_count(self) -> int:
@@ -62,12 +64,26 @@ class ListenersManager:
         with self._lock:
             return len(self._workflow_unsubs)
 
+    @property
+    def transaction_listeners_count(self) -> int:
+        with self._lock:
+            return len(self._transaction_listeners)
+
     def _get_workflow_config(self) -> bool:
         """Récupère la configuration du workflow listener depuis les variables d'environnement ou secrets."""
         try:
             # Vérifier d'abord les variables d'environnement
             workflow_enabled = os.getenv("WORKFLOW_LISTENER_ENABLED", "true").lower()
             return workflow_enabled in ("true", "1", "yes", "on")
+        except Exception:
+            return True  # Activé par défaut
+
+    def _get_transaction_listener_config(self) -> bool:
+        """Récupère la configuration du transaction listener depuis les variables d'environnement ou secrets."""
+        try:
+            # Vérifier d'abord les variables d'environnement
+            transaction_enabled = os.getenv("TRANSACTION_LISTENER_ENABLED", "true").lower()
+            return transaction_enabled in ("true", "1", "yes", "on")
         except Exception:
             return True  # Activé par défaut
 
@@ -91,6 +107,16 @@ class ListenersManager:
                     except Exception as e:
                         self.logger.error("user_unsub uid=%s error=%s", uid, repr(e))
             self._user_unsubs.clear()
+            
+            # Nettoyer les transaction listeners
+            for listener_key, listener_info in self._transaction_listeners.items():
+                try:
+                    document_watch = listener_info.get('watch')
+                    if document_watch and callable(document_watch):
+                        document_watch()
+                except Exception as e:
+                    self.logger.error("transaction_listener_cleanup key=%s error=%s", listener_key, repr(e))
+            self._transaction_listeners.clear()
 
     def _on_registry_snapshot(self, docs, changes, read_time) -> None:  # type: ignore[no-untyped-def]
         try:
@@ -629,6 +655,211 @@ class ListenersManager:
 
         except Exception as e:
             self.logger.error("step_changes_error uid=%s job_id=%s error=%s", uid, job_id, repr(e))
+
+    # ========== Transaction Status Listeners ==========
+
+    def start_transaction_status_listener(self, user_id: str, batch_id: str, initial_statuses: dict, callback=None) -> bool:
+        """Démarre un listener de transaction status pour un batch spécifique.
+        
+        Args:
+            user_id (str): ID de l'utilisateur Firebase
+            batch_id (str): ID du batch de transactions
+            initial_statuses (dict): Statuts initiaux des transactions {"transaction_id": "status", ...}
+            callback: Ignoré côté microservice (paramètre pour compatibilité avec l'API Reflex)
+            
+        Returns:
+            bool: True si le listener a été démarré avec succès, False sinon
+        """
+        if not self._transaction_listener_enabled:
+            self.logger.info("transaction_listener_disabled user_id=%s batch_id=%s", user_id, batch_id)
+            return False
+        
+        # Log informatif si un callback est passé (pour debugging/compatibilité)
+        if callback is not None:
+            self.logger.info("transaction_listener_callback_ignored user_id=%s batch_id=%s reason=microservice_uses_redis_pubsub", user_id, batch_id)
+            
+        try:
+            listener_key = f"transaction_status_{user_id}_{batch_id}"
+            
+            # Vérifier si le listener existe déjà
+            with self._lock:
+                if listener_key in self._transaction_listeners:
+                    self.logger.info("transaction_listener_already_exists key=%s", listener_key)
+                    return True
+            
+            # Construire le chemin Firestore à écouter
+            if user_id:
+                firestore_path = f'clients/{user_id}/task_manager/{batch_id}'
+            else:
+                firestore_path = f"task_manager/{batch_id}"
+            
+            # Créer le listener Firestore
+            document_ref = self.db.document(firestore_path)
+            
+            # Mémoriser les statuts initiaux pour détecter les changements
+            listener_state = {
+                'user_id': user_id,
+                'batch_id': batch_id,
+                'initial_statuses': initial_statuses.copy(),
+                'acknowledged_statuses': {}
+            }
+            
+            # Attacher le listener avec callback
+            def on_snapshot(doc_snapshot, changes, read_time):
+                self._handle_transaction_status_change(listener_state, doc_snapshot, changes, read_time)
+            
+            document_watch = document_ref.on_snapshot(on_snapshot)
+            
+            # Stocker le listener
+            with self._lock:
+                self._transaction_listeners[listener_key] = {
+                    'watch': document_watch,
+                    'state': listener_state
+                }
+            
+            self.logger.info("transaction_listener_started path=%s key=%s", firestore_path, listener_key)
+            return True
+            
+        except Exception as e:
+            self.logger.error("transaction_listener_start_error user_id=%s batch_id=%s error=%s", user_id, batch_id, repr(e))
+            return False
+
+    def stop_transaction_status_listener(self, user_id: str, batch_id: str) -> bool:
+        """Arrête le listener de statuts de transactions.
+        
+        Args:
+            user_id (str): ID de l'utilisateur Firebase
+            batch_id (str): ID du batch de transactions
+            
+        Returns:
+            bool: True si le listener a été arrêté avec succès, False sinon
+        """
+        try:
+            listener_key = f"transaction_status_{user_id}_{batch_id}"
+            
+            with self._lock:
+                if listener_key not in self._transaction_listeners:
+                    self.logger.info("transaction_listener_not_found key=%s", listener_key)
+                    return False
+                
+                listener_info = self._transaction_listeners.pop(listener_key)
+            
+            # Arrêter le listener Firestore
+            document_watch = listener_info.get('watch')
+            if document_watch and callable(document_watch):
+                document_watch()
+            
+            self.logger.info("transaction_listener_stopped key=%s", listener_key)
+            return True
+            
+        except Exception as e:
+            self.logger.error("transaction_listener_stop_error user_id=%s batch_id=%s error=%s", user_id, batch_id, repr(e))
+            return False
+
+    def _handle_transaction_status_change(self, listener_state: dict, doc_snapshot, changes, read_time):
+        """Traite les changements de statuts et publie sur Redis.
+        
+        Args:
+            listener_state (dict): État du listener contenant user_id, batch_id, etc.
+            doc_snapshot: Snapshot du document Firestore
+            changes: Changements détectés
+            read_time: Timestamp de lecture
+        """
+        try:
+            user_id = listener_state['user_id']
+            batch_id = listener_state['batch_id']
+            initial_statuses = listener_state['initial_statuses']
+            acknowledged_statuses = listener_state['acknowledged_statuses']
+            
+            self.logger.info("transaction_status_change_triggered user_id=%s batch_id=%s", user_id, batch_id)
+            
+            for doc in doc_snapshot:
+                current_data = doc.to_dict()
+                
+                # Vérifier la structure: jobs_data -> transactions
+                if 'jobs_data' not in current_data:
+                    self.logger.debug("transaction_status_no_jobs_data user_id=%s batch_id=%s", user_id, batch_id)
+                    return
+                
+                jobs_data = current_data['jobs_data']
+                if not jobs_data or len(jobs_data) == 0:
+                    self.logger.debug("transaction_status_empty_jobs user_id=%s batch_id=%s", user_id, batch_id)
+                    return
+                
+                # Prendre le premier job (généralement il n'y en a qu'un)
+                job_data = jobs_data[0]
+                current_transactions = job_data.get('transactions', [])
+                
+                changes_detected = False
+                transaction_changes = {}
+                
+                # Parcourir les transactions actuelles
+                for tx in current_transactions:
+                    tx_id = str(tx.get('transaction_id', ''))
+                    current_status = tx.get('status', '')
+                    
+                    if tx_id in initial_statuses:
+                        old_status = initial_statuses[tx_id]
+                        
+                        # Vérifier si le statut a changé et n'a pas déjà été acquitté
+                        if (current_status != old_status and 
+                            acknowledged_statuses.get(tx_id) != current_status):
+                            
+                            if not changes_detected:
+                                self.logger.info("transaction_status_changes_detected user_id=%s batch_id=%s", user_id, batch_id)
+                                changes_detected = True
+                            
+                            self.logger.info("transaction_status_change user_id=%s batch_id=%s tx_id=%s old=%s new=%s", 
+                                           user_id, batch_id, tx_id, old_status, current_status)
+                            
+                            # Mettre à jour le statut de référence
+                            initial_statuses[tx_id] = current_status
+                            # Enregistrer le changement
+                            transaction_changes[tx_id] = current_status
+                            # Marquer comme acquitté
+                            acknowledged_statuses[tx_id] = current_status
+                
+                # Si des changements ont été détectés, publier sur Redis
+                if transaction_changes:
+                    self._publish_transaction_status_changes(user_id, batch_id, transaction_changes)
+                    
+        except Exception as e:
+            self.logger.error("transaction_status_change_error user_id=%s batch_id=%s error=%s", 
+                            listener_state.get('user_id', 'unknown'), 
+                            listener_state.get('batch_id', 'unknown'), repr(e))
+            import traceback
+            traceback.print_exc()
+
+    def _publish_transaction_status_changes(self, user_id: str, batch_id: str, transaction_changes: dict):
+        """Publie les changements de statuts sur Redis.
+        
+        Args:
+            user_id (str): ID de l'utilisateur Firebase
+            batch_id (str): ID du batch de transactions
+            transaction_changes (dict): Changements de statuts {"transaction_id": "new_status", ...}
+        """
+        try:
+            # Format du message conforme à la spec du microservice et compatible avec BusConsumer côté Reflex
+            # Ce format est identique à celui utilisé par workflow_listener pour assurer la cohérence
+            message = {
+                "type": "transaction.status_change",
+                "uid": user_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "payload": {
+                    "batch_id": batch_id,
+                    "transaction_changes": transaction_changes
+                }
+            }
+            
+            # Publier via la méthode existante qui gère Redis + WebSocket
+            self._publish(user_id, message)
+            
+            self.logger.info("transaction_status_published user_id=%s batch_id=%s changes=%s", 
+                           user_id, batch_id, list(transaction_changes.keys()))
+            
+        except Exception as e:
+            self.logger.error("transaction_status_publish_error user_id=%s batch_id=%s error=%s", 
+                            user_id, batch_id, repr(e))
 
 
 def _doc_payload(doc: DocumentSnapshot) -> dict:
