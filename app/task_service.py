@@ -87,6 +87,10 @@ celery_app.conf.beat_schedule = {
         'task': 'app.maintenance_tasks.health_check_services',
         'schedule': 60.0,  # Toutes les minutes
     },
+    'cleanup-expired-listeners': {
+        'task': 'app.maintenance_tasks.cleanup_expired_listeners',
+        'schedule': 60.0,  # Toutes les minutes - Nettoie les listeners expirés
+    },
 }
 
 # Fonction utilitaire pour publier les événements de progression
@@ -95,6 +99,7 @@ def publish_task_progress(user_id: str, task_id: str, status: str, progress: int
     try:
         from datetime import datetime, timezone
         from .main import listeners_manager
+        import logging
         
         payload = {
             "type": "task.progress_update",
@@ -112,7 +117,8 @@ def publish_task_progress(user_id: str, task_id: str, status: str, progress: int
             listeners_manager.publish(user_id, payload)
             
     except Exception as e:
-        print(f"⚠️ Erreur publication progression tâche {task_id}: {e}")
+        logger = logging.getLogger("task_service")
+        logger.error("publish_task_progress_error task_id=%s error=%s", task_id, repr(e))
 
 # Export de l'instance Celery
 __all__ = ['celery_app', 'publish_task_progress']

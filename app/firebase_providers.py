@@ -4778,19 +4778,22 @@ class FirebaseManagement:
 
         # Construire la vue formatée et le dictionnaire
         formatted_view = ""
-        for message_key, message_data in messages.items():
-            datetime_str = message_data['datetime'].strftime('%Y-%m-%d %H:%M:%S')
+        for k, m in (messages or {}).items():
+            if not isinstance(m, dict):
+                continue
 
-            # Extraction des détails du 'sent_to' pour afficher proprement le service et la motivation
-            service = message_data['sent_to'].get('service', 'N/A')
-            motivation = message_data['sent_to'].get('motivation', '')
+            dt = m.get('datetime')
+            datetime_str = dt.strftime('%Y-%m-%d %H:%M:%S') if hasattr(dt, 'strftime') else str(dt or 'N/A')
 
-            # Construire la vue formatée
-            formatted_view += (f"Message {message_key} envoyé le {datetime_str}:\n"
-                            f"Expéditeurs: {message_data['send_from']}\n"
-                            f"Receveur: {service}\n"
-                            f"Motivation: {motivation}\n")
-                           
+            service = m.get('sent_to', 'N/A')      # string OK
+            motivation = m.get('message', '')      # tu affiches bien le contenu
+
+            formatted_view += (
+                f"Message {k} envoyé le {datetime_str}:\n"
+                f"Expéditeurs: {m.get('send_from','N/A')}\n"
+                f"Receveur: {service}\n"
+                f"Motivation: {motivation}\n"
+            )
 
         # Retourner la vue formatée et le dictionnaire des messages
         return formatted_view, messages

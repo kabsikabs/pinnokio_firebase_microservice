@@ -270,6 +270,13 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
             # NOUVEAU: Utiliser le wrapper transparent (API identique)
             from .registry_wrapper import get_registry_wrapper
             return get_registry_wrapper().unregister_session, "REGISTRY"
+        # 🆕 NOUVEAU: Méthodes du registre des listeners (sous REGISTRY.*)
+        if name in ["check_listener_status", "register_listener", "unregister_listener", 
+                    "list_user_listeners", "cleanup_user_listeners", "update_listener_heartbeat"]:
+            from .registry_listeners import get_registry_listeners
+            target = getattr(get_registry_listeners(), name, None)
+            if callable(target):
+                return target, "REGISTRY"
     if method.startswith("CHROMA_VECTOR."):
         name = method.split(".", 1)[1]
         target = getattr(get_chroma_vector_service(), name, None)
@@ -291,6 +298,12 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
         target = getattr(get_unified_registry(), name, None)
         if callable(target):
             return target, "UNIFIED_REGISTRY"
+    if method.startswith("REGISTRY_LISTENERS."):
+        name = method.split(".", 1)[1]
+        from .registry_listeners import get_registry_listeners
+        target = getattr(get_registry_listeners(), name, None)
+        if callable(target):
+            return target, "REGISTRY_LISTENERS"
     raise KeyError(method)
 
 
@@ -361,42 +374,36 @@ def rpc_endpoint(req: RpcRequest, authorization: str | None = Header(default=Non
             ttl = int(os.getenv("RPC_IDEMP_TTL", "900"))
         except Exception:
             ttl = 900
-        try:
-            logger.info(
-                "rpc_idemp_check method=%s idemp_key=%s trace_id=%s uid=%s sid=%s",
-                req.method,
-                req.idempotency_key,
-                req.trace_id,
-                req.user_id,
-                req.session_id,
-            )
-        except Exception:
-            pass
+        # Log idempotence uniquement en mode debug
+        if _debug_enabled():
+            try:
+                logger.info(
+                    "rpc_idemp_check method=%s idemp_key=%s trace_id=%s uid=%s sid=%s",
+                    req.method,
+                    req.idempotency_key,
+                    req.trace_id,
+                    req.user_id,
+                    req.session_id,
+                )
+            except Exception:
+                pass
         is_new = _idempotency_mark_if_new(req.idempotency_key, ttl)
         if not is_new:
             dt_ms = int((time.time() - t0) * 1000)
-            logger.info(
-                "rpc_duplicate method=%s idemp_key=%s ttl_s=%s dt_ms=%s trace_id=%s uid=%s sid=%s",
-                req.method,
-                req.idempotency_key,
-                ttl,
-                dt_ms,
-                req.trace_id,
-                req.user_id,
-                req.session_id,
-            )
+            # Log duplicate uniquement si > 100ms (évite spam)
+            if dt_ms > 100:
+                logger.info(
+                    "rpc_duplicate method=%s idemp_key=%s ttl_s=%s dt_ms=%s trace_id=%s uid=%s sid=%s",
+                    req.method,
+                    req.idempotency_key,
+                    ttl,
+                    dt_ms,
+                    req.trace_id,
+                    req.user_id,
+                    req.session_id,
+                )
             return RpcResponse(ok=True, data={"duplicate": True})
-    else:
-        try:
-            logger.info(
-                "rpc_idemp_skip method=%s trace_id=%s uid=%s sid=%s",
-                req.method,
-                req.trace_id,
-                req.user_id,
-                req.session_id,
-            )
-        except Exception:
-            pass
+    # Pas de log pour rpc_idemp_skip (trop verbeux)
 
     try:
         func, _ns = _resolve_method(req.method)
@@ -505,7 +512,9 @@ async def websocket_endpoint(ws: WebSocket):
         logger.info("ws_register_complete uid=%s", uid)
         # Démarre une tâche de heartbeat Firestore liée à cette connexion
         heartbeat_task = asyncio.create_task(_presence_heartbeat(uid))
-        logger.info("heartbeat_task_started uid=%s", uid)
+        # Log uniquement en mode debug
+        if _debug_enabled():
+            logger.info("heartbeat_task_started uid=%s", uid)
 
         # DEBUG: Forcer l'attachement des listeners pour test
         if listeners_manager:
@@ -590,7 +599,9 @@ async def _set_presence(uid: str, status: str = "online", ttl_seconds: int | Non
             # Erreur silencieuse pour ne pas impacter l'ancien système
             logger.debug("unified_heartbeat_error uid=%s error=%s", uid, repr(e))
         
-        logger.info("presence_update uid=%s status=%s ttl=%s", uid, status, ttl_seconds)
+        # Log uniquement en mode debug (évite spam)
+        if _debug_enabled():
+            logger.info("presence_update uid=%s status=%s ttl=%s", uid, status, ttl_seconds)
     except Exception as e:
         logger.error("presence_update_error uid=%s error=%s", uid, repr(e))
 

@@ -327,6 +327,35 @@ class ChromaVectorService:
                 "collection_name": collection_name
             }
 
+    def _convert_where_to_chroma_format(self, where: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Convertit un dictionnaire simple en format ChromaDB valide.
+        
+        Args:
+            where: Dictionnaire simple comme {'source': 'journal', 'pinnokio_func': 'APbookeeper'}
+            
+        Returns:
+            Format ChromaDB valide avec opérateurs $eq
+        """
+        if not where:
+            return where
+            
+        # Si c'est déjà au format ChromaDB (contient des opérateurs), on le retourne tel quel
+        if any(key.startswith('$') for key in where.keys()):
+            return where
+            
+        # Conversion du format simple vers le format ChromaDB
+        if len(where) == 1:
+            # Un seul critère : {'source': 'journal'} -> {'source': {'$eq': 'journal'}}
+            key, value = next(iter(where.items()))
+            return {key: {"$eq": value}}
+        else:
+            # Plusieurs critères : utiliser $and
+            conditions = []
+            for key, value in where.items():
+                conditions.append({key: {"$eq": value}})
+            return {"$and": conditions}
+
     def delete_documents(self, collection_name: str, where: Optional[Dict[str, Any]] = None, ids: Optional[List[str]] = None) -> dict:
         """
         RPC: CHROMA_VECTOR.delete_documents
@@ -335,7 +364,11 @@ class ChromaVectorService:
         try:
             collection = self.get_or_create_collection(collection_name)
 
-            collection.delete(where=where, ids=ids)
+            # Conversion automatique du format where si nécessaire
+            chroma_where = self._convert_where_to_chroma_format(where) if where else None
+            
+            print(f"🔍 Suppression avec where: {chroma_where}, ids: {ids}")
+            collection.delete(where=chroma_where, ids=ids)
 
             return {
                 "success": True,

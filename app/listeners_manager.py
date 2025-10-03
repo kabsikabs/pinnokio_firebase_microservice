@@ -11,6 +11,7 @@ from .config import get_settings
 from .firebase_client import get_firestore
 from .redis_client import get_redis
 from .ws_hub import hub
+from .registry_listeners import get_registry_listeners
 import os
 import firebase_admin
 from firebase_admin import db as rtdb
@@ -120,15 +121,19 @@ class ListenersManager:
 
     def _on_registry_snapshot(self, docs, changes, read_time) -> None:  # type: ignore[no-untyped-def]
         try:
-            self.logger.info("registry_snapshot triggered changes_count=%s", len(changes))
+            # Log uniquement si plusieurs changements (évite spam)
+            if len(changes) > 1:
+                self.logger.info("registry_snapshot triggered changes_count=%s", len(changes))
             for change in changes:
                 doc: DocumentSnapshot = change.document
                 uid = doc.id
                 online = _is_online_and_not_expired(doc)
-                self.logger.info("registry_change uid=%s type=%s online=%s", uid, change.type.name, online)
+                # Log désactivé (trop verbeux)
+                # self.logger.info("registry_change uid=%s type=%s online=%s", uid, change.type.name, online)
                 if change.type.name in ("ADDED", "MODIFIED"):
                     if online:
-                        self.logger.info("registry_attach_trigger uid=%s", uid)
+                        # Log désactivé (trop verbeux)
+                        # self.logger.info("registry_attach_trigger uid=%s", uid)
                         self._ensure_user_watchers(uid)
                     else:
                         self.logger.info("registry_detach_trigger uid=%s reason=offline_or_expired", uid)
@@ -143,7 +148,8 @@ class ListenersManager:
         with self._lock:
             already = uid in self._user_unsubs
         if already:
-            self.logger.info("user_attach_skip uid=%s reason=already_attached", uid)
+            # Log désactivé (trop verbeux)
+            # self.logger.info("user_attach_skip uid=%s reason=already_attached", uid)
             return
         self.logger.info("user_attach_start uid=%s", uid)
         unsubs: List[Callable[[], None]] = []
@@ -183,6 +189,40 @@ class ListenersManager:
             with self._lock:
                 self._user_unsubs[uid] = unsubs
             self.logger.info("user_attach_complete uid=%s listeners_count=%s", uid, len(unsubs))
+            
+            # 🆕 NOUVEAU : Enregistrer les listeners dans le registre centralisé
+            self.logger.info("🔵 REGISTRY_START enregistrement des listeners pour uid=%s", uid)
+            try:
+                registry = get_registry_listeners()
+                self.logger.info("🔵 REGISTRY_INSTANCE récupérée pour uid=%s", uid)
+                
+                # Enregistrer listener notifications
+                notif_result = registry.register_listener(
+                    user_id=uid,
+                    listener_type="notif"
+                )
+                self.logger.info("🔵 REGISTRY_NOTIF uid=%s success=%s", uid, notif_result.get("success"))
+                
+                # Enregistrer listener messages
+                msg_result = registry.register_listener(
+                    user_id=uid,
+                    listener_type="msg"
+                )
+                self.logger.info("🔵 REGISTRY_MSG uid=%s success=%s", uid, msg_result.get("success"))
+                
+                # Enregistrer listener workflow si activé
+                if self._workflow_enabled:
+                    workflow_result = registry.register_listener(
+                        user_id=uid,
+                        listener_type="workflow"
+                    )
+                    self.logger.info("🔵 REGISTRY_WORKFLOW uid=%s success=%s", uid, workflow_result.get("success"))
+                
+                self.logger.info("🟢 REGISTRY_COMPLETE uid=%s enregistrement terminé", uid)
+            except Exception as e:
+                # Ne pas bloquer si l'enregistrement échoue (traçabilité optionnelle)
+                self.logger.error("🔴 REGISTRY_ERROR uid=%s error=%s", uid, repr(e), exc_info=True)
+            
         except Exception as e:
             self.logger.error("user_attach_error uid=%s error=%s", uid, repr(e))
             for u in unsubs:
@@ -227,6 +267,20 @@ class ListenersManager:
                         pass
             except Exception as e:
                 self.logger.error("workflow_unsub_error uid=%s error=%s", uid, repr(e))
+        
+        # 🆕 NOUVEAU : Nettoyer le registre centralisé
+        self.logger.info("🔵 REGISTRY_CLEANUP_START nettoyage pour uid=%s reason=%s", uid, reason)
+        try:
+            registry = get_registry_listeners()
+            cleanup_result = registry.cleanup_user_listeners(uid)
+            if cleanup_result.get("success"):
+                cleaned_count = cleanup_result.get("cleaned_count", 0)
+                self.logger.info("🟢 REGISTRY_CLEANUP_SUCCESS uid=%s cleaned=%s", uid, cleaned_count)
+            else:
+                self.logger.error("🔴 REGISTRY_CLEANUP_FAILED uid=%s error=%s", uid, cleanup_result.get("error"))
+        except Exception as e:
+            # Ne pas bloquer si le nettoyage échoue
+            self.logger.error("🔴 REGISTRY_CLEANUP_ERROR uid=%s error=%s", uid, repr(e), exc_info=True)
 
     def publish(self, uid: str, payload: dict) -> None:
         """Méthode publique pour publier des messages via Redis/WS"""
@@ -449,17 +503,40 @@ class ListenersManager:
 
             def _on_event(event):
                 try:
+                    self.logger.info("🔵 CHAT_EVENT_RECEIVED uid=%s space=%s thread=%s event_type=%s path=%s", 
+                                   uid, space_code, thread_key, getattr(event, "event_type", None), getattr(event, "path", None))
+                    
                     if getattr(event, "event_type", None) != "put":
+                        self.logger.warning("🟡 CHAT_EVENT_SKIP uid=%s reason=not_put event_type=%s", 
+                                          uid, getattr(event, "event_type", None))
                         return
+                    
+                    # Cas 1: path=/ signifie snapshot initial ou mise à jour de tout le thread
+                    # Dans ce cas, event.data est un dict de {msg_id: message_data}
+                    if event.path == "/" and isinstance(event.data, dict):
+                        self.logger.info("🔵 CHAT_SNAPSHOT_RECEIVED uid=%s space=%s thread=%s messages_count=%s", 
+                                       uid, space_code, thread_key, len(event.data))
+                        # On ignore les snapshots initiaux pour éviter de republier tous les anciens messages
+                        # Les nouveaux messages arrivent avec path=/msg_id
+                        return
+                    
+                    # Cas 2: path=/msg_id signifie un nouveau message ou une mise à jour
                     if not (event.data and event.path != "/" and isinstance(event.data, dict)):
+                        self.logger.warning("🟡 CHAT_EVENT_SKIP uid=%s reason=invalid_data path=%s data_type=%s", 
+                                          uid, event.path, type(event.data).__name__)
                         return
+                    
                     msg_id = event.path.lstrip("/")
                     message_data = {"id": msg_id, **event.data}
+                    
+                    self.logger.info("🔵 CHAT_MESSAGE_PROCESSING uid=%s msg_id=%s", uid, msg_id)
+                    
                     # Marquer comme lu (best-effort)
                     try:
                         ref.child(msg_id).update({"read": True})
                     except Exception:
                         pass
+                    
                     payload = {
                         "space_code": space_code,
                         "thread_key": thread_key,
@@ -472,8 +549,9 @@ class ListenersManager:
                         "payload": payload,
                     }
                     self._publish(uid, msg)
+                    self.logger.info("🟢 CHAT_MESSAGE_PUBLISHED uid=%s msg_id=%s channel=user:%s", uid, msg_id, uid)
                 except Exception as e:
-                    self.logger.error("chat_event_error uid=%s error=%s", uid, repr(e))
+                    self.logger.error("🔴 CHAT_EVENT_ERROR uid=%s error=%s", uid, repr(e), exc_info=True)
 
             listener = ref.listen(_on_event)
 
@@ -481,8 +559,55 @@ class ListenersManager:
                 try:
                     if listener and hasattr(listener, "close"):
                         listener.close()
+                    # 🆕 NOUVEAU : Désenregistrer du registre centralisé lors de la fermeture
+                    self.logger.info("🔵 REGISTRY_CHAT_UNREGISTER uid=%s space=%s thread=%s", uid, space_code, thread_key)
+                    try:
+                        registry = get_registry_listeners()
+                        unregister_result = registry.unregister_listener(
+                            user_id=uid,
+                            listener_type="chat",
+                            space_code=space_code,
+                            thread_key=thread_key
+                        )
+                        if unregister_result.get("success"):
+                            self.logger.info("🟢 REGISTRY_CHAT_UNREGISTER_SUCCESS uid=%s space=%s thread=%s", 
+                                           uid, space_code, thread_key)
+                        else:
+                            self.logger.warning("🟡 REGISTRY_CHAT_UNREGISTER_FAILED uid=%s error=%s", 
+                                              uid, unregister_result.get("error"))
+                    except Exception as e:
+                        self.logger.error("🔴 REGISTRY_CHAT_UNREGISTER_ERROR uid=%s error=%s", uid, repr(e), exc_info=True)
                 except Exception:
                     pass
+
+            # 🆕 NOUVEAU : Enregistrer dans le registre centralisé
+            self.logger.info("🔵 REGISTRY_CHAT_START uid=%s space=%s thread=%s mode=%s", uid, space_code, thread_key, chosen_mode)
+            try:
+                registry = get_registry_listeners()
+                register_result = registry.register_listener(
+                    user_id=uid,
+                    listener_type="chat",
+                    space_code=space_code,
+                    thread_key=thread_key,
+                    mode=chosen_mode
+                )
+                if register_result.get("success"):
+                    self.logger.info(
+                        "🟢 REGISTRY_CHAT_SUCCESS uid=%s space=%s thread=%s mode=%s listener_id=%s channel=%s",
+                        uid, space_code, thread_key, chosen_mode, 
+                        register_result.get("listener_id"),
+                        register_result.get("channel_name")
+                    )
+                else:
+                    # Si l'enregistrement échoue, continuer quand même (traçabilité optionnelle)
+                    self.logger.warning(
+                        "🟡 REGISTRY_CHAT_FAILED uid=%s space=%s thread=%s error=%s",
+                        uid, space_code, thread_key, register_result.get("error")
+                    )
+            except Exception as e:
+                # Ne pas bloquer si l'enregistrement échoue
+                self.logger.error("🔴 REGISTRY_CHAT_ERROR uid=%s space=%s thread=%s error=%s", 
+                                uid, space_code, thread_key, repr(e), exc_info=True)
 
             return _close
         except Exception as e:
