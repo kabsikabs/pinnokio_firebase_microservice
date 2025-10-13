@@ -74,7 +74,7 @@ class ListenersManager:
         """Récupère la configuration du workflow listener depuis les variables d'environnement ou secrets."""
         try:
             # Vérifier d'abord les variables d'environnement
-            workflow_enabled = os.getenv("WORKFLOW_LISTENER_ENABLED", "true").lower()
+            workflow_enabled = os.getenv("WORKFLOW_LISTENER_ENABLED", "false").lower()
             return workflow_enabled in ("true", "1", "yes", "on")
         except Exception:
             return True  # Activé par défaut
@@ -176,16 +176,7 @@ class ListenersManager:
                 self.logger.info("user_attach_message_listener_attached uid=%s", uid)
             self._publish_messages_sync(uid)
 
-            # Workflow Listener (surveillance des documents task_manager)
-            if self._workflow_enabled:
-                self.logger.info("user_attach_workflow_listener uid=%s", uid)
-                workflow_unsubs = self._start_workflow_listener(uid)
-                if workflow_unsubs:
-                    unsubs.extend(workflow_unsubs)
-                    with self._lock:
-                        self._workflow_unsubs[uid] = workflow_unsubs
-                    self.logger.info("user_attach_workflow_listener_attached uid=%s listeners_count=%s", uid, len(workflow_unsubs))
-
+            
             with self._lock:
                 self._user_unsubs[uid] = unsubs
             self.logger.info("user_attach_complete uid=%s listeners_count=%s", uid, len(unsubs))
@@ -210,13 +201,6 @@ class ListenersManager:
                 )
                 self.logger.info("🔵 REGISTRY_MSG uid=%s success=%s", uid, msg_result.get("success"))
                 
-                # Enregistrer listener workflow si activé
-                if self._workflow_enabled:
-                    workflow_result = registry.register_listener(
-                        user_id=uid,
-                        listener_type="workflow"
-                    )
-                    self.logger.info("🔵 REGISTRY_WORKFLOW uid=%s success=%s", uid, workflow_result.get("success"))
                 
                 self.logger.info("🟢 REGISTRY_COMPLETE uid=%s enregistrement terminé", uid)
             except Exception as e:
@@ -499,37 +483,66 @@ class ListenersManager:
                 ref = _get_rtdb_ref(path_fallback)
                 chosen_mode = fallback_mode
 
+            # 🔍 LOG CRUCIAL : Afficher le chemin RTDB exact
+            rtdb_full_path = f"{space_code}/{chosen_mode}/{thread_key}/messages"
+            self.logger.info("🔍 CHAT_RTDB_PATH uid=%s full_path=%s", uid, rtdb_full_path)
             self.logger.info("chat_path_resolved uid=%s space=%s thread=%s requested_mode=%s chosen_mode=%s", uid, space_code, thread_key, mode, chosen_mode)
 
             def _on_event(event):
                 try:
-                    self.logger.info("🔵 CHAT_EVENT_RECEIVED uid=%s space=%s thread=%s event_type=%s path=%s", 
-                                   uid, space_code, thread_key, getattr(event, "event_type", None), getattr(event, "path", None))
+                    # 🔍 LOG COMPLET : Voir TOUTES les données de l'événement
+                    event_type = getattr(event, "event_type", None)
+                    event_path = getattr(event, "path", None)
+                    event_data = getattr(event, "data", None)
+                    event_data_type = type(event_data).__name__
                     
-                    if getattr(event, "event_type", None) != "put":
+                    self.logger.info("🔍 CHAT_RAW_EVENT uid=%s event_type=%s path=%s data_type=%s data_is_dict=%s data_keys=%s", 
+                                   uid, event_type, event_path, event_data_type, 
+                                   isinstance(event_data, dict),
+                                   list(event_data.keys()) if isinstance(event_data, dict) else "N/A")
+                    
+                    self.logger.info("🔵 CHAT_EVENT_RECEIVED uid=%s space=%s thread=%s event_type=%s path=%s", 
+                                   uid, space_code, thread_key, event_type, event_path)
+                    
+                    if event_type != "put":
                         self.logger.warning("🟡 CHAT_EVENT_SKIP uid=%s reason=not_put event_type=%s", 
                                           uid, getattr(event, "event_type", None))
                         return
                     
                     # Cas 1: path=/ signifie snapshot initial ou mise à jour de tout le thread
                     # Dans ce cas, event.data est un dict de {msg_id: message_data}
-                    if event.path == "/" and isinstance(event.data, dict):
-                        self.logger.info("🔵 CHAT_SNAPSHOT_RECEIVED uid=%s space=%s thread=%s messages_count=%s", 
-                                       uid, space_code, thread_key, len(event.data))
-                        # On ignore les snapshots initiaux pour éviter de republier tous les anciens messages
-                        # Les nouveaux messages arrivent avec path=/msg_id
-                        return
+                    if event.path == "/":
+                        # Chat vide (nouveau chat) : event.data est None
+                        if event.data is None or (isinstance(event.data, dict) and len(event.data) == 0):
+                            self.logger.info("🔵 CHAT_EMPTY_RECEIVED uid=%s space=%s thread=%s status=new_or_empty_chat", 
+                                           uid, space_code, thread_key)
+                            self.logger.info("🔍 CHAT_LISTENER_ACTIVE uid=%s space=%s thread=%s status=waiting_for_first_message", 
+                                           uid, space_code, thread_key)
+                            # Chat vide mais valide, on attend juste les nouveaux messages
+                            return
+                        
+                        # Chat avec messages existants
+                        if isinstance(event.data, dict):
+                            self.logger.info("🔵 CHAT_SNAPSHOT_RECEIVED uid=%s space=%s thread=%s messages_count=%s", 
+                                           uid, space_code, thread_key, len(event.data))
+                            self.logger.info("🔍 CHAT_LISTENER_ACTIVE uid=%s space=%s thread=%s status=waiting_for_new_messages", 
+                                           uid, space_code, thread_key)
+                            # On ignore les snapshots initiaux pour éviter de republier tous les anciens messages
+                            # Les nouveaux messages arrivent avec path=/msg_id
+                            return
                     
                     # Cas 2: path=/msg_id signifie un nouveau message ou une mise à jour
                     if not (event.data and event.path != "/" and isinstance(event.data, dict)):
-                        self.logger.warning("🟡 CHAT_EVENT_SKIP uid=%s reason=invalid_data path=%s data_type=%s", 
-                                          uid, event.path, type(event.data).__name__)
+                        self.logger.warning("🟡 CHAT_EVENT_SKIP uid=%s reason=invalid_data path=%s data_type=%s data=%s", 
+                                          uid, event.path, type(event.data).__name__, 
+                                          str(event.data)[:100] if event.data else "None")
                         return
                     
                     msg_id = event.path.lstrip("/")
                     message_data = {"id": msg_id, **event.data}
                     
-                    self.logger.info("🔵 CHAT_MESSAGE_PROCESSING uid=%s msg_id=%s", uid, msg_id)
+                    self.logger.info("🔵 CHAT_MESSAGE_PROCESSING uid=%s msg_id=%s content_preview=%s", 
+                                   uid, msg_id, str(event.data.get('content', ''))[:50])
                     
                     # Marquer comme lu (best-effort)
                     try:

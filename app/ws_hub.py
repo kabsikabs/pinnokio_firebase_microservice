@@ -35,13 +35,25 @@ class WebSocketHub:
     async def broadcast(self, uid: str, message: dict) -> None:
         # Envoie le message JSON (texte) à toutes les connexions pour ce uid
         data = json.dumps(message)
+        msg_type = message.get("type", "unknown")
+        channel = message.get("channel", "")
+        
         async with self._lock:
             conns = list(self._uid_to_conns.get(uid, set()))
+        
+        if not conns:
+            self._logger.warning("ws_broadcast_no_connections uid=%s type=%s channel=%s", uid, msg_type, channel)
+            return
+        
+        sent_count = 0
         for ws in conns:
             try:
                 await ws.send_text(data)
+                sent_count += 1
             except Exception as e:
                 self._logger.error("ws_send_error uid=%s error=%s", uid, repr(e))
+        
+        self._logger.info("ws_broadcast uid=%s type=%s channel=%s connections=%s", uid, msg_type, channel, sent_count)
 
     def broadcast_threadsafe(self, uid: str, message: dict) -> None:
         """Déclenche un broadcast depuis un thread quelconque via la loop serveur."""

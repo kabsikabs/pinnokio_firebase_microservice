@@ -50,7 +50,7 @@ class RegistryListeners:
         elif listener_type == "msg":
             return f"msg_{user_id}"
         elif listener_type == "workflow":
-            return f"workflow_{user_id}"
+            return f"workflow_{user_id}_{space_code}_{thread_key}"
         else:
             return f"{listener_type}_{user_id}"
     
@@ -64,6 +64,8 @@ class RegistryListeners:
         """Génère le nom du canal Redis correspondant."""
         if listener_type == "chat":
             return f"chat:{user_id}:{space_code}:{thread_key}"
+        elif listener_type == "workflow" and thread_key:  # ✅ NOUVEAU
+            return f"workflow:{user_id}:{space_code}:{thread_key}"
         else:
             return f"user:{user_id}"
     

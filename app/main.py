@@ -298,6 +298,104 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
         target = getattr(get_unified_registry(), name, None)
         if callable(target):
             return target, "UNIFIED_REGISTRY"
+    if method.startswith("LLM."):
+        name = method.split(".", 1)[1]
+        from .llm_service import get_llm_manager
+        if name == "initialize_session":
+            def _sync_wrapper(**kwargs):
+                # Exécuter la coroutine dans l'event loop
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # Si on est déjà dans un event loop, créer une nouvelle tâche
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(asyncio.run, get_llm_manager().initialize_session(**kwargs))
+                            return future.result()
+                    else:
+                        return asyncio.run(get_llm_manager().initialize_session(**kwargs))
+                except RuntimeError:
+                    # Fallback si pas d'event loop
+                    return asyncio.run(get_llm_manager().initialize_session(**kwargs))
+            return _sync_wrapper, "LLM"
+        if name == "send_message":
+            # Version async directe - pas de wrapper synchrone pour éviter l'annulation des tâches
+            async def _async_wrapper(**kwargs):
+                return await get_llm_manager().send_message(**kwargs)
+            return _async_wrapper, "LLM"
+        if name == "update_context":
+            def _sync_wrapper(**kwargs):
+                # Exécuter la coroutine dans l'event loop
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # Si on est déjà dans un event loop, créer une nouvelle tâche
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(asyncio.run, get_llm_manager().update_context(**kwargs))
+                            return future.result()
+                    else:
+                        return asyncio.run(get_llm_manager().update_context(**kwargs))
+                except RuntimeError:
+                    # Fallback si pas d'event loop
+                    return asyncio.run(get_llm_manager().update_context(**kwargs))
+            return _sync_wrapper, "LLM"
+        if name == "load_chat_history":
+            def _sync_wrapper(**kwargs):
+                # Exécuter la coroutine dans l'event loop
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # Si on est déjà dans un event loop, créer une nouvelle tâche
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(asyncio.run, get_llm_manager().load_chat_history(**kwargs))
+                            return future.result()
+                    else:
+                        return asyncio.run(get_llm_manager().load_chat_history(**kwargs))
+                except RuntimeError:
+                    # Fallback si pas d'event loop
+                    return asyncio.run(get_llm_manager().load_chat_history(**kwargs))
+            return _sync_wrapper, "LLM"
+        if name == "stop_streaming":
+            def _sync_wrapper(**kwargs):
+                # Exécuter la coroutine dans l'event loop
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # Si on est déjà dans un event loop, créer une nouvelle tâche
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(asyncio.run, get_llm_manager().stop_streaming(**kwargs))
+                            return future.result()
+                    else:
+                        return asyncio.run(get_llm_manager().stop_streaming(**kwargs))
+                except RuntimeError:
+                    # Fallback si pas d'event loop
+                    return asyncio.run(get_llm_manager().stop_streaming(**kwargs))
+            return _sync_wrapper, "LLM"
+        if name == "flush_chat_history":
+            def _sync_wrapper(**kwargs):
+                # Exécuter la coroutine dans l'event loop
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # Si on est déjà dans un event loop, créer une nouvelle tâche
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(asyncio.run, get_llm_manager().flush_chat_history(**kwargs))
+                            return future.result()
+                    else:
+                        return asyncio.run(get_llm_manager().flush_chat_history(**kwargs))
+                except RuntimeError:
+                    # Fallback si pas d'event loop
+                    return asyncio.run(get_llm_manager().flush_chat_history(**kwargs))
+            return _sync_wrapper, "LLM"
     if method.startswith("REGISTRY_LISTENERS."):
         name = method.split(".", 1)[1]
         from .registry_listeners import get_registry_listeners
@@ -344,7 +442,7 @@ def _idemp_disabled(method: str) -> bool:
 
 
 @app.post("/rpc", response_model=RpcResponse)
-def rpc_endpoint(req: RpcRequest, authorization: str | None = Header(default=None, alias="Authorization")):
+async def rpc_endpoint(req: RpcRequest, authorization: str | None = Header(default=None, alias="Authorization")):
     t0 = time.time()
     if _debug_enabled():
         try:
@@ -430,7 +528,12 @@ def rpc_endpoint(req: RpcRequest, authorization: str | None = Header(default=Non
         except Exception:
             pass
 
-        result = func(*(req.args or []), **(req.kwargs or {}))
+        # Exécuter la fonction (sync ou async)
+        import inspect
+        if inspect.iscoroutinefunction(func):
+            result = await func(*(req.args or []), **(req.kwargs or {}))
+        else:
+            result = func(*(req.args or []), **(req.kwargs or {}))
         dt_ms = int((time.time() - t0) * 1000)
         if _debug_enabled():
             try:

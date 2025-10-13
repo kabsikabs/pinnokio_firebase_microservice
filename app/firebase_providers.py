@@ -4,7 +4,7 @@ import re
 import json
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from firebase_admin import credentials, firestore, initialize_app,auth
 import firebase_admin
@@ -131,7 +131,7 @@ class FirebaseManagement:
         Ajoute la société au mapping des mandats autorisés.
         """
         try:
-            from datetime import datetime
+            from datetime import datetime, timezone
             
             # Référence au document utilisateur
             telegram_ref = self.db.collection('telegram_users').document(telegram_username)
@@ -141,7 +141,7 @@ class FirebaseManagement:
             mandate_data = {
                 "firebase_user_id": user_id,
                 "mandate_path": mandate_path,
-                "added_at": datetime.now()
+                "added_at": datetime.now(timezone.utc).isoformat()
             }
             
             # Ajouter les données supplémentaires si fournies
@@ -164,7 +164,7 @@ class FirebaseManagement:
                 # Mettre à jour le document
                 telegram_ref.update({
                     'authorized_mandates': authorized_mandates,
-                    'updated_at': datetime.now()
+                    'updated_at': datetime.now(timezone.utc).isoformat()
                 })
                 
                 print(f"✅ Mandat ajouté pour {telegram_username}")
@@ -174,8 +174,8 @@ class FirebaseManagement:
                 # Créer un nouvel utilisateur
                 user_data = {
                     "telegram_username": telegram_username,
-                    "created_at": datetime.now(),
-                    "updated_at": datetime.now(),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
                     "is_active": True,
                     "last_activity": None,
                     "telegram_chat_id": None,
@@ -236,7 +236,7 @@ class FirebaseManagement:
         Supprime l'utilisateur entier si plus aucun mandat autorisé.
         """
         try:
-            from datetime import datetime
+            from datetime import datetime, timezone
             
             # Référence directe au document utilisateur
             user_ref = self.db.collection('telegram_users').document(telegram_username)
@@ -271,7 +271,7 @@ class FirebaseManagement:
                 # Mettre à jour avec les mandats restants
                 user_ref.update({
                     'authorized_mandates': authorized_mandates,
-                    'updated_at': datetime.now()
+                    'updated_at': datetime.now(timezone.utc).isoformat()
                 })
                 print(f"✅ Mandat {mandate_path} supprimé pour {telegram_username}")
             
@@ -328,7 +328,7 @@ class FirebaseManagement:
         Met à jour l'activité d'un utilisateur Telegram (appelé par le bot).
         """
         try:
-            from datetime import datetime
+            from datetime import datetime, timezone
             
             # Référence directe au document utilisateur
             user_ref = self.db.collection('telegram_users').document(telegram_username)
@@ -347,8 +347,8 @@ class FirebaseManagement:
             # Mettre à jour l'activité
             user_ref.update({
                 'telegram_chat_id': telegram_chat_id,
-                'last_activity': datetime.now(),
-                'updated_at': datetime.now()
+                'last_activity': datetime.now(timezone.utc).isoformat(),
+                'updated_at': datetime.now(timezone.utc).isoformat()
             })
             
             print(f"✅ Activité mise à jour pour {telegram_username}")
@@ -553,6 +553,148 @@ class FirebaseManagement:
         except Exception as e:
             print(f"❌ Erreur lors de la désactivation dans scheduler DB: {e}")
             return False
+
+    def delete_scheduler_documents_for_mandate(self, mandate_path: str) -> bool:
+        """
+        Supprime tous les documents scheduler associés à un mandate_path.
+        
+        Cette méthode supprime tous les jobs scheduler qui contiennent le 
+        mandate_path dans leur ID de document (format: mandate_path_jobtype).
+        
+        Args:
+            mandate_path: Chemin du mandat (ex: "clients/user_id/bo_clients/doc_id/mandates/mandate_id")
+            
+        Returns:
+            bool: True si succès (même si aucun document trouvé), False en cas d'erreur
+        """
+        try:
+            # Convertir le mandate_path au format utilisé dans les IDs scheduler
+            # Format: clients_user_id_bo_clients_doc_id_mandates_mandate_id
+            mandate_path_formatted = mandate_path.replace('/', '_')
+            
+            print(f"🔍 Recherche des documents scheduler pour le mandat: {mandate_path}")
+            print(f"   Format recherché: {mandate_path_formatted}")
+            
+            # Récupérer tous les documents de la collection scheduler
+            scheduler_ref = self.db.collection('scheduler')
+            
+            # Récupérer tous les documents dont l'ID commence par mandate_path_formatted
+            # Note: Firestore ne supporte pas startsWith dans les queries, donc on récupère tous
+            # les documents et on filtre en Python
+            all_docs = scheduler_ref.stream()
+            
+            deleted_count = 0
+            for doc in all_docs:
+                # Vérifier si l'ID du document commence par notre mandate_path formaté
+                if doc.id.startswith(mandate_path_formatted):
+                    print(f"   🗑️ Suppression du job scheduler: {doc.id}")
+                    doc.reference.delete()
+                    deleted_count += 1
+            
+            if deleted_count > 0:
+                print(f"✅ {deleted_count} document(s) scheduler supprimé(s) pour le mandat")
+            else:
+                print(f"ℹ️ Aucun document scheduler trouvé pour le mandat")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Erreur lors de la suppression des documents scheduler: {e}")
+            return False
+
+    def clean_telegram_users_for_mandate(self, mandate_path: str) -> bool:
+        """
+        Nettoie les références au mandat dans les documents telegram_users.
+        
+        Cette méthode:
+        1. Récupère d'abord les utilisateurs Telegram du document mandat (telegram_auth_users)
+        2. Pour chaque utilisateur trouvé, supprime le mandat de leur liste authorized_mandates
+        3. Supprime l'utilisateur entier si plus aucun mandat autorisé
+        
+        Args:
+            mandate_path: Chemin du mandat (ex: "clients/user_id/bo_clients/doc_id/mandates/mandate_id")
+            
+        Returns:
+            bool: True si succès (même si aucun utilisateur trouvé), False en cas d'erreur
+        """
+        try:
+            from datetime import datetime, timezone
+            
+            print(f"🔍 Nettoyage des utilisateurs Telegram pour le mandat: {mandate_path}")
+            
+            # 1. Récupérer le document du mandat pour obtenir telegram_auth_users
+            mandate_doc_ref = self.db.document(mandate_path)
+            mandate_doc = mandate_doc_ref.get()
+            
+            if not mandate_doc.exists:
+                print(f"⚠️ Document mandat {mandate_path} non trouvé")
+                return True  # Pas d'erreur, juste pas de document
+            
+            mandate_data = mandate_doc.to_dict()
+            telegram_auth_users = mandate_data.get('telegram_auth_users', [])
+            
+            # Vérifier si le champ telegram_auth_users existe et contient des données
+            if not telegram_auth_users or not isinstance(telegram_auth_users, list) or len(telegram_auth_users) == 0:
+                print(f"ℹ️ Pas d'utilisateurs Telegram configurés pour ce mandat (telegram_auth_users vide ou absent)")
+                return True
+            
+            print(f"   📋 {len(telegram_auth_users)} utilisateur(s) Telegram trouvé(s): {telegram_auth_users}")
+            
+            # 2. Pour chaque utilisateur Telegram, nettoyer leurs authorized_mandates
+            cleaned_count = 0
+            for telegram_username in telegram_auth_users:
+                try:
+                    # Référence au document utilisateur Telegram
+                    user_ref = self.db.collection('telegram_users').document(telegram_username)
+                    user_doc = user_ref.get()
+                    
+                    if not user_doc.exists:
+                        print(f"   ⚠️ Utilisateur Telegram {telegram_username} non trouvé dans telegram_users")
+                        continue
+                    
+                    user_data = user_doc.to_dict()
+                    authorized_mandates = user_data.get('authorized_mandates', {})
+                    
+                    # Vérifier si ce mandat est dans la liste des mandats autorisés
+                    if mandate_path not in authorized_mandates:
+                        print(f"   ℹ️ Mandat déjà absent des authorized_mandates de {telegram_username}")
+                        continue
+                    
+                    # Supprimer le mandat de authorized_mandates
+                    del authorized_mandates[mandate_path]
+                    
+                    # Si plus aucun mandat autorisé, supprimer l'utilisateur entier
+                    if not authorized_mandates:
+                        user_ref.delete()
+                        print(f"   🗑️ Document utilisateur Telegram {telegram_username} supprimé (plus aucun mandat)")
+                    else:
+                        # Mettre à jour avec les mandats restants
+                        user_ref.update({
+                            'authorized_mandates': authorized_mandates,
+                            'updated_at': datetime.now(timezone.utc).isoformat()
+                        })
+                        print(f"   ✅ Mandat supprimé des authorized_mandates de {telegram_username}")
+                    
+                    cleaned_count += 1
+                    
+                except Exception as e:
+                    print(f"   ⚠️ Erreur lors du nettoyage de {telegram_username}: {e}")
+                    # Continuer avec les autres utilisateurs
+                    continue
+            
+            if cleaned_count > 0:
+                print(f"✅ {cleaned_count} utilisateur(s) Telegram nettoyé(s)")
+            else:
+                print(f"ℹ️ Aucun utilisateur Telegram n'a été nettoyé")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Erreur lors du nettoyage des utilisateurs Telegram: {e}")
+            return False
+
+
+
 
     def set_firebase_function_table(self, path: str) -> bool:
         """
@@ -1647,6 +1789,154 @@ class FirebaseManagement:
             print(f"Erreur lors de la récupération des dépenses: {e}")
             return {}
     
+    def fetch_expenses_by_mandate(self, mandate_path: str, status: Optional[str] = None) -> Dict:
+        """
+        Récupère les notes de frais depuis Firebase pour un mandat donné.
+        
+        Source: {mandate_path}/working_doc/expenses_details
+        
+        Args:
+            mandate_path: Chemin du mandat
+            status: Filtrer par statut ("to_process", "close", None=tous)
+        
+        Returns:
+            Dict: Dictionnaire des expenses avec expense_id comme clé
+        """
+        try:
+            # Chemin vers le document des expenses
+            expenses_doc_path = f"{mandate_path}/working_doc/expenses_details"
+            print(f"📚 [FIREBASE] Récupération des expenses depuis: {expenses_doc_path}")
+            
+            # Récupérer le document working_doc
+            doc_ref = self.db.document(expenses_doc_path)
+            doc = doc_ref.get()
+            
+            if not doc.exists:
+                print(f"⚠️ [FIREBASE] Document working_doc n'existe pas: {expenses_doc_path}")
+                return {}
+            
+            doc_data = doc.to_dict()
+            
+            # Récupérer le dictionnaire depuis le champ 'items'
+            expenses_data = doc_data.get("items", {})
+            
+            if not expenses_data:
+                print(f"⚠️ [FIREBASE] Aucun item trouvé dans: {expenses_doc_path}")
+                return {}
+            
+            # Filtrer par statut si spécifié
+            if status:
+                expenses_data = {
+                    expense_id: data 
+                    for expense_id, data in expenses_data.items()
+                    if data.get("status") == status
+                }
+            
+            print(f"✅ [FIREBASE] {len(expenses_data)} expenses récupérées")
+            return expenses_data
+            
+        except Exception as e:
+            print(f"❌ [FIREBASE] Erreur lors de la récupération des expenses: {e}")
+            import traceback
+            traceback.print_exc()
+            return {}
+    
+    def update_expense_in_firebase(
+        self, 
+        mandate_path: str, 
+        expense_id: str, 
+        update_data: Dict
+    ) -> bool:
+        """
+        Met à jour un ou plusieurs champs d'une expense dans Firebase.
+        
+        Args:
+            mandate_path: Chemin du mandat
+            expense_id: ID de l'expense à mettre à jour
+            update_data: Dictionnaire des champs à mettre à jour
+        
+        Returns:
+            bool: True si succès, False sinon
+        """
+        try:
+            # Chemin vers le document working_doc
+            expenses_doc_path = f"{mandate_path}/working_doc/expenses_details"
+            print(f"✏️ [FIREBASE] Mise à jour de l'expense {expense_id} dans: {expenses_doc_path}")
+            
+            # Construire le chemin du champ à mettre à jour
+            # Format: items.{expense_id}.{field}
+            update_fields = {}
+            for field, value in update_data.items():
+                update_fields[f"items.{expense_id}.{field}"] = value
+            
+            # Mettre à jour le document
+            doc_ref = self.db.document(expenses_doc_path)
+            doc_ref.update(update_fields)
+            
+            print(f"✅ [FIREBASE] Expense {expense_id} mise à jour avec succès")
+            return True
+            
+        except Exception as e:
+            print(f"❌ [FIREBASE] Erreur lors de la mise à jour de l'expense {expense_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def delete_expense_from_firebase(
+        self, 
+        mandate_path: str, 
+        expense_id: str
+    ) -> bool:
+        """
+        Supprime une expense de Firebase.
+        
+        Args:
+            mandate_path: Chemin du mandat
+            expense_id: ID de l'expense à supprimer
+        
+        Returns:
+            bool: True si succès, False sinon
+        """
+        try:
+            # Chemin vers le document working_doc
+            expenses_doc_path = f"{mandate_path}/working_doc/expenses_details"
+            print(f"🗑️ [FIREBASE] Suppression de l'expense {expense_id} dans: {expenses_doc_path}")
+            
+            # Vérifier d'abord que l'expense existe et n'est pas "close"
+            doc_ref = self.db.document(expenses_doc_path)
+            doc = doc_ref.get()
+            
+            if not doc.exists:
+                print(f"⚠️ [FIREBASE] Document working_doc n'existe pas: {expenses_doc_path}")
+                return False
+            
+            doc_data = doc.to_dict()
+            expenses_data = doc_data.get("items", {})
+            
+            if expense_id not in expenses_data:
+                print(f"⚠️ [FIREBASE] Expense {expense_id} non trouvée")
+                return False
+            
+            expense = expenses_data[expense_id]
+            if expense.get("status") == "close":
+                print(f"⚠️ [FIREBASE] Impossible de supprimer une expense avec status 'close'")
+                return False
+            
+            # Utiliser firestore.DELETE_FIELD pour supprimer le champ
+            doc_ref.update({
+                f"items.{expense_id}": firestore.DELETE_FIELD
+            })
+            
+            print(f"✅ [FIREBASE] Expense {expense_id} supprimée avec succès")
+            return True
+            
+        except Exception as e:
+            print(f"❌ [FIREBASE] Erreur lors de la suppression de l'expense {expense_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+
     def x_check_job_status(self, user_id: str, job_id: str = None, file_id: str = None):
         """
         Vérifie l'état d'un job ou d'un fichier spécifique en parcourant la collection de notifications.
@@ -2320,7 +2610,7 @@ class FirebaseManagement:
                     # Préparer les données à mettre à jour
                     update_data = {
                         'status': new_status,
-                        'timestamp': datetime.now().isoformat()  # Mettre à jour aussi le timestamp
+                        'timestamp': datetime.now(timezone.utc).isoformat()  # Mettre à jour aussi le timestamp
                     }
                     
                     # Ajouter les informations supplémentaires si fournies
@@ -3288,7 +3578,7 @@ class FirebaseManagement:
         """
         try:
             # Ajouter un timestamp aux données
-            data['timestamp'] = datetime.now()
+            data['timestamp'] = datetime.now(timezone.utc).isoformat()
             
             
             # Ajouter le document avec un ID généré automatiquement
@@ -3321,7 +3611,7 @@ class FirebaseManagement:
             file_id = job_data['file_id']
             
             # Mettre à jour le timestamp
-            job_data['timestamp'] = datetime.now()
+            job_data['timestamp'] = datetime.now(timezone.utc).isoformat()
             
             # Utiliser directement le file_id comme ID du document
             doc_ref = self.db.collection(collection_path).document(file_id)
@@ -3366,7 +3656,7 @@ class FirebaseManagement:
             print(f"[DEBUG] Processing job_id: {job_id}")
 
             # Mettre à jour le timestamp
-            job_data['timestamp'] = datetime.now()
+            job_data['timestamp'] = datetime.now(timezone.utc).isoformat()
 
             # Utiliser directement le job_id comme ID du document
             doc_ref = self.db.collection(collection_path).document(job_id)
@@ -3418,7 +3708,7 @@ class FirebaseManagement:
                 notification_payload = {
                     "type": "notif.job_updated",
                     "uid": user_id,
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "payload": {
                         "job_id": job_data.get("job_id"),
                         "batch_id": job_data.get("batch_id"),
@@ -3461,7 +3751,7 @@ class FirebaseManagement:
             job_id = job_data['batch_id']
             
             # Mettre à jour le timestamp
-            job_data['timestamp'] = datetime.now()
+            job_data['timestamp'] = datetime.now(timezone.utc).isoformat()
             
             # Utiliser directement le job_id comme ID du document
             doc_ref = self.db.collection(collection_path).document(job_id)
@@ -3498,7 +3788,7 @@ class FirebaseManagement:
         
         try:
             # Ajouter un timestamp aux données
-            data['timestamp'] = datetime.now()
+            data['timestamp'] = datetime.now(timezone.utc).isoformat()
             merge = bool(merge) if merge is not None else False
             # Ajouter le document à Firestore
             doc_ref = self.db.collection(collection_path).document()
@@ -3586,7 +3876,7 @@ class FirebaseManagement:
         # Générer un objet datetime pour le timestamp actuel
 
 
-        log_entry['timestamp'] = datetime.now()
+        log_entry['timestamp'] = datetime.now(timezone.utc).isoformat()
    
         # Appeler la fonction d'upload
         self.upload_to_firebase(log_entry)
@@ -4748,7 +5038,7 @@ class FirebaseManagement:
         # Étape 2: Ajouter le nouveau message
         message_key = str(next_message_number)  # Convertir en chaîne pour l'utilisation comme clé
         messages[message_key] = {
-            'datetime': datetime.now(),
+            'datetime': datetime.now(timezone.utc).isoformat(),
             'message': message,
             'sent_to': sent_to,
             'send_from': sent_from
@@ -5423,83 +5713,17 @@ class FirebaseManagement:
         except Exception as e:
             print(f"Erreur lors de l'ajout du rapport d'audit : {e}")
 
-    def x_download_auditor_review_on_step(self,user_id, job_id):
-        """
-        Télécharge un rapport d'audit depuis la sous-collection 'internal_message' 
-        dans un document spécifié par job_id dans la collection 'task_manager'.
-        
-        Args:
-            job_id (str): L'ID du travail pour lequel le rapport d'audit est récupéré.
-            
-        Returns:
-            str: Le texte du rapport d'audit dans le champ 'step_review'.
-        """
-        try:
-            if user_id:
-                document_path = f'clients/{user_id}/task_manager'
-            else:
-                document_path = f"task_manager"
-            # Construction du chemin vers le document spécifié par job_id dans la collection 'task_manager'
-            job_doc_ref = self.db.collection(document_path).document(job_id)
-            
-            # Accès à la sous-collection 'internal_message' du document trouvé
-            internal_message_ref = job_doc_ref.collection('internal_message')
-            
-            # Référence au document 'audit_report' dans la sous-collection 'internal_message'
-            audit_report_ref = internal_message_ref.document('audit_report')
-            
-            # Récupérer le document 'audit_report'
-            audit_report_doc = audit_report_ref.get()
-            
-            def format_audit_report(data):
-                """
-                Transforme un dictionnaire en une chaîne de caractères formatée pour l'historique de log.
-                
-                Args:
-                    data (dict): Le dictionnaire contenant les informations d'audit.
-                
-                Returns:
-                    str: La chaîne de caractères formatée.
-                """
-                formatted_string = "Historique de log:\n"
-                
-                for step_key, step_value in data.items():
-                    for step_name, details in step_value.items():
-                        report = details.get('report', '')
-                        formatted_string += f"Nom de l'étape: {step_name}\n"
-                        formatted_string += f"Detail:\n{report}\n\n"
-                
-                return formatted_string
-            
-            if audit_report_doc.exists:
-                # Extraire et retourner le texte de l'audit
-                audit_report_data = audit_report_doc.to_dict()
-                audit_report_text = audit_report_data.get("step_review", "")
-                
-                # Vérifier si 'step_review' est un dictionnaire avant de formater
-                if isinstance(audit_report_text, dict):
-                    audit_report_text = format_audit_report(audit_report_text)
-                else:
-                    print(f"step_review n'est pas un dictionnaire: {audit_report_text}")
-                
-                return audit_report_text
-            else:
-                print("Le document 'audit_report' n'existe pas.")
-                return None
-                
-        except Exception as e:
-            print(f"Erreur lors du téléchargement du rapport d'audit: {e}")
-            return None
-
+    
     def download_auditor_review_on_step(self,user_id, job_id):
         """
         Télécharge un rapport d'audit depuis la sous-collection 'internal_message'.
+        Récupère également les données APBookeeper_step_status depuis le document principal.
         
         Args:
             job_id (str): L'ID du travail
             
         Returns:
-            dict: Structure de données contenant les étapes et leurs rapports
+            dict: Structure de données contenant les étapes, leurs rapports et le statut APBookeeper
         """
         try:
             if user_id:
@@ -5508,6 +5732,22 @@ class FirebaseManagement:
                 document_path = f"task_manager"
                 
             job_doc_ref = self.db.collection(document_path).document(job_id)
+            
+            # Initialiser la structure de données de retour
+            formatted_data = {
+                'step_name': {}
+            }
+            
+            # 1. 🆕 Récupérer APBookeeper_step_status depuis le document principal
+            job_doc = job_doc_ref.get()
+            if job_doc.exists:
+                job_data = job_doc.to_dict()
+                apbookeeper_steps = job_data.get('APBookeeper_step_status', {})
+                if isinstance(apbookeeper_steps, dict) and apbookeeper_steps:
+                    formatted_data['APBookeeper_step_status'] = apbookeeper_steps
+                    print(f"✅ APBookeeper_step_status trouvé dans le document principal: {apbookeeper_steps}")
+            
+            # 2. Récupérer les données d'audit_report depuis internal_message
             internal_message_ref = job_doc_ref.collection('internal_message')
             audit_report_ref = internal_message_ref.document('audit_report')
             audit_report_doc = audit_report_ref.get()
@@ -5517,31 +5757,21 @@ class FirebaseManagement:
                 step_review = audit_report_data.get("step_review", {})
                 
                 if isinstance(step_review, dict):
-                    # Transformation au format attendu
-                    formatted_data = {
-                        'step_name': {}
-                    }
-                    
                     for step_key, step_value in step_review.items():
                         for step_name, details in step_value.items():
                             formatted_data['step_name'][step_name] = {
                                 'report': details.get('report', '')
                             }
-                    
-                    print(f"Données formatées: {formatted_data}")
-                    return formatted_data
-                else:
-                    print(f"step_review n'est pas un dictionnaire: {step_review}")
-                    return {'step_name': {}}
-                    
-            else:
-                print("Le document 'audit_report' n'existe pas.")
-                return {'step_name': {}}
+            
+            print(f"Données formatées (avec workflow): {formatted_data}")
+            return formatted_data
                 
         except Exception as e:
             print(f"Erreur lors du téléchargement du rapport d'audit: {e}")
             return {'step_name': {}}
     
+    
+
     def get_uri_drive_link_and_file_name(self,user_id, job_id):
         if user_id:
             document_path = f'clients/{user_id}/task_manager'
@@ -5600,8 +5830,11 @@ class FirebaseManagement:
     def restart_job(self,user_id, job_id: str) -> bool:
         """
         Redémarre un job en supprimant les données initiales et le rapport d'audit.
+        Supprime les champs: APBookeeper_step_status, current_step, Document_information
+        Supprime les documents: initial_data, audit_report
         
         Args:
+            user_id (str): L'identifiant de l'utilisateur
             job_id (str): L'identifiant du job à redémarrer
             
         Returns:
@@ -5621,30 +5854,108 @@ class FirebaseManagement:
             job_doc_ref = self.db.collection(base_path).document(job_id)
             
             # Vérifier si le document principal existe
-            if not job_doc_ref.get().exists:
+            job_doc = job_doc_ref.get()
+            if not job_doc.exists:
                 print(f"Error: No job found with id {job_id}")
-                return False
+                return True
             
-            job_doc_ref.set({
-            'APBookkeeper_step_status': 'DOCUMENT_EXTRACTION'
-            })
-            print(f"Successfully updated step status for job {job_id}")
+            # Lire les données actuelles pour déboguer
+            current_data = job_doc.to_dict()
+            print(f"Current document data before deletion: {list(current_data.keys())}")
+            
+            # Suppression des champs APBookeeper_step_status, current_step et Document_information en une seule opération
+            fields_to_delete = {}
+            # Note: Le champ s'appelle APBookeeper avec un seul 'k', pas APBookkeeper
+            if 'APBookeeper_step_status' in current_data:
+                fields_to_delete['APBookeeper_step_status'] = firestore.DELETE_FIELD
+                print(f"Marking APBookeeper_step_status for deletion")
+            
+            if 'current_step' in current_data:
+                fields_to_delete['current_step'] = firestore.DELETE_FIELD
+                print(f"Marking current_step for deletion")
+            
+            if 'Document_information' in current_data:
+                fields_to_delete['Document_information'] = firestore.DELETE_FIELD
+                print(f"Marking Document_information for deletion")
+            
+            # Exécuter la suppression si des champs existent
+            if fields_to_delete:
+                print(f"Deleting fields: {list(fields_to_delete.keys())}")
+                job_doc_ref.update(fields_to_delete)
+                
+                # Attendre un court instant pour que Firebase traite la requête
+                time.sleep(0.5)
+                
+                # Vérifier que les champs ont bien été supprimés
+                updated_doc = job_doc_ref.get()
+                if updated_doc.exists:
+                    doc_data = updated_doc.to_dict()
+                    print(f"Document data after deletion: {list(doc_data.keys())}")
+                    
+                    failed_deletions = []
+                    if 'APBookeeper_step_status' in doc_data:
+                        failed_deletions.append('APBookeeper_step_status')
+                        print(f"WARNING: APBookeeper_step_status still exists after deletion")
+                        print(f"Current value: {doc_data['APBookeeper_step_status']}")
+                    
+                    if 'current_step' in doc_data:
+                        failed_deletions.append('current_step')
+                        print(f"WARNING: current_step still exists after deletion")
+                        print(f"Current value: {doc_data['current_step']}")
+                    
+                    if 'Document_information' in doc_data:
+                        failed_deletions.append('Document_information')
+                        print(f"WARNING: Document_information still exists after deletion")
+                        print(f"Current value: {doc_data['Document_information']}")
+                    
+                    if failed_deletions:
+                        print(f"ERROR: Failed to delete fields: {failed_deletions}")
+                        return False
+                    else:
+                        print(f"Successfully deleted all requested fields for job {job_id}")
+                else:
+                    print(f"WARNING: Document {job_id} no longer exists")
+            else:
+                print(f"No fields to delete for job {job_id}")
+
 
             # Accès à la sous-collection 'document'
             document_collection_ref = job_doc_ref.collection('document')
             
             # Supprimer initial_data
             initial_data_ref = document_collection_ref.document('initial_data')
-            if initial_data_ref.get().exists:
+            initial_data_doc = initial_data_ref.get()
+            if initial_data_doc.exists:
+                print(f"Deleting initial_data document...")
                 initial_data_ref.delete()
-                print(f"Successfully deleted initial_data for job {job_id}")
+                time.sleep(0.3)  # Attendre que la suppression soit traitée
+                
+                # Vérifier que le document a bien été supprimé
+                if initial_data_ref.get().exists:
+                    print(f"WARNING: initial_data still exists after deletion for job {job_id}")
+                    return False
+                else:
+                    print(f"Successfully deleted initial_data for job {job_id}")
+            else:
+                print(f"initial_data document does not exist for job {job_id}, skipping deletion")
 
-            audit_report_path=job_doc_ref.collection('internal_message')  
-            # Supprimer audit_report
+            # Supprimer audit_report de la sous-collection internal_message
+            audit_report_path = job_doc_ref.collection('internal_message')  
             audit_report_ref = audit_report_path.document('audit_report')
-            if audit_report_ref.get().exists:
+            audit_report_doc = audit_report_ref.get()
+            if audit_report_doc.exists:
+                print(f"Deleting audit_report document...")
                 audit_report_ref.delete()
-                print(f"Successfully deleted audit_report for job {job_id}")
+                time.sleep(0.3)  # Attendre que la suppression soit traitée
+                
+                # Vérifier que le document a bien été supprimé
+                if audit_report_ref.get().exists:
+                    print(f"WARNING: audit_report still exists after deletion for job {job_id}")
+                    return False
+                else:
+                    print(f"Successfully deleted audit_report for job {job_id}")
+            else:
+                print(f"audit_report document does not exist for job {job_id}, skipping deletion")
             
             print(f"Successfully restarted job {job_id}")
             return True
@@ -5724,7 +6035,7 @@ class FirebaseManagement:
             chat_messages_ref = internal_message_ref.document('chat_messages')
             
             # Ajouter un horodatage à la session de chat
-            timestamp = datetime.now().isoformat()
+            timestamp = datetime.now(timezone.utc).isoformat()
             session_data = {
                 'timestamp': timestamp,
                 'messages': chat_history
@@ -6102,7 +6413,7 @@ class FirebaseManagement:
             doc_ref = self.db.document(doc_path)
             
             # Effectuer la mise à jour avec les données fournies
-            update_data['timestamp'] = datetime.now()
+            update_data['timestamp'] = datetime.now(timezone.utc).isoformat()
             doc_ref.update(update_data)
             
             print(f"Document à '{doc_path}' mis à jour avec succès.")
@@ -6478,7 +6789,7 @@ class FirebaseManagement:
 
         # Obtenir le timestamp actuel et le formater
         #current_timestamp = time.time()
-        from datetime import datetime as _dt
+        from datetime import datetime, timezone as _dt
         formatted_time = _dt.utcnow().isoformat()
         #formatted_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(current_timestamp))
 
@@ -7638,7 +7949,7 @@ class FirebaseRealtimeChat:
                 message_data['sender_id'] = user_id
                 
             if 'timestamp' not in message_data:
-                message_data['timestamp'] = str(datetime.now())
+                message_data['timestamp'] = datetime.now(timezone.utc).isoformat()
             
             # Envoyer le message
             messages_ref.push(message_data)
@@ -7785,11 +8096,11 @@ class FirebaseRealtimeChat:
             test_result = None
             try:
                 test_ref = self.db.child('connection_test')
-                test_result = test_ref.set({"timestamp": str(datetime.now())})
+                test_result = test_ref.set({"timestamp": datetime.now(timezone.utc).isoformat()})
             except AttributeError:
                 # Essayer avec db.reference
                 test_ref = firebase_admin.db.reference('connection_test', url=database_url)
-                test_result = test_ref.set({"timestamp": str(datetime.now())})
+                test_result = test_ref.set({"timestamp": datetime.now(timezone.utc).isoformat()})
             
             print(f"✅ Test de connexion réussi: {test_result}")
             
@@ -7853,7 +8164,7 @@ class FirebaseRealtimeChat:
             thread_data = {
                 "thread_name": thread_name,
                 "thread_key": thread_key,
-                "created_at": str(datetime.now()),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "created_by": user_id,
                 "chat_mode": chat_mode,  # Ajouter le chat_mode dans les données du thread
                 "messages": {}  # Messages vides au départ
@@ -7871,7 +8182,7 @@ class FirebaseRealtimeChat:
                 "mode": mode,
                 "chat_mode": chat_mode,
                 "name": thread_name,
-                "last_activity": str(datetime.now()),
+                "last_activity": datetime.now(timezone.utc).isoformat(),
                 "message_count": 0
             }
             
@@ -8092,7 +8403,7 @@ class FirebaseRealtimeChat:
         """
         try:
             message_data = {
-                'timestamp': str(datetime.now()),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
                 'sender_id': user_id,
                 'message_type': 'SPEEDDIAL',
                 'action': action,
@@ -8313,7 +8624,7 @@ class FirebaseRealtimeChat:
                     'tool_list': tool_names
                 }),
                 'sender_id': user_id,
-                'timestamp': str(datetime.now()),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
                 'message_type': 'TOOL',
                 'read': False
             }
@@ -8368,7 +8679,7 @@ class FirebaseRealtimeChat:
                     message_data = {
                         'content': text,
                         'sender_id': user_id,
-                        'timestamp': str(datetime.now()),
+                        'timestamp': datetime.now(timezone.utc).isoformat(),
                         'message_type': message_type,
                         'read': False
                     }
