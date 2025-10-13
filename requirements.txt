@@ -15,7 +15,7 @@ pydantic>=2.11.0
 python-dotenv==1.1.1
 # ChromaDB dependencies (version compatible avec serveur existant)
 chromadb==0.4.14
-openai==0.28
+
 # Additional dependencies for ChromaDB
 numpy>=1.24.0
 pandas>=2.0.0
