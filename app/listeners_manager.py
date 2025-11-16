@@ -11,7 +11,7 @@ from .config import get_settings
 from .firebase_client import get_firestore
 from .redis_client import get_redis
 from .ws_hub import hub
-from .registry_listeners import get_registry_listeners
+from .registry import get_registry_listeners
 import os
 import firebase_admin
 from firebase_admin import db as rtdb
@@ -74,7 +74,7 @@ class ListenersManager:
         """Récupère la configuration du workflow listener depuis les variables d'environnement ou secrets."""
         try:
             # Vérifier d'abord les variables d'environnement
-            workflow_enabled = os.getenv("WORKFLOW_LISTENER_ENABLED", "false").lower()
+            workflow_enabled = os.getenv("WORKFLOW_LISTENER_ENABLED", "true").lower()  # Activé par défaut
             return workflow_enabled in ("true", "1", "yes", "on")
         except Exception:
             return True  # Activé par défaut
@@ -176,6 +176,18 @@ class ListenersManager:
                 self.logger.info("user_attach_message_listener_attached uid=%s", uid)
             self._publish_messages_sync(uid)
 
+            # ⭐ Workflow listener (surveille task_manager pour APBookeeper_step_status)
+            if self._workflow_enabled:
+                self.logger.info("user_attach_workflow_listener uid=%s", uid)
+                workflow_unsubs = self._start_workflow_listener(uid)
+                if workflow_unsubs:
+                    with self._lock:
+                        self._workflow_unsubs[uid] = workflow_unsubs
+                    self.logger.info("user_attach_workflow_listener_attached uid=%s count=%s", uid, len(workflow_unsubs))
+                else:
+                    self.logger.warning("user_attach_workflow_listener_failed uid=%s", uid)
+            else:
+                self.logger.debug("user_attach_workflow_listener_skipped uid=%s reason=disabled", uid)
             
             with self._lock:
                 self._user_unsubs[uid] = unsubs
@@ -272,8 +284,27 @@ class ListenersManager:
 
     def _publish(self, uid: str, payload: dict) -> None:
         evt_type = str(payload.get("type", ""))
-        # Canal par défaut (événements généraux par utilisateur)
+        
+        # ⭐ Événements workflow : UNIQUEMENT WebSocket (pas de Redis)
+        if evt_type.startswith("workflow"):
+            job_id = payload.get("job_id")
+            space_code = payload.get("space_code")
+            
+            self.logger.debug("workflow_wss_publish_start uid=%s type=%s job_id=%s space_code=%s",
+                            uid, evt_type, job_id, space_code)
+            
+            try:
+                hub.broadcast_threadsafe(uid, payload)
+                self.logger.info("workflow_wss_success uid=%s type=%s job_id=%s space_code=%s", 
+                               uid, evt_type, job_id, space_code)
+            except Exception as e:
+                self.logger.error("workflow_wss_error uid=%s type=%s job_id=%s error=%s", 
+                                uid, evt_type, job_id, repr(e), exc_info=True)
+            return  # Sortie anticipée, pas de Redis pour workflow
+        
+        # Pour autres types : Redis + WebSocket (comportement existant)
         channel = f"{self.settings.channel_prefix}{uid}"
+        
         # Canal dédié pour chat si configuré
         if evt_type.startswith("chat"):
             chat_prefix = os.getenv("LISTENERS_CHAT_CHANNEL_PREFIX", "chat:")
@@ -281,6 +312,7 @@ class ListenersManager:
             tk = payload.get("payload", {}).get("thread_key")
             if sc and tk:
                 channel = f"{chat_prefix}{uid}:{sc}:{tk}"
+        
         try:
             self.redis.publish(channel, json.dumps(payload))
         except Exception as e:
@@ -450,16 +482,17 @@ class ListenersManager:
         """Écoute les messages d'un thread de chat dans RTDB et publie sur Redis.
 
         Sélection du chemin RTDB:
-        - Si mode explicite vaut "chats" ou "job_chats", on l'utilise tel quel.
-        - Si mode absent/"auto"/invalide: on tente d'abord chats/, puis fallback job_chats/.
+        - Si mode explicite vaut "chats", "active_chats" ou "job_chats", on l'utilise tel quel.
+        - Si mode absent/"auto"/invalide: on tente d'abord active_chats/, puis chats/, puis job_chats/.
         """
         try:
             selected_mode = (mode or "auto").strip()
             candidate_modes: List[str]
-            if selected_mode in ("chats", "job_chats"):
+            valid_modes = ("chats", "active_chats", "job_chats")
+            if selected_mode in valid_modes:
                 candidate_modes = [selected_mode]
             else:
-                candidate_modes = ["chats", "job_chats"]
+                candidate_modes = ["active_chats", "chats", "job_chats"]
 
             ref = None
             chosen_mode = None
@@ -540,6 +573,120 @@ class ListenersManager:
                     
                     msg_id = event.path.lstrip("/")
                     message_data = {"id": msg_id, **event.data}
+                    
+                    # ═══════════════════════════════════════════════════════════
+                    # DÉTECTION DES MESSAGES D'APPROBATION DE CARTE
+                    # ═══════════════════════════════════════════════════════════
+                    # Si le message contient un champ 'action', c'est une réponse de carte
+                    # qui doit être routée vers send_card_response au lieu d'être traitée
+                    # comme un message normal
+                    action = event.data.get('action')
+                    if action:
+                        self.logger.info(
+                            "🃏 CARD_ACTION_DETECTED uid=%s msg_id=%s action=%s thread=%s data_keys=%s",
+                            uid, msg_id, action, thread_key, list(event.data.keys())
+                        )
+                        
+                        # Extraire les informations nécessaires pour send_card_response
+                        # Essayer plusieurs structures possibles pour card_name
+                        card_name = None
+                        message_obj = event.data.get('message')
+                        if isinstance(message_obj, dict):
+                            # Structure Google Chat Card
+                            card_params = message_obj.get('cardParams', {})
+                            if isinstance(card_params, dict):
+                                card_name = card_params.get('cardId')
+                            
+                            # Essayer aussi dans cardsV2
+                            if not card_name:
+                                cards_v2 = message_obj.get('cardsV2', [])
+                                if cards_v2 and len(cards_v2) > 0:
+                                    first_card = cards_v2[0] if isinstance(cards_v2[0], dict) else {}
+                                    card_name = first_card.get('cardId')
+                        
+                        # Essayer d'extraire depuis d'autres champs possibles
+                        if not card_name:
+                            card_name = event.data.get('cardId') or event.data.get('card_name') or 'approval_card'
+                        
+                        # Extraire le message utilisateur (commentaire optionnel)
+                        user_message = ""
+                        if isinstance(message_obj, dict):
+                            # Structure Google Chat Card avec common.formInputs
+                            common = message_obj.get('common', {})
+                            if isinstance(common, dict):
+                                form_inputs = common.get('formInputs', {})
+                                if isinstance(form_inputs, dict):
+                                    user_msg_input = form_inputs.get('user_message', {})
+                                    if isinstance(user_msg_input, dict):
+                                        string_inputs = user_msg_input.get('stringInputs', {})
+                                        if isinstance(string_inputs, dict):
+                                            values = string_inputs.get('value', [])
+                                            if values and len(values) > 0:
+                                                user_message = str(values[0])
+                        
+                        # Extraire card_message_id depuis le message ou utiliser msg_id
+                        # Le card_message_id peut être dans différents endroits selon la structure
+                        card_message_id = (
+                            event.data.get('card_message_id') or 
+                            event.data.get('assistant_message_id') or
+                            (message_obj.get('assistant_message_id') if isinstance(message_obj, dict) else None) or
+                            msg_id
+                        )
+                        
+                        # Appeler send_card_response de manière asynchrone
+                        try:
+                            import asyncio
+                            from .llm_service import get_llm_manager
+                            
+                            async def handle_card_response():
+                                try:
+                                    llm_manager = get_llm_manager()
+                                    result = await llm_manager.send_card_response(
+                                        user_id=uid,
+                                        collection_name=space_code,
+                                        thread_key=thread_key,
+                                        card_name=card_name,
+                                        card_message_id=card_message_id,
+                                        action=action,
+                                        user_message=user_message
+                                    )
+                                    self.logger.info(
+                                        "✅ CARD_RESPONSE_HANDLED uid=%s msg_id=%s action=%s result=%s",
+                                        uid, msg_id, action, result.get('success', False)
+                                    )
+                                except Exception as e:
+                                    self.logger.error(
+                                        "❌ CARD_RESPONSE_ERROR uid=%s msg_id=%s error=%s",
+                                        uid, msg_id, str(e), exc_info=True
+                                    )
+                            
+                            # Exécuter de manière asynchrone dans la boucle d'événements
+                            try:
+                                loop = asyncio.get_event_loop()
+                                if loop.is_running():
+                                    # Si la boucle est déjà en cours d'exécution, créer une tâche
+                                    asyncio.create_task(handle_card_response())
+                                else:
+                                    # Sinon, exécuter directement
+                                    loop.run_until_complete(handle_card_response())
+                            except RuntimeError:
+                                # Si aucune boucle n'existe, en créer une nouvelle
+                                asyncio.run(handle_card_response())
+                            
+                        except Exception as e:
+                            self.logger.error(
+                                "❌ CARD_ACTION_ROUTING_ERROR uid=%s msg_id=%s error=%s",
+                                uid, msg_id, str(e), exc_info=True
+                            )
+                        
+                        # Marquer comme lu
+                        try:
+                            ref.child(msg_id).update({"read": True})
+                        except Exception:
+                            pass
+                        
+                        # Ne pas publier comme chat.message normal
+                        return
                     
                     self.logger.info("🔵 CHAT_MESSAGE_PROCESSING uid=%s msg_id=%s content_preview=%s", 
                                    uid, msg_id, str(event.data.get('content', ''))[:50])
@@ -640,14 +787,24 @@ class ListenersManager:
         unsubs: List[Callable[[], None]] = []
 
         try:
-            self.logger.info("workflow_listener_start uid=%s", uid)
+            self.logger.info("workflow_listener_start uid=%s enabled=%s", uid, self._workflow_enabled)
+            
+            if not self._workflow_enabled:
+                self.logger.info("workflow_listener_disabled uid=%s reason=config", uid)
+                return []
 
             # Initialiser le cache pour cet utilisateur
             cache_key = uid
             if cache_key not in self._workflow_cache:
                 self._workflow_cache[cache_key] = {}
+                self.logger.debug("workflow_cache_initialized uid=%s cache_key=%s", uid, cache_key)
+            else:
+                self.logger.debug("workflow_cache_exists uid=%s cache_key=%s", uid, cache_key)
 
             # Surveiller tous les documents dans task_manager
+            task_manager_path = f"clients/{uid}/task_manager"
+            self.logger.debug("workflow_listener_path uid=%s path=%s", uid, task_manager_path)
+            
             task_manager_collection = (
                 self.db.collection("clients")
                 .document(uid)
@@ -656,18 +813,20 @@ class ListenersManager:
 
             def on_task_manager_snapshot(docs, changes, read_time):
                 try:
+                    self.logger.debug("workflow_snapshot_received uid=%s docs_count=%s changes_count=%s",
+                                    uid, len(docs), len(changes))
                     self._on_workflow_changes(uid, docs, changes, read_time)
                 except Exception as e:
-                    self.logger.error("workflow_snapshot_error uid=%s error=%s", uid, repr(e))
+                    self.logger.error("workflow_snapshot_error uid=%s error=%s", uid, repr(e), exc_info=True)
 
             # Attacher le listener sur toute la collection task_manager
             unsub_workflow = task_manager_collection.on_snapshot(on_task_manager_snapshot)
             unsubs.append(unsub_workflow)
 
-            self.logger.info("workflow_listener_attached uid=%s", uid)
+            self.logger.info("workflow_listener_attached uid=%s path=%s", uid, task_manager_path)
 
         except Exception as e:
-            self.logger.error("workflow_listener_error uid=%s error=%s", uid, repr(e))
+            self.logger.error("workflow_listener_error uid=%s error=%s", uid, repr(e), exc_info=True)
             # Nettoyer les listeners en cas d'erreur
             for u in unsubs:
                 try:
@@ -681,28 +840,46 @@ class ListenersManager:
     def _on_workflow_changes(self, uid: str, docs, changes, read_time) -> None:
         """Traite les changements dans les documents task_manager."""
         try:
+            self.logger.debug("workflow_changes_start uid=%s changes_count=%s", uid, len(changes))
+            
             for change in changes:
                 doc = change.document
                 job_id = doc.id
                 doc_data = doc.to_dict() or {}
+                
+                self.logger.debug("workflow_change_detected uid=%s job_id=%s change_type=%s", 
+                                uid, job_id, change.type.name if hasattr(change, 'type') else 'unknown')
+
+                # Extraire space_code si disponible dans le document (optionnel, pour information)
+                space_code = doc_data.get("collection_id") or doc_data.get("space_code")
+                
+                self.logger.debug("workflow_doc_data uid=%s job_id=%s space_code=%s has_apbookeeper=%s has_document=%s",
+                                uid, job_id, space_code,
+                                "APBookeeper_step_status" in doc_data,
+                                "document" in doc_data)
 
                 # Traiter les changements de données de facture
-                self._process_invoice_changes(uid, job_id, doc_data)
+                self._process_invoice_changes(uid, job_id, doc_data, space_code)
 
                 # Traiter les changements d'étapes APBookeeper
-                self._process_step_changes(uid, job_id, doc_data)
+                self._process_step_changes(uid, job_id, doc_data, space_code)
+            
+            self.logger.debug("workflow_changes_complete uid=%s", uid)
 
         except Exception as e:
-            self.logger.error("workflow_changes_error uid=%s error=%s", uid, repr(e))
+            self.logger.error("workflow_changes_error uid=%s error=%s", uid, repr(e), exc_info=True)
 
-    def _process_invoice_changes(self, uid: str, job_id: str, doc_data: dict) -> None:
+    def _process_invoice_changes(self, uid: str, job_id: str, doc_data: dict, space_code: Optional[str] = None) -> None:
         """Traite les changements dans les données de facture."""
         try:
+            self.logger.debug("invoice_changes_start uid=%s job_id=%s", uid, job_id)
+            
             # Extraire les données de facture
             document = doc_data.get("document", {})
             initial_data = document.get("initial_data", {})
 
             if not initial_data:
+                self.logger.debug("invoice_changes_no_data uid=%s job_id=%s reason=no_initial_data", uid, job_id)
                 return
 
             # Champs de facture à surveiller
@@ -717,6 +894,9 @@ class ListenersManager:
             # Construire la clé de cache
             cache_key = f"{uid}_invoice_{job_id}"
             previous_data = self._workflow_cache.get(cache_key, {})
+            
+            self.logger.debug("invoice_changes_cache_check uid=%s job_id=%s cache_key=%s has_previous=%s",
+                            uid, job_id, cache_key, bool(previous_data))
 
             # Détecter les changements
             invoice_changes = {}
@@ -726,41 +906,61 @@ class ListenersManager:
 
                 if current_value != previous_value:
                     invoice_changes[field] = current_value
+                    self.logger.debug("invoice_field_changed uid=%s job_id=%s field=%s previous=%s current=%s",
+                                    uid, job_id, field, previous_value, current_value)
 
             # Publier seulement s'il y a des changements
             if invoice_changes:
-                self.logger.info("workflow_invoice_changes uid=%s job_id=%s changes=%s", uid, job_id, list(invoice_changes.keys()))
+                self.logger.info("workflow_invoice_changes uid=%s job_id=%s space_code=%s changes=%s", 
+                               uid, job_id, space_code, list(invoice_changes.keys()))
 
                 payload = {
                     "type": "workflow.invoice_update",
                     "uid": uid,
                     "job_id": job_id,
+                    "space_code": space_code,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "payload": {
                         "invoice_changes": invoice_changes
                     }
                 }
+                
+                self.logger.debug("invoice_changes_publishing uid=%s job_id=%s payload_size=%s",
+                                uid, job_id, len(str(payload)))
 
                 self._publish(uid, payload)
 
                 # Mettre à jour le cache
                 self._workflow_cache[cache_key] = initial_data.copy()
+                self.logger.debug("invoice_changes_cache_updated uid=%s job_id=%s cache_key=%s",
+                                uid, job_id, cache_key)
+            else:
+                self.logger.debug("invoice_changes_no_changes uid=%s job_id=%s", uid, job_id)
 
         except Exception as e:
-            self.logger.error("invoice_changes_error uid=%s job_id=%s error=%s", uid, job_id, repr(e))
+            self.logger.error("invoice_changes_error uid=%s job_id=%s error=%s", uid, job_id, repr(e), exc_info=True)
 
-    def _process_step_changes(self, uid: str, job_id: str, doc_data: dict) -> None:
+    def _process_step_changes(self, uid: str, job_id: str, doc_data: dict, space_code: Optional[str] = None) -> None:
         """Traite les changements dans les étapes APBookeeper."""
         try:
+            self.logger.debug("step_changes_start uid=%s job_id=%s", uid, job_id)
+            
             # Extraire les données d'étapes
             step_status = doc_data.get("APBookeeper_step_status", {})
 
             if not step_status:
+                self.logger.debug("step_changes_no_data uid=%s job_id=%s reason=no_APBookeeper_step_status", uid, job_id)
                 return
+
+            self.logger.debug("step_changes_data uid=%s job_id=%s steps_count=%s steps=%s",
+                            uid, job_id, len(step_status), list(step_status.keys()))
 
             # Construire la clé de cache
             cache_key = f"{uid}_steps_{job_id}"
             previous_steps = self._workflow_cache.get(cache_key, {})
+            
+            self.logger.debug("step_changes_cache_check uid=%s job_id=%s cache_key=%s has_previous=%s previous_steps=%s",
+                            uid, job_id, cache_key, bool(previous_steps), list(previous_steps.keys()) if previous_steps else [])
 
             # Détecter les changements d'étapes
             step_changes = {}
@@ -769,15 +969,19 @@ class ListenersManager:
 
                 if current_count != previous_count:
                     step_changes[step_name] = current_count
+                    self.logger.debug("step_changed uid=%s job_id=%s step=%s previous=%s current=%s",
+                                    uid, job_id, step_name, previous_count, current_count)
 
             # Publier seulement s'il y a des changements
             if step_changes:
-                self.logger.info("workflow_step_changes uid=%s job_id=%s changes=%s", uid, job_id, step_changes)
+                self.logger.info("workflow_step_changes uid=%s job_id=%s space_code=%s changes=%s", 
+                               uid, job_id, space_code, step_changes)
 
                 payload = {
                     "type": "workflow.step_update",
                     "uid": uid,
                     "job_id": job_id,
+                    "space_code": space_code,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "payload": {
                         "step_changes": {
@@ -785,14 +989,21 @@ class ListenersManager:
                         }
                     }
                 }
+                
+                self.logger.debug("step_changes_publishing uid=%s job_id=%s payload_size=%s steps_changed=%s",
+                                uid, job_id, len(str(payload)), len(step_changes))
 
                 self._publish(uid, payload)
 
                 # Mettre à jour le cache
                 self._workflow_cache[cache_key] = step_status.copy()
+                self.logger.debug("step_changes_cache_updated uid=%s job_id=%s cache_key=%s",
+                                uid, job_id, cache_key)
+            else:
+                self.logger.debug("step_changes_no_changes uid=%s job_id=%s", uid, job_id)
 
         except Exception as e:
-            self.logger.error("step_changes_error uid=%s job_id=%s error=%s", uid, job_id, repr(e))
+            self.logger.error("step_changes_error uid=%s job_id=%s error=%s", uid, job_id, repr(e), exc_info=True)
 
     # ========== Transaction Status Listeners ==========
 

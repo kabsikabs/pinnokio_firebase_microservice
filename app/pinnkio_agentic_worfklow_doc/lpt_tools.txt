@@ -1,0 +1,606 @@
+Tu es Pinnokio un agent spécialisée en travaux de comptabilité et d'administration.
+Tu es capable de saisir des factures, effecuter des reconciliation bancaire et de l'archivage de document.
+Tu as acces a plusieurs outils dont notamment acces a l'ERP , le DMS et tu peux demander a ce que des taches soit exécuté qui sont des travaux tel que la saisie de facture, la réconcilaition bancaire ou que l'archivage de document soit fait.
+
+
+LPT
+
+FileManager:
+Un agent qui selon le dms , peut faire des actions tel
+rechercher un fichier, créer des dossier, déplacer des fichier(s) et dossier(s), les supprimer.
+Dans son prompt system il obtiens la cartographie des dossier disponibles auquel il a acces et sa mission est d'exécuter la demande qui qu'il recoit , et doit terminer sa mission avec rapport.
+Il a acces un tool_kit a qui il demande des travaux (ce toolkit sera un autre agent_worflow qui pourra faire des travaux de creation de fichiers de gdoc, sheet, slide ect….), il s'occupe principalement de la consituation des ces fichiers et il termine pour les remettre à l'agent filemanager
+arguments: instructions (ceci va corrpondre a la demande exact est précise demandé)
+
+ERPManager:
+Un agent qui a acces a l'erp de l'utilisateur. Il peut acceder aux comptes, prendre les informations d'un débiteurs, creancier , générér des rapport financiers, passer des écritures comtpable manuelle , 
+Les rapport vont générer au travers d'un pdf ou nous allons devoir composer les layouts
+arguments: instructions (ceci va corrpondre a la demande exact est précise demandé)
+
+
+
+Apbookeeper:
+Un agent spécialisé dans la saisie de facture fournisseur doit respecter respecter un certains format de donnée pour l'exécuté
+Payload
+jobs_data.append({
+                                    "file_name": str(sel_file),
+                                    "job_id": str(sel_id),
+                                    "instructions": str(document_instructions),
+                                    "status": "to_process",
+                                    "approval_required": approval_required,
+                                    "approval_contact_creation": approval_contact_creation
+                                })
+batch_id = f'batch_{uuid.uuid4().hex[:10]}'
+                        
+                        # Créer le payload global
+                        settings = [
+                            {'communication_mode': self.communication_mode},
+                            {'log_communication_mode':self.log_communication_mode},
+                            {'dms_system': self.dms_type_extracted}
+                        ]
+                        
+                        payload = {
+                            "collection_name": str(self.base_collection_id),
+                            "jobs_data": jobs_data,
+                            "start_instructions": self.ap_general_instructions,
+                            "client_uuid": self.base_client_uuid_id,
+                            "user_id": self.firebase_user_id,
+                            "mandates_path": self.mandate_path if hasattr(self, 'mandate_path') else None,
+                            "batch_id": batch_id,
+                            "settings": settings
+                        }
+**les valeurs a l'expection de job_id et optionnellement si fournir des instructions génréal ou par fichier (en fonction de la demande de l'utilisateur) les autres champs seront automatiquement rempli 
+Point de terminaison
+def run_pinnokio_apbookeeper(self, payload, source=None, check_health=False, mthd='default'):
+        # URL du point de terminaison pour les différentes sources
+        if source is None:
+            source = os.environ.get('PINNOKIO_SOURCE', 'aws')  # 'aws' comme valeur par défaut
+         # Traitement du payload selon la méthode
+        if mthd == 'single':
+            final_payload = payload  # Utilise directement le dictionnaire fourni
+        else:  # méthode par défaut
+            collection_name=payload.get('collection_name')
+            final_payload = {'collection_name': collection_name}  # ici payload est traité comme collection_id
+        
+        docker_url = 'http://localhost:8080'
+        aws_url = 'http://klk-load-balancer-http-https-435479360.us-east-1.elb.amazonaws.com'
+        local_url = 'http://127.0.0.1:8081'
+        
+
+        # Choix de l'URL en fonction de la source
+        if source == 'docker':
+            base_url = docker_url
+        elif source == 'aws':
+            base_url = aws_url
+        elif source == 'local':
+            base_url = local_url
+        elif source=='ecs':
+            task_id=self.aws_service.run_task(final_payload)
+            return task_id
+        else:
+            raise ValueError("Source invalide. Choisissez parmi 'docker', 'aws' ou 'local'.")
+
+        # URL du point de terminaison pour l'event-trigger et la santé selon la source
+        url_event_trigger = f'{base_url}/apbookeeper-event-trigger'
+        url_health_check = f'{base_url}/health'
+
+        # Si check_health est True, on fait une requête GET pour vérifier la santé de l'application
+        if check_health:
+            print(f"Vérification de la santé de l'application avec GET sur {url_health_check}...")
+            response = requests.get(url_health_check)
+            if response.status_code == 200:
+                print('Health Check réussi !')
+                print('Réponse :', response.text)
+            else:
+                print('Erreur lors du Health Check :', response.status_code)
+            return response
+
+       
+
+        print(f"Envoi de la requête POST avec payload {final_payload} à {url_event_trigger}...")
+        response = requests.post(url_event_trigger, json=final_payload)
+
+        # Vérifie que la requête a réussi
+        if response.status_code == 202:
+            print('Requête POST réussie !')
+            print('Réponse :', response.json())
+            return response.json()
+        else:
+            return response.json()
+
+    async def stop_pinnokio_apbookeeper(self,payload, source=None, check_health=False):
+        """
+        Envoie un signal d'arrêt à l'application Pinnokio APBookkeeper en cours
+        """
+        if source is None:
+            source = os.environ.get('PINNOKIO_SOURCE', 'aws')  # 'aws' comme valeur par défaut
+        # Configuration des URLs
+        docker_url = 'http://localhost:8080'
+        aws_url = 'http://klk-load-balancer-http-https-435479360.us-east-1.elb.amazonaws.com'
+        local_url = 'http://127.0.0.1:8081'
+        
+        # Choix de l'URL en fonction de la source
+        if source == 'docker':
+            base_url = docker_url
+        elif source == 'aws':
+            base_url = aws_url
+        elif source == 'local':
+            base_url = local_url
+        elif source == 'ecs':
+            base_url = aws_url  # Utilise l'URL du load balancer pour ECS
+        else:
+            raise ValueError("Source invalide. Choisissez parmi 'docker', 'aws', 'local' ou 'ecs'.")
+
+        # URLs des endpoints
+        url_stop = f'{base_url}/stop_apbookeeper'
+        url_health_check = f'{base_url}/health'
+
+        # Vérification de la santé si demandée
+        if check_health:
+            print(f"Vérification de la santé de l'application avec GET sur {url_health_check}...")
+            response = requests.get(url_health_check)
+            if response.status_code == 200:
+                print('Health Check réussi !')
+                print('Réponse :', response.text)
+            else:
+                print('Erreur lors du Health Check :', response.status_code)
+            return response
+
+        # Envoi de la requête d'arrêt (sans payload)
+        print(f"Envoi de la requête d'arrêt à {url_stop}...")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url_stop, json=payload) as response:
+                status = response.status
+                try:
+                    json_response = await response.json()
+                except:
+                    json_response = {}
+                    text = await response.text()
+                    print("Réponse non-JSON:", text)
+                
+                if status == 200:
+                    print('Requête d\'arrêt réussie !')
+                    print('Réponse :', json_response)
+                    return {'status': status, 'message': "L'ordre d'arrêt a été exécuté correctement...", 'success': True}
+                else:
+                    error_message = f"Erreur lors de la requête d'arrêt : {status}"
+                    print(error_message)
+                    return {'status': status, 'message': error_message, 'success': False}
+        
+    
+
+
+Ensuite intégration dans firebase (ceci sera fait automaitquement apres la reussite de l'envoi du payload)
+
+Router
+payload = {
+                "collection_name": str(self.base_collection_id),
+                "jobs_data": [{
+                    "file_name": str(self.base_current_file_name),
+                    "drive_file_id":str(self.base_current_job_id),
+                    "instructions": str(self.current_instructions or ""),
+                    "status": 'to_route',
+                    "approval_required": self.router_approval_required,  
+                    "automated_workflow": self.router_automated_workflow
+                }],
+                "start_instructions": None,
+                "settings":[{"communication_mode":str(self.communication_mode)},
+                {"log_communication_mode":str(self.log_communication_mode)}
+                ],
+                "client_uuid":self.base_client_uuid_id
+            }
+payload['user_id']=self.firebase_user_id
+                    payload['pub_sub_id']=self.pub_sub_subscription_id if self.pub_sub_subscription_id else f'{self.base_current_job_id}'
+                    payload['mandates_path']=self.mandate_path
+                    settings = [
+                        {'communication_mode': self.communication_mode},
+                        {'log_communication_mode':self.log_communication_mode},
+                        {'dms_system':self.dms_type_extracted}
+                    
+                    ]
+                    payload['settings']=settings
+                    #aws_service=AWSManager()
+                    
+                    print(f"impression du payload Router:{payload}") 
+                    aws_service=PINNOKIO_DEPARTEMENTS()
+
+                    result = await aws_service.run_pinnokio_router(payload=payload,mthd='single') 
+a l'excption de drive_file_id , instructions par fichier ou instructions général , tout les valeurs seront automatiquement généré par payloade
+async def run_pinnokio_router(self,payload, source=None, check_health=False,mthd='default'):
+        # URL du point de terminaison pour les différentes sources
+        if source is None:
+            source = os.environ.get('PINNOKIO_SOURCE', 'aws')  # 'aws' comme valeur par défaut
+        if mthd == 'single':
+            final_payload = payload  # Utilise directement le dictionnaire fourni
+        else:  # méthode par défaut
+            collection_name=payload.get('collection_name')
+            final_payload = {'collection_name': collection_name}  # ici payload est traité comme collection_id
+        
+        docker_url = 'http://localhost:8080'
+        aws_url = 'http://klk-load-balancer-http-https-435479360.us-east-1.elb.amazonaws.com'
+        local_url = 'http://127.0.0.1:8080'
+
+        # Choix de l'URL en fonction de la source
+        if source == 'docker':
+            base_url = docker_url
+        elif source == 'aws':
+            base_url = aws_url
+        elif source == 'local':
+            base_url = local_url
+        else:
+            raise ValueError("Source invalide. Choisissez parmi 'docker', 'aws' ou 'local'.")
+
+        # URL du point de terminaison pour l'event-trigger et la santé selon la source
+        url_event_trigger = f'{base_url}/event-trigger'
+        url_health_check = f'{base_url}/health'
+
+        # Si check_health est True, on fait une requête GET pour vérifier la santé de l'application
+        if check_health:
+            print(f"Vérification de la santé de l'application avec GET sur {url_health_check}...")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url_health_check) as response:
+                    status = response.status
+                    text = await response.text()
+                    
+                    if status == 200:
+                        print('Health Check réussi !')
+                        print('Réponse :', text)
+                    else:
+                        print('Erreur lors du Health Check :', status)
+                    return {'status': status, 'text': text}
+
+        # Sinon, on envoie une requête POST avec des données au point de terminaison /event-trigger
+        
+        print(f"Envoi de la requête POST avec payload {final_payload} à {url_event_trigger}...")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url_event_trigger, json=final_payload) as response:
+                status = response.status
+                try:
+                    json_response = await response.json()
+                except:
+                    json_response = {}
+                    text = await response.text()
+                    print("Réponse non-JSON:", text)
+                
+                # Vérifie que la requête a réussi
+                if status == 202:
+                    print('Requête POST réussie !')
+                    print('Réponse :', json_response)
+                    return {'status': status, 'json': json_response, 'success': True}
+                else:
+                    print('Erreur lors de la requête POST :', status)
+                    return {'status': status, 'json': json_response, 'success': False}
+
+    
+    async def stop_pinnokio_router(self,payload, source=None, check_health=False):
+        """
+        Envoie un signal d'arrêt à l'application Pinnokio APBookkeeper en cours
+        """
+        # Configuration des URLs
+        docker_url = 'http://localhost:8080'
+        aws_url = 'http://klk-load-balancer-http-https-435479360.us-east-1.elb.amazonaws.com'
+        local_url = 'http://127.0.0.1:8080'
+        if source is None:
+            source = os.environ.get('PINNOKIO_SOURCE', 'aws')  # 'aws' comme valeur par défaut
+        # Choix de l'URL en fonction de la source
+        if source == 'docker':
+            base_url = docker_url
+        elif source == 'aws':
+            base_url = aws_url
+        elif source == 'local':
+            base_url = local_url
+        elif source == 'ecs':
+            base_url = aws_url  # Utilise l'URL du load balancer pour ECS
+        else:
+            raise ValueError("Source invalide. Choisissez parmi 'docker', 'aws', 'local' ou 'ecs'.")
+
+        # URLs des endpoints
+        url_stop = f'{base_url}/stop_router'
+        url_health_check = f'{base_url}/health'
+
+        # Vérification de la santé si demandée
+        if check_health:
+            print(f"Vérification de la santé de l'application avec GET sur {url_health_check}...")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url_health_check) as response:
+                    status = response.status
+                    text = await response.text()
+                    
+                    if status == 200:
+                        print('Health Check réussi !')
+                        print('Réponse :', text)
+                    else:
+                        print('Erreur lors du Health Check :', status)
+                    return {'status': status, 'text': text}
+
+        # Envoi de la requête d'arrêt (sans payload)
+        print(f"Envoi de la requête d'arrêt à {url_stop}...")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url_stop, json=payload) as response:
+                status = response.status
+                try:
+                    json_response = await response.json()
+                except:
+                    json_response = {}
+                    text = await response.text()
+                    print("Réponse non-JSON:", text)
+                
+                if status == 200:
+                    print('Requête d\'arrêt réussie !')
+                    print('Réponse :', json_response)
+                    return {'status': status, 'message': "L'ordre d'arrêt a été exécuté correctement...", 'success': True}
+                else:
+                    error_message = f"Erreur lors de la requête d'arrêt : {status}"
+                    print(error_message)
+                    return {'status': status, 'message': error_message, 'success': False}
+    
+-----
+Idem une notification sera généré
+
+Banker
+def run_pinnokio_banker(self,payload, source=None, check_health=False,mthd='default'):
+        
+        if source is None:
+            source = os.environ.get('PINNOKIO_SOURCE', 'aws')  # 'aws' comme valeur par défaut
+         # Traitement du payload selon la méthode
+        if mthd == 'single':
+            final_payload = payload  # Utilise directement le dictionnaire fourni
+        else:  # méthode par défaut
+            collection_name=payload.get('collection_name')
+            final_payload = {'collection_name': collection_name}  # ici payload est traité comme collection_id
+        # URL du point de terminaison pour les différentes sources
+        docker_url = 'http://localhost:8080'
+        aws_url = 'http://klk-load-balancer-http-https-435479360.us-east-1.elb.amazonaws.com'
+        local_url = 'http://127.0.0.1:8082'
+        if source is None:
+            source = os.environ.get('PINNOKIO_SOURCE', 'aws')  # 'aws' comme valeur par défaut
+        # Choix de l'URL en fonction de la source
+        if source == 'docker':
+            base_url = docker_url
+        elif source == 'aws':
+            base_url = aws_url
+        elif source == 'local':
+            base_url = local_url
+        else:
+            raise ValueError("Source invalide. Choisissez parmi 'docker', 'aws' ou 'local'.")
+
+        # URL du point de terminaison pour l'event-trigger et la santé selon la source
+        url_event_trigger = f'{base_url}/banker-event-trigger'
+        url_health_check = f'{base_url}/health'
+
+        # Si check_health est True, on fait une requête GET pour vérifier la santé de l'application
+        if check_health:
+            print(f"Vérification de la santé de l'application avec GET sur {url_health_check}...")
+            response = requests.get(url_health_check)
+            if response.status_code == 200:
+                print('Health Check réussi !')
+                print('Réponse :', response.text)  # La réponse est du texte brut
+            else:
+                print('Erreur lors du Health Check :', response.status_code)
+            return response
+
+        # Sinon, on envoie une requête POST avec des données au point de terminaison /event-trigger
+        
+        print(f"Envoi de la requête POST avec payload {payload} à {url_event_trigger}...")
+        response = requests.post(url_event_trigger, json=payload)
+
+        # Vérifie que la requête a réussi
+        if response.status_code == 202:
+            print('Requête POST réussie !')
+            print('Réponse :', response.json())  # La réponse est un JSON
+        else:
+            print('Erreur lors de la requête POST :', response.status_code)
+
+        return response
+    
+    def stop_pinnokio_banker(self, payload, source=None, check_health=False):
+        """
+        Arrête un ou plusieurs jobs Pinnokio Banker en cours d'exécution.
+        
+        Args:
+            job_id (str): ID du job principal à arrêter
+            user_id (str, optional): ID utilisateur pour l'authentification
+            job_ids (list, optional): Liste des IDs de jobs à arrêter (pour arrêt multiple)
+            source (str, optional): Source du serveur ('docker', 'aws', 'local'). 
+                                Par défaut utilise PINNOKIO_SOURCE ou 'aws'
+            check_health (bool): Si True, vérifie la santé du serveur avant l'arrêt
+            
+        Returns:
+            requests.Response: Réponse de la requête
+        """
+        
+        if source is None:
+            source = os.environ.get('PINNOKIO_SOURCE', 'aws')  # 'aws' comme valeur par défaut
+        
+        # URLs des points de terminaison pour les différentes sources
+        docker_url = 'http://localhost:8080'
+        aws_url = 'http://klk-load-balancer-http-https-435479360.us-east-1.elb.amazonaws.com'
+        local_url = 'http://127.0.0.1:8082'
+        
+        # Choix de l'URL en fonction de la source
+        if source == 'docker':
+            base_url = docker_url
+        elif source == 'aws':
+            base_url = aws_url
+        elif source == 'local':
+            base_url = local_url
+        else:
+            raise ValueError("Source invalide. Choisissez parmi 'docker', 'aws' ou 'local'.")
+
+        # URLs des points de terminaison
+        url_stop = f'{base_url}/stop_banker'
+        url_health_check = f'{base_url}/health'
+
+        # Si check_health est True, on fait une requête GET pour vérifier la santé de l'application
+        if check_health:
+            print(f"Vérification de la santé de l'application avec GET sur {url_health_check}...")
+            try:
+                response = requests.get(url_health_check, timeout=10)
+                if response.status_code == 200:
+                    print('Health Check réussi !')
+                    print('Réponse :', response.text)
+                else:
+                    print('Erreur lors du Health Check :', response.status_code)
+                return response
+            except requests.exceptions.RequestException as e:
+                print(f'Erreur lors du Health Check : {e}')
+                return None
+
+        # Préparation du payload pour l'arrêt
+        
+        
+        
+        print(f"Envoi de la requête POST d'arrêt pour le job  {url_stop}...")
+
+        try:
+            # Envoi de la requête POST pour arrêter le(s) job(s)
+            response = requests.post(url_stop, json=payload, timeout=30)
+
+            # Vérification que la requête a réussi
+            if response.status_code == 200:
+                print('Requête d\'arrêt réussie !')
+                print('Réponse :', response.json())
+            elif response.status_code == 404:
+                
+                print('Réponse :', response.json())
+            else:
+                print('Erreur lors de la requête d\'arrêt :', response.status_code)
+                try:
+                    print('Réponse :', response.json())
+                except:
+                    print('Réponse :', response.text)
+
+        except requests.exceptions.Timeout:
+            
+            return None
+        except requests.exceptions.RequestException as e:
+            print(f'Erreur lors de la requête d\'arrêt : {e}')
+            return None
+
+        return response.json()
+
+payload = {
+                    "collection_name": str(self.base_collection_id),
+                    "batch_id": str(self.current_batch_id),
+                    "jobs_data": [{
+                        "bank_account": str(self.current_bank_account),
+                        "job_id": str(self.current_job_id),
+                        "transactions": [
+                            {
+                                "transaction_id": tx.transaction_id,
+                                "transaction_name": tx.transaction_name,
+                                "date": tx.date,
+                                "ref": getattr(tx, "ref", ""),
+                                "amount": float(tx.amount),
+                                "currency_name": tx.currency_name,
+                                "partner_name": getattr(tx, "partner_name", ""),
+                                "transaction_type": getattr(tx, "transaction_type", ""),
+                                "payment_ref": getattr(tx, "payment_ref", ""),
+                                "journal_name": tx.journal_name,
+                                "status": getattr(tx, "status", "in_queue"),
+                            }
+                            for tx in self.transaction_batch
+                        ],
+                        "instructions": str(self.current_instructions or ""),
+                        "approval_required": self.approval_required,
+                        "approval_contact_creation": self.approval_contact_creation,
+                    }],
+                    "start_instructions": None,
+                    "settings": [
+                        {'communication_mode': self.communication_mode},
+                        {'log_communication_mode':self.log_communication_mode},
+                        {'dms_system': self.dms_type_extracted}
+                    ],
+                    "client_uuid": self.base_client_uuid_id,
+                    "user_id": self.firebase_user_id,
+                    "mandates_path": self.mandate_path
+                }
+                self.run_task_id = f"bank_batch_{self.current_batch_id}"
+                    payload['pub_sub_id'] = self.run_task_id
+                    
+                    # Lancer le processus bancaire
+                    result = aws_service.run_pinnokio_banker(
+                        payload=payload, 
+                        
+                        mthd='single'
+                    )
+
+Idem a part bank_account, et transaction_id , instruction individuelle et instruction général (optionnel) les autre champs seraont rempli automaitquement.une notificaation est également composé aprs automatiquement.
+
+
+
+
+MISE à JOUR NOTIFICATION pour BANKER:
+# Enregistrer la notification de traitement
+                        notification_path = f"clients/{self.firebase_user_id}/notifications"
+                        notification_data = {
+                            'function_name': 'Bankbookeeper',  # ✅ Correction: utiliser 'Bankbookeeper' au lieu de 'banker'
+                            'job_id': self.current_job_id,
+                            'batch_id': self.current_batch_id,
+                            'bank_account': self.current_bank_account,
+                            'transactions': payload['jobs_data'][0]['transactions'],
+                            'status': 'in queue',
+                            'read': False,
+                            'timestamp': datetime.now().isoformat(),
+                            'collection_id': self.base_collection_id,
+                            'collection_name': self.companies_search_term
+                        }
+                        
+                        firebase_service.add_or_update_job_by_job_id(notification_path, notification_data)
+
+Mise a jour Notification pour APBOOKEERPER:
+path = f"clients/{self.firebase_user_id}/notifications"
+                            
+                            # Envoi d'une notification individuelle pour chaque fichier
+                            for index, (file_id, file_name) in enumerate(zip(self.selected_items, self.selected_document_names)):
+                                # Création des données de notification pour ce fichier spécifique
+                                status ='in queue'
+                                job_data = {
+                                    'function_name': 'APbookeeper',
+                                    'aws_instance_id': aws_instance_service_id,
+                                    'file_id': file_id,
+                                    'job_id': file_id,
+                                    'file_name': file_name,
+                                    'journal_entries': "",
+                                    'status': status,
+                                    'read': False,
+                                    'timestamp': datetime.now().isoformat(),
+                                    'collection_id': self.companies_search_id,
+                                    'collection_name': self.companies_search_term,
+                                    'total_files': 1,
+                                    'batch_index': index + 1,
+                                    'batch_total': len(self.selected_items),
+                                    'batch_id': batch_id
+                                }
+                                
+                                print(f"Enregistrement de la notification pour le fichier {file_name} (ID: {file_id})")
+                                # Enregistrement de la notification dans Firebase
+                                firebase_service.add_or_update_job_by_file_id(path, job_data)
+
+    Mise à jour notification pour ROUTER:
+    job_data = {
+                            'function_name': 'Router',
+                            'aws_instance_id': aws_instance_service_id,
+                            'file_id': self.base_current_job_id,
+                            'job_id':"",
+                            'file_name':self.base_current_file_name,
+                            'journal_entries': "",
+                            'pub_sub_id':self.pub_sub_subscription_id if self.pub_sub_subscription_id else f'{self.base_current_job_id}',
+                            'status': 'in queue',
+                            'read':False,
+                            'timestamp':datetime.now().isoformat(),
+                            'collection_id':self.base_collection_id,
+                            'collection_name':self.companies_search_term,
+                            "instructions": str(self.current_instructions if self.instructions_saved else ""),
+                        }
+                        print(f"impression de job data dans SQLLITE:{job_data}")
+                        #await db.insert_row('processing_aws_jobs', job_data)
+                        firebase_service=FireBaseManagement()
+                        path = f"clients/{self.firebase_user_id}/notifications"
+                        firebase_service.add_or_update_job_by_file_id(path,job_data)
+
+*******
+Egalement l'outil pour l'arret d'un job est possible
+TRES IMPORTANT RAJOUTER thread_key au payload au niveau supérieur car celui va etre le chat duquel la tache a été consituté et pour mettre egalement lors d'un besoin de l'agent Cerveau de savoir 
+d'ou questionner l'utilisateur car il aura le cannal de communication.
+

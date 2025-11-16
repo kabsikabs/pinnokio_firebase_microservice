@@ -1,0 +1,512 @@
+"""
+Service ERP Singleton pour le microservice
+Architecture: Singleton thread-safe avec paramètres de connexion dynamiques
+
+Ce service remplace ERPService/ERPInstance côté Reflex pour centraliser
+les connexions ERP dans le microservice.
+
+Flux:
+1. Client (Reflex) → RPC → ERP.method(user_id, company_id, ...)
+2. Service récupère les credentials depuis Firebase/Secret Manager
+3. Crée/réutilise une connexion ERP pour ce (user_id, company_id)
+4. Exécute la méthode et retourne le résultat
+
+Avantages:
+- Connexions ERP centralisées et cachées
+- Pas de connexion ERP côté Reflex
+- Support multi-utilisateurs/multi-sociétés
+- Gestion automatique du cache de connexions
+"""
+
+import threading
+import logging
+from typing import Optional, Dict, Any, Tuple
+from datetime import datetime, timedelta
+from .erp_manager import ODOO_KLK_VISION
+from .tools.g_cred import get_secret
+from .firebase_client import get_firestore
+
+logger = logging.getLogger(__name__)
+
+
+class ERPConnectionManager:
+    """
+    Gestionnaire de connexions ERP avec cache et gestion du lifecycle.
+
+    Cache Key Format: {user_id}:{company_id}:{erp_type}
+    """
+
+    def __init__(self):
+        self._connections: Dict[str, Tuple[ODOO_KLK_VISION, datetime]] = {}
+        self._lock = threading.RLock()
+        self._ttl_minutes = 30  # TTL par défaut des connexions
+
+    def _build_cache_key(self, user_id: str, company_id: str, erp_type: str = "odoo") -> str:
+        """Construit la clé de cache pour une connexion ERP."""
+        return f"{user_id}:{company_id}:{erp_type}"
+
+    def _cleanup_expired_connections(self):
+        """Nettoie les connexions expirées (appelé périodiquement)."""
+        now = datetime.now()
+        expired_keys = []
+
+        with self._lock:
+            for key, (_, created_at) in self._connections.items():
+                if now - created_at > timedelta(minutes=self._ttl_minutes):
+                    expired_keys.append(key)
+
+            for key in expired_keys:
+                logger.info(f"🧹 [ERP] Nettoyage connexion expirée: {key}")
+                del self._connections[key]
+
+    def _get_erp_credentials(self, user_id: str, company_id: str, client_uuid: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Récupère les credentials ERP depuis Firestore.
+        
+        ⭐ NOUVELLE ARCHITECTURE: Utilise reconstruct_full_client_profile() comme LLM Manager
+        pour récupérer les credentials depuis le mandate (chemin réel des données).
+
+        Args:
+            user_id: ID Firebase de l'utilisateur
+            company_id: ID de la société/space (collection_name)
+            client_uuid: Identifiant client explicite (optionnel, priorité sur Firestore)
+
+        Returns:
+            Dict contenant les credentials ou None si non trouvé
+        """
+        try:
+            from .firebase_providers import FirebaseManagement
+            
+            db = get_firestore()
+            firebase_service = FirebaseManagement()
+
+            resolved_client_uuid = client_uuid
+            if not resolved_client_uuid:
+                # 1. Récupérer client_uuid depuis bo_clients (comportement historique)
+                doc_ref = db.collection(f'clients/{user_id}/bo_clients').document(user_id)
+                doc = doc_ref.get()
+
+                if not doc.exists:
+                    logger.error(f"❌ [ERP] User bo_clients document not found: {user_id}")
+                    return None
+
+                client_data = doc.to_dict()
+                resolved_client_uuid = client_data.get('client_uuid')
+
+                if not resolved_client_uuid:
+                    logger.error(f"❌ [ERP] client_uuid not found for user: {user_id}")
+                    return None
+
+                logger.info(f"✅ [ERP] client_uuid found: {resolved_client_uuid}")
+            else:
+                logger.info(f"✅ [ERP] client_uuid provided by caller: {resolved_client_uuid}")
+
+            # 2. Récupérer le profil complet via reconstruct_full_client_profile
+            # Cette méthode charge TOUTES les données du mandate (comme LLM Manager)
+            full_profile = firebase_service.reconstruct_full_client_profile(
+                user_id,
+                resolved_client_uuid,
+                company_id  # collection_name / space_id
+            )
+
+            if not full_profile:
+                logger.error(f"❌ [ERP] Full profile not found for user={user_id}, company={company_id}")
+                return None
+
+            # 3. Extraire les credentials ERP depuis le full_profile
+            # (même extraction que dans LLMSession.user_context)
+            odoo_url = full_profile.get("erp_odoo_url")
+            odoo_db_name = full_profile.get("erp_odoo_db")
+            odoo_username = full_profile.get("erp_odoo_username")
+            odoo_company_name = full_profile.get("erp_odoo_company_name")
+            secret_manager_name = full_profile.get("erp_secret_manager")
+
+            # 4. Vérifier que tous les paramètres sont présents
+            if not all([odoo_url, odoo_db_name, odoo_username, odoo_company_name, secret_manager_name]):
+                missing = []
+                if not odoo_url: missing.append("erp_odoo_url")
+                if not odoo_db_name: missing.append("erp_odoo_db")
+                if not odoo_username: missing.append("erp_odoo_username")
+                if not odoo_company_name: missing.append("erp_odoo_company_name")
+                if not secret_manager_name: missing.append("erp_secret_manager")
+
+                logger.error(f"❌ [ERP] Missing credentials in full_profile: {', '.join(missing)}")
+                return None
+
+            # 5. Récupérer le mot de passe depuis Secret Manager
+            try:
+                erp_api_key = get_secret(secret_manager_name)
+            except Exception as e:
+                logger.error(f"❌ [ERP] Failed to get secret {secret_manager_name}: {e}")
+                return None
+
+            logger.info(
+                f"✅ [ERP] Credentials loaded from mandate - "
+                f"company={odoo_company_name}, url={odoo_url}"
+            )
+
+            return {
+                "erp_type": "odoo",
+                "url": odoo_url,
+                "db_name": odoo_db_name,
+                "username": odoo_username,
+                "password": erp_api_key,
+                "odoo_company_name": odoo_company_name
+            }
+
+        except Exception as e:
+            logger.error(f"❌ [ERP] Error getting credentials: {e}", exc_info=True)
+            return None
+
+    def get_connection(self, user_id: str, company_id: str, client_uuid: Optional[str] = None) -> Optional[ODOO_KLK_VISION]:
+        """
+        Récupère ou crée une connexion ERP pour un utilisateur/société.
+
+        Args:
+            user_id: ID Firebase de l'utilisateur
+            company_id: ID de la société
+            client_uuid: Identifiant client explicite (optionnel)
+
+        Returns:
+            Instance ODOO_KLK_VISION ou None si échec
+        """
+        cache_key = self._build_cache_key(user_id, company_id)
+
+        # 1. Vérifier le cache
+        with self._lock:
+            if cache_key in self._connections:
+                connection, created_at = self._connections[cache_key]
+
+                # Vérifier si la connexion n'est pas expirée
+                if datetime.now() - created_at <= timedelta(minutes=self._ttl_minutes):
+                    logger.info(f"✅ [ERP] Cache hit: {cache_key}")
+                    return connection
+                else:
+                    logger.info(f"⏰ [ERP] Cache expired: {cache_key}")
+                    del self._connections[cache_key]
+
+        # 2. Récupérer les credentials
+        logger.info(f"🔍 [ERP] Cache miss, fetching credentials: {cache_key}")
+        credentials = self._get_erp_credentials(user_id, company_id, client_uuid=client_uuid)
+
+        if not credentials:
+            return None
+
+        # 3. Créer la connexion
+        try:
+            logger.info(f"🔄 [ERP] Creating new connection: {cache_key}")
+            connection = ODOO_KLK_VISION(
+                url=credentials["url"],
+                db=credentials["db_name"],
+                username=credentials["username"],
+                password=credentials["password"],
+                odoo_company_name=credentials["odoo_company_name"]
+            )
+
+            # 4. Tester la connexion
+            test_result = connection.test_connection()
+
+            if not test_result.get("success"):
+                logger.error(f"❌ [ERP] Connection test failed: {test_result.get('message')}")
+                return None
+
+            # 5. Mettre en cache
+            with self._lock:
+                self._connections[cache_key] = (connection, datetime.now())
+                logger.info(f"✅ [ERP] Connection cached: {cache_key}")
+
+            # 6. Nettoyer les connexions expirées
+            self._cleanup_expired_connections()
+
+            return connection
+
+        except Exception as e:
+            logger.error(f"❌ [ERP] Error creating connection: {e}", exc_info=True)
+            return None
+
+    def invalidate_connection(self, user_id: str, company_id: str, client_uuid: Optional[str] = None):
+        """Invalide une connexion du cache (changement de société, déconnexion, etc.)."""
+        cache_key = self._build_cache_key(user_id, company_id)
+
+        with self._lock:
+            if cache_key in self._connections:
+                del self._connections[cache_key]
+                logger.info(f"🗑️ [ERP] Connection invalidated: {cache_key}")
+
+    def clear_all(self):
+        """Vide tout le cache de connexions."""
+        with self._lock:
+            count = len(self._connections)
+            self._connections.clear()
+            logger.info(f"🧹 [ERP] Cleared {count} connections from cache")
+
+
+# ═══════════════════════════════════════════════════════════════
+# SERVICE ERP PRINCIPAL
+# ═══════════════════════════════════════════════════════════════
+
+class ERPService:
+    """
+    Service ERP principal exposé via RPC.
+
+    Toutes les méthodes suivent le pattern:
+    method(user_id: str, company_id: str, **kwargs) -> Any
+
+    Le user_id et company_id sont utilisés pour récupérer la connexion appropriée.
+    """
+
+    _manager: Optional[ERPConnectionManager] = None
+    _lock = threading.Lock()
+
+    @classmethod
+    def _get_manager(cls) -> ERPConnectionManager:
+        """Récupère le manager de connexions (singleton)."""
+        if cls._manager is None:
+            with cls._lock:
+                if cls._manager is None:
+                    cls._manager = ERPConnectionManager()
+        return cls._manager
+
+    @classmethod
+    def get_odoo_bank_statement_move_line_not_rec(
+        cls,
+        user_id: str,
+        company_id: str,
+        client_uuid: Optional[str] = None,
+        journal_id: Optional[int] = None,
+        reconciled: Optional[bool] = None
+    ) -> list:
+        """
+        Récupère les mouvements bancaires non réconciliés depuis Odoo.
+
+        Args:
+            user_id: ID Firebase de l'utilisateur
+            company_id: ID de la société
+            client_uuid: Identifiant client explicite (optionnel)
+            journal_id: ID du journal bancaire (optionnel)
+            reconciled: Filtre sur le statut de réconciliation (optionnel)
+
+        Returns:
+            Liste des mouvements bancaires (sans DataFrame pour compatibilité JSON)
+        """
+        manager = cls._get_manager()
+        connection = manager.get_connection(user_id, company_id, client_uuid=client_uuid)
+
+        if not connection:
+            raise Exception("Failed to connect to ERP")
+
+        # Récupérer les données et ignorer le DataFrame (non-sérialisable)
+        lines, _ = connection.get_odoo_bank_statement_move_line_not_rec(
+            journal_id=journal_id,
+            reconciled=reconciled
+        )
+        
+        return lines
+
+    @classmethod
+    def test_connection(
+        cls,
+        user_id: Optional[str] = None,
+        company_id: Optional[str] = None,
+        client_uuid: Optional[str] = None,
+        url: Optional[str] = None,
+        db: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        company_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Teste la connexion à l'ERP.
+
+        Args:
+            user_id: ID Firebase de l'utilisateur (optionnel si credentials fournis)
+            company_id: ID de la société (optionnel si credentials fournis)
+            client_uuid: Identifiant client explicite (optionnel)
+            url: URL du serveur Odoo (mode direct)
+            db: Nom de la base de données (mode direct)
+            username: Nom d'utilisateur (mode direct)
+            password: Mot de passe / API key (mode direct)
+            company_name: Nom de la société (mode direct, optionnel)
+
+        Returns:
+            Dict avec success (bool) et message (str)
+        """
+        # Mode direct : credentials fournis explicitement (onboarding / tests)
+        if any([url, db, username, password, company_name]):
+            missing = [
+                name for name, value in (
+                    ("url", url),
+                    ("db", db),
+                    ("username", username),
+                    ("password", password)
+                ) if not value
+            ]
+
+            if missing:
+                message = (
+                    "Credentials incomplets pour test_connection direct: "
+                    + ", ".join(missing)
+                )
+                logger.error(f"❌ [ERP] {message}")
+                return {"success": False, "message": message}
+
+            try:
+                logger.info("🔌 [ERP] Test connexion direct avec credentials fournis")
+                temp_connection = ODOO_KLK_VISION(
+                    url=url,
+                    db=db,
+                    username=username,
+                    password=password,
+                    odoo_company_name=company_name
+                )
+                return temp_connection.test_connection()
+            except Exception as e:
+                logger.error(f"❌ [ERP] Direct connection test failed: {e}", exc_info=True)
+                return {"success": False, "message": str(e)}
+
+        # Mode standard : récupérer credentials et tester sans créer de cache
+        if not user_id or not company_id:
+            message = "user_id et company_id requis si les credentials ne sont pas fournis"
+            logger.error(f"❌ [ERP] {message}")
+            return {"success": False, "message": message}
+
+        # Récupérer les credentials sans utiliser le cache de connexions
+        manager = cls._get_manager()
+        credentials = manager._get_erp_credentials(user_id, company_id, client_uuid=client_uuid)
+
+        if not credentials:
+            return {"success": False, "message": "Failed to get ERP credentials"}
+
+        # Créer une connexion temporaire uniquement pour le test (pas de cache)
+        try:
+            logger.info("🔌 [ERP] Test connexion temporaire (sans cache)")
+            temp_connection = ODOO_KLK_VISION(
+                url=credentials["url"],
+                db=credentials["db_name"],
+                username=credentials["username"],
+                password=credentials["password"],
+                odoo_company_name=credentials["odoo_company_name"]
+            )
+            return temp_connection.test_connection()
+        except Exception as e:
+            logger.error(f"❌ [ERP] Test connection failed: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    @classmethod
+    def get_pl_metrics(
+        cls,
+        user_id: str,
+        company_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Récupère les métriques P&L (Profit & Loss).
+
+        Args:
+            user_id: ID Firebase de l'utilisateur
+            company_id: ID de la société
+            start_date: Date de début (format 'YYYY-MM-DD')
+            end_date: Date de fin (format 'YYYY-MM-DD')
+
+        Returns:
+            Dict contenant les métriques P&L
+        """
+        manager = cls._get_manager()
+        connection = manager.get_connection(user_id, company_id)
+
+        if not connection:
+            raise Exception("Failed to connect to ERP")
+
+        return connection.get_pl_metrics(start_date=start_date, end_date=end_date)
+
+    @classmethod
+    def get_account_types(cls, user_id: str, company_id: str) -> list:
+        """
+        Récupère les types de comptes disponibles dans Odoo.
+
+        Args:
+            user_id: ID Firebase de l'utilisateur
+            company_id: ID de la société
+
+        Returns:
+            Liste des types de comptes
+        """
+        manager = cls._get_manager()
+        connection = manager.get_connection(user_id, company_id)
+
+        if not connection:
+            raise Exception("Failed to connect to ERP")
+
+        return connection.get_account_types()
+
+    @classmethod
+    def get_account_chart(cls, user_id: str, company_id: str, **kwargs) -> Any:
+        """
+        Récupère le plan comptable.
+
+        Args:
+            user_id: ID Firebase de l'utilisateur
+            company_id: ID de la société
+            **kwargs: Arguments additionnels (account_types, etc.)
+
+        Returns:
+            DataFrame contenant le plan comptable
+        """
+        manager = cls._get_manager()
+        connection = manager.get_connection(user_id, company_id)
+
+        if not connection:
+            raise Exception("Failed to connect to ERP")
+
+        return connection.get_account_chart(**kwargs)
+
+    @classmethod
+    def update_accounts(
+        cls,
+        user_id: str,
+        company_id: str,
+        accounts_data: list
+    ) -> Dict[str, Any]:
+        """
+        Met à jour des comptes dans Odoo.
+
+        Args:
+            user_id: ID Firebase de l'utilisateur
+            company_id: ID de la société
+            accounts_data: Liste des données de comptes à mettre à jour
+
+        Returns:
+            Dict avec le résultat de la mise à jour
+        """
+        manager = cls._get_manager()
+        connection = manager.get_connection(user_id, company_id)
+
+        if not connection:
+            raise Exception("Failed to connect to ERP")
+
+        return connection.update_accounts(accounts_data)
+
+    @classmethod
+    def invalidate_connection(cls, user_id: str, company_id: str):
+        """
+        Invalide la connexion ERP pour un utilisateur/société.
+        Utile lors d'un changement de société ou de déconnexion.
+
+        Args:
+            user_id: ID Firebase de l'utilisateur
+            company_id: ID de la société
+        """
+        manager = cls._get_manager()
+        manager.invalidate_connection(user_id, company_id)
+
+    @classmethod
+    def clear_all_connections(cls):
+        """Vide toutes les connexions ERP du cache."""
+        manager = cls._get_manager()
+        manager.clear_all()
+
+
+def get_erp_service() -> ERPService:
+    """Helper pour récupérer le service ERP (utilisé dans main.py)."""
+    return ERPService

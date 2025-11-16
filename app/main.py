@@ -1,7 +1,7 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi import Header, HTTPException, status
 from pydantic import BaseModel, Field
-from typing import Any, Dict, Optional, Tuple, Callable
+from typing import Any, Dict, Optional, Tuple, Callable, List
 import json as _json
 import os
 import time
@@ -59,7 +59,7 @@ listeners_manager: ListenersManager | None = None
 
 
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
     global listeners_manager
     try:
         listeners_manager = ListenersManager()
@@ -69,15 +69,33 @@ def on_startup():
         listeners_manager = None
         logger.error("listeners_manager status=error error=%s", repr(e))
 
+    # ⭐ NOUVEAU: Démarrer le scheduler CRON
+    try:
+        from .cron_scheduler import get_cron_scheduler
+        scheduler = get_cron_scheduler()
+        await scheduler.start()
+        logger.info("cron_scheduler status=started")
+    except Exception as e:
+        logger.error("cron_scheduler status=error error=%s", repr(e))
+
 
 @app.on_event("shutdown")
-def on_shutdown():
+async def on_shutdown():
     try:
         if listeners_manager:
             listeners_manager.stop()
             logger.info("listeners_manager status=stopped")
     except Exception as e:
         logger.error("listeners_manager_stop status=error error=%s", repr(e))
+
+    # ⭐ NOUVEAU: Arrêter le scheduler CRON
+    try:
+        from .cron_scheduler import get_cron_scheduler
+        scheduler = get_cron_scheduler()
+        await scheduler.stop()
+        logger.info("cron_scheduler status=stopped")
+    except Exception as e:
+        logger.error("cron_scheduler_stop status=error error=%s", repr(e))
 
 
 @app.get("/healthz")
@@ -264,16 +282,16 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
         name = method.split(".", 1)[1]
         if name == "register_user":
             # NOUVEAU: Utiliser le wrapper transparent (API identique)
-            from .registry_wrapper import get_registry_wrapper
+            from .registry import get_registry_wrapper
             return get_registry_wrapper().register_user, "REGISTRY"
         if name == "unregister_session":
             # NOUVEAU: Utiliser le wrapper transparent (API identique)
-            from .registry_wrapper import get_registry_wrapper
+            from .registry import get_registry_wrapper
             return get_registry_wrapper().unregister_session, "REGISTRY"
         # 🆕 NOUVEAU: Méthodes du registre des listeners (sous REGISTRY.*)
         if name in ["check_listener_status", "register_listener", "unregister_listener", 
                     "list_user_listeners", "cleanup_user_listeners", "update_listener_heartbeat"]:
-            from .registry_listeners import get_registry_listeners
+            from .registry import get_registry_listeners
             target = getattr(get_registry_listeners(), name, None)
             if callable(target):
                 return target, "REGISTRY"
@@ -292,15 +310,29 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
             return _start_llm_conversation_task, "TASK"
         if name == "get_task_status":
             return _get_task_status, "TASK"
-    if method.startswith("UNIFIED_REGISTRY."):
-        name = method.split(".", 1)[1]
-        from .unified_registry import get_unified_registry
-        target = getattr(get_unified_registry(), name, None)
-        if callable(target):
-            return target, "UNIFIED_REGISTRY"
+    # ❌ SUPPRIMÉ: UNIFIED_REGISTRY déjà utilisé par REGISTRY via registry_wrapper
+    # if method.startswith("UNIFIED_REGISTRY."):
+    #     name = method.split(".", 1)[1]
+    #     from .unified_registry import get_unified_registry
+    #     target = getattr(get_unified_registry(), name, None)
+    #     if callable(target):
+    #         return target, "UNIFIED_REGISTRY"
     if method.startswith("LLM."):
         name = method.split(".", 1)[1]
         from .llm_service import get_llm_manager
+        
+        # ═══════════════════════════════════════════════════════════════
+        # MÉTHODES LLM - ARCHITECTURE UNIFIÉE UI/BACKEND
+        # ═══════════════════════════════════════════════════════════════
+        # ⭐ FLUX UNIFIÉ :
+        #   - MODE UI : send_message() → _process_unified_workflow(streaming=True)
+        #   - MODE BACKEND : _resume_workflow_after_lpt() → _process_unified_workflow(streaming=False/True)
+        #
+        # ✅ Isolation garantie par _ensure_session_initialized() :
+        #   - Charge user_context, jobs_data, jobs_metrics
+        #   - Utilisé automatiquement par send_message() et _resume_workflow_after_lpt()
+        # ═══════════════════════════════════════════════════════════════
+        
         if name == "initialize_session":
             def _sync_wrapper(**kwargs):
                 # Exécuter la coroutine dans l'event loop
@@ -319,7 +351,20 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
                     # Fallback si pas d'event loop
                     return asyncio.run(get_llm_manager().initialize_session(**kwargs))
             return _sync_wrapper, "LLM"
+        if name == "start_onboarding_chat":
+            async def _async_wrapper(**kwargs):
+                return await get_llm_manager().start_onboarding_chat(**kwargs)
+            return _async_wrapper, "LLM"
+        if name == "stop_onboarding_chat":
+            async def _async_wrapper(**kwargs):
+                return await get_llm_manager().stop_onboarding_chat(**kwargs)
+            return _async_wrapper, "LLM"
         if name == "send_message":
+            # ⭐ MODE UI - Point d'entrée principal pour messages utilisateur
+            # Architecture unifiée :
+            #   1. _ensure_session_initialized() → Garantit données permanentes
+            #   2. Vérifie/crée brain pour le thread
+            #   3. _process_unified_workflow(enable_streaming=True) → Streaming WebSocket
             # Version async directe - pas de wrapper synchrone pour éviter l'annulation des tâches
             async def _async_wrapper(**kwargs):
                 return await get_llm_manager().send_message(**kwargs)
@@ -379,29 +424,60 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
                     return asyncio.run(get_llm_manager().stop_streaming(**kwargs))
             return _sync_wrapper, "LLM"
         if name == "flush_chat_history":
-            def _sync_wrapper(**kwargs):
-                # Exécuter la coroutine dans l'event loop
-                import asyncio
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # Si on est déjà dans un event loop, créer une nouvelle tâche
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            future = executor.submit(asyncio.run, get_llm_manager().flush_chat_history(**kwargs))
-                            return future.result()
-                    else:
-                        return asyncio.run(get_llm_manager().flush_chat_history(**kwargs))
-                except RuntimeError:
-                    # Fallback si pas d'event loop
-                    return asyncio.run(get_llm_manager().flush_chat_history(**kwargs))
-            return _sync_wrapper, "LLM"
-    if method.startswith("REGISTRY_LISTENERS."):
+            # ⭐ CORRIGÉ: Wrapper asynchrone non-bloquant (était sync et causait des timeouts)
+            async def _async_wrapper(**kwargs):
+                return await get_llm_manager().flush_chat_history(**kwargs)
+            return _async_wrapper, "LLM"
+        if name == "enter_chat":
+            # ⭐ NOUVEAU: Signal d'entrée sur un thread de chat (pour tracking présence)
+            # Appelé par Reflex quand user ouvre/entre sur un thread
+            async def _async_wrapper(**kwargs):
+                return await get_llm_manager().enter_chat(**kwargs)
+            return _async_wrapper, "LLM"
+        if name == "leave_chat":
+            # ⭐ NOUVEAU: Signal de départ de la page chat (pour tracking présence)
+            # Appelé par Reflex quand user ferme l'onglet ou change de module
+            async def _async_wrapper(**kwargs):
+                return await get_llm_manager().leave_chat(**kwargs)
+            return _async_wrapper, "LLM"
+        if name == "approve_plan":
+            # ⭐ NOUVEAU: Gérer les approbations de plans LPT
+            async def _async_wrapper(**kwargs):
+                return await get_llm_manager().handle_approval_response(**kwargs)
+            return _async_wrapper, "LLM"
+        if name == "send_card_response":
+            # ⭐ NOUVEAU: Réception réponse carte interactive
+            async def _async_wrapper(**kwargs):
+                return await get_llm_manager().send_card_response(**kwargs)
+            return _async_wrapper, "LLM"
+        if name == "invalidate_user_context":
+            async def _async_wrapper(**kwargs):
+                return await get_llm_manager().invalidate_user_context(**kwargs)
+            return _async_wrapper, "LLM"
+    # ❌ SUPPRIMÉ: DOUBLON - Les méthodes listeners sont déjà exposées sous REGISTRY.*
+    # if method.startswith("REGISTRY_LISTENERS."):
+    #     name = method.split(".", 1)[1]
+    #     from .registry_listeners import get_registry_listeners
+    #     target = getattr(get_registry_listeners(), name, None)
+    #     if callable(target):
+    #         return target, "REGISTRY_LISTENERS"
+
+    # === DMS (Document Management Systems) ===
+    if method.startswith("DMS."):
         name = method.split(".", 1)[1]
-        from .registry_listeners import get_registry_listeners
-        target = getattr(get_registry_listeners(), name, None)
+        from .driveClientService import get_drive_client_service
+        target = getattr(get_drive_client_service(mode='prod'), name, None)
         if callable(target):
-            return target, "REGISTRY_LISTENERS"
+            return target, "DMS"
+
+    # === ERP (Enterprise Resource Planning) ===
+    if method.startswith("ERP."):
+        name = method.split(".", 1)[1]
+        from .erp_service import get_erp_service
+        target = getattr(get_erp_service(), name, None)
+        if callable(target):
+            return target, "ERP"
+
     raise KeyError(method)
 
 
@@ -530,10 +606,37 @@ async def rpc_endpoint(req: RpcRequest, authorization: str | None = Header(defau
 
         # Exécuter la fonction (sync ou async)
         import inspect
+
+        # ⭐ Injecter user_id et company_id pour DMS et ERP
+        args = list(req.args or [])
+        kwargs = dict(req.kwargs or {})
+
+        if _ns == "DMS" and req.user_id:
+            # DMS: Injecter user_id comme PREMIER argument (positionnel)
+            args = [req.user_id] + args
+
+        elif _ns == "ERP":
+            # ERP: Injecter user_id et company_id depuis kwargs (extraits du contexte)
+            # Les méthodes ERP ont la signature: method(user_id, company_id, **kwargs)
+            if "user_id" not in kwargs and req.user_id:
+                kwargs["user_id"] = req.user_id
+
+            # Exception pour test_connection en mode direct (credentials fournis)
+            # Dans ce cas, company_id n'est pas requis
+            is_test_connection_direct = (
+                req.method == "ERP.test_connection" and
+                any(kwargs.get(key) for key in ["url", "db", "username", "password"])
+            )
+
+            # company_id doit être fourni explicitement par le client
+            # SAUF pour test_connection en mode direct
+            if "company_id" not in kwargs and not is_test_connection_direct:
+                raise ValueError("company_id is required for ERP methods")
+        
         if inspect.iscoroutinefunction(func):
-            result = await func(*(req.args or []), **(req.kwargs or {}))
+            result = await func(*args, **kwargs)
         else:
-            result = func(*(req.args or []), **(req.kwargs or {}))
+            result = func(*args, **kwargs)
         dt_ms = int((time.time() - t0) * 1000)
         if _debug_enabled():
             try:
@@ -599,6 +702,466 @@ async def rpc_endpoint(req: RpcRequest, authorization: str | None = Header(defau
         return RpcResponse(ok=False, error={"code": "INTERNAL", "message": str(e)})
 
 
+# ═══════════════════════════════════════════════════════════════
+# ENDPOINT DE CALLBACK POUR LES AGENTS LPT
+# ═══════════════════════════════════════════════════════════════
+
+class LPTCallbackRequest(BaseModel):
+    """
+    Modèle pour les réponses des agents LPT.
+    
+    ⭐ NOUVEAU FORMAT : Inclut toutes les données englobantes du payload original
+    + la réponse du LPT
+    """
+    # ═══════════════════════════════════════════════════════════
+    # 1. IDENTIFIANTS (Données englobantes originales)
+    # ═══════════════════════════════════════════════════════════
+    collection_name: str
+    user_id: str
+    client_uuid: str
+    mandates_path: str
+    batch_id: str  # Utilisé comme task_id
+    
+    # ═══════════════════════════════════════════════════════════
+    # 2. DONNÉES DE LA TÂCHE (jobs_data original)
+    # ═══════════════════════════════════════════════════════════
+    jobs_data: List[Dict[str, Any]]
+    
+    # ═══════════════════════════════════════════════════════════
+    # 3. CONFIGURATION (settings originaux)
+    # ═══════════════════════════════════════════════════════════
+    settings: List[Dict[str, Any]]
+    
+    # ═══════════════════════════════════════════════════════════
+    # 4. TRAÇABILITÉ (traceability original)
+    # ═══════════════════════════════════════════════════════════
+    traceability: Dict[str, Any]
+    
+    # ═══════════════════════════════════════════════════════════
+    # 5. IDENTIFIANTS ADDITIONNELS
+    # ═══════════════════════════════════════════════════════════
+    pub_sub_id: str
+    start_instructions: Optional[str] = None
+    
+    # ═══════════════════════════════════════════════════════════
+    # 6. RÉPONSE DU LPT (NOUVEAU - Données de sortie)
+    # ═══════════════════════════════════════════════════════════
+    response: Dict[str, Any] = Field(
+        ...,
+        description="Réponse du LPT contenant status, result, error, etc."
+    )
+    
+    # ═══════════════════════════════════════════════════════════
+    # 7. MÉTADONNÉES D'EXÉCUTION
+    # ═══════════════════════════════════════════════════════════
+    execution_time: Optional[str] = None
+    completed_at: Optional[str] = None
+    logs_url: Optional[str] = None
+    
+    @property
+    def task_id(self) -> str:
+        """Alias pour batch_id (rétrocompatibilité)."""
+        return self.batch_id
+    
+    @property
+    def thread_key(self) -> str:
+        """Extrait thread_key depuis traceability."""
+        return self.traceability.get("thread_key", "")
+    
+    @property
+    def status(self) -> str:
+        """Extrait status depuis response."""
+        return self.response.get("status", "unknown")
+    
+    @property
+    def result(self) -> Optional[Dict[str, Any]]:
+        """Extrait result depuis response."""
+        return self.response.get("result")
+    
+    @property
+    def error(self) -> Optional[str]:
+        """Extrait error depuis response."""
+        return self.response.get("error")
+    
+    @property
+    def task_type(self) -> str:
+        """Détermine le type de LPT depuis les données."""
+        # Essayer de déduire depuis traceability ou jobs_data
+        thread_name = self.traceability.get("thread_name", "")
+        if "APBookkeeper" in thread_name:
+            return "APBookkeeper"
+        elif "Router" in thread_name:
+            return "Router"
+        elif "Banker" in thread_name:
+            return "Banker"
+        # Fallback: regarder dans jobs_data
+        if self.jobs_data and len(self.jobs_data) > 0:
+            first_job = self.jobs_data[0]
+            if "file_name" in first_job and "job_id" in first_job and "status" in first_job:
+                if first_job.get("status") == "to_process":
+                    return "APBookkeeper"
+                elif first_job.get("status") == "to_route":
+                    return "Router"
+            elif "bank_account" in first_job:
+                return "Banker"
+        return "LPT"
+
+
+class InvalidateCacheRequest(BaseModel):
+    """Requête pour invalider le cache Redis (dev/debug seulement)."""
+    user_id: str = Field(..., description="ID Firebase de l'utilisateur")
+    collection_name: str = Field(..., description="Nom de la collection (company)")
+    cache_types: list[str] = Field(default=["context", "jobs"], description="Types de cache à invalider: context, jobs, all")
+
+
+class InvalidateContextRequest(BaseModel):
+    """Requête pour invalider le contexte LLM (force rechargement Firebase)."""
+    user_id: str = Field(..., description="ID Firebase de l'utilisateur")
+    collection_name: str = Field(..., description="Chemin de collecte (mandate_path)")
+
+
+@app.post("/invalidate-context")
+async def invalidate_context(req: InvalidateContextRequest):
+    """
+    Invalide le contexte utilisateur pour forcer un rechargement depuis Firebase.
+    """
+    from .llm_service import get_llm_manager
+
+    llm_manager = get_llm_manager()
+    result = await llm_manager.invalidate_user_context(
+        user_id=req.user_id,
+        collection_name=req.collection_name,
+    )
+    return result
+
+
+@app.post("/admin/invalidate_cache")
+async def invalidate_cache(req: InvalidateCacheRequest):
+    """
+    🔧 **ENDPOINT DE DÉVELOPPEMENT** - Invalide le cache Redis pour un utilisateur
+    
+    ⚠️ Cet endpoint est destiné à un usage manuel pendant le développement.
+    
+    Args:
+        req: Requête contenant user_id, collection_name et types de cache
+    
+    Returns:
+        Détails des clés supprimées
+    """
+    try:
+        from .redis_client import get_redis
+        
+        redis_client = get_redis()
+        deleted_keys = []
+        
+        # Préparer les clés à supprimer
+        keys_to_delete = []
+        
+        if "all" in req.cache_types or "context" in req.cache_types:
+            context_key = f"context:{req.user_id}:{req.collection_name}"
+            keys_to_delete.append(context_key)
+        
+        if "all" in req.cache_types or "jobs" in req.cache_types:
+            # Jobs par département
+            for dept in ["APBOOKEEPER", "ROUTER", "BANK"]:
+                job_key = f"jobs:{req.user_id}:{req.collection_name}:{dept}"
+                keys_to_delete.append(job_key)
+        
+        # Supprimer chaque clé
+        for key in keys_to_delete:
+            try:
+                result = redis_client.delete(key)
+                if result > 0:
+                    deleted_keys.append(key)
+                    logger.info(f"[CACHE_INVALIDATE] ✅ Clé supprimée: {key}")
+                else:
+                    logger.info(f"[CACHE_INVALIDATE] ℹ️ Clé absente: {key}")
+            except Exception as e:
+                logger.warning(f"[CACHE_INVALIDATE] ⚠️ Erreur suppression {key}: {e}")
+        
+        return {
+            "status": "success",
+            "message": f"Cache invalidé pour {req.user_id}:{req.collection_name}",
+            "deleted_keys": deleted_keys,
+            "requested_keys": keys_to_delete,
+            "cache_types": req.cache_types
+        }
+    
+    except Exception as e:
+        logger.error(f"[CACHE_INVALIDATE] ❌ Erreur: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur invalidation cache: {str(e)}")
+
+
+@app.post("/lpt/callback")
+async def lpt_callback(req: LPTCallbackRequest, authorization: str | None = Header(default=None, alias="Authorization")):
+    """
+    ⭐ MODE BACKEND - Point d'entrée pour reprise workflow après LPT
+    
+    Les agents externes (APBookkeeper, Router, Banker, etc.) appellent cet endpoint
+    quand leur traitement est terminé.
+    
+    Flux unifié :
+    1. Récupérer la tâche sauvegardée dans Firebase (pour le contexte)
+    2. Mettre à jour le statut de la tâche
+    3. Appeler _resume_workflow_after_lpt() qui :
+       a. _ensure_session_initialized() → Garantit données permanentes (⭐ CRITIQUE)
+       b. Vérifie/crée brain pour le thread
+       c. _process_unified_workflow(enable_streaming=user_connected) → Flux unifié
+    4. Envoyer une notification à l'utilisateur via WebSocket (si connecté)
+    
+    Support Dual-Mode :
+    - User connecté → Streaming WebSocket actif (MODE UI)
+    - User déconnecté → RTDB uniquement (MODE BACKEND pur)
+    """
+    t0 = time.time()
+    try:
+        # 🔍 DEBUG: Logger la structure RÉELLE du payload parsé par Pydantic
+        logger.info(
+            "🔍 [LPT_CALLBACK] Structure réelle du payload parsé: batch_id=%s, has_jobs_data=%s, has_response=%s",
+            req.batch_id if hasattr(req, 'batch_id') else "N/A",
+            bool(req.jobs_data) if hasattr(req, 'jobs_data') else False,
+            bool(req.response) if hasattr(req, 'response') else False
+        )
+        
+        logger.info(
+            "lpt_callback_in task_id=%s thread=%s status=%s user=%s",
+            req.task_id,
+            req.thread_key,
+            req.status,
+            req.user_id
+        )
+        
+        # 🔍 DEBUG: Afficher les données brutes du callback
+        import json
+        try:
+            raw_payload = {
+                "task_id": req.task_id,
+                "task_type": req.task_type,
+                "thread_key": req.thread_key,
+                "user_id": req.user_id,
+                "collection_name": req.collection_name,
+                "status": req.status,
+                "result": req.result,
+                "error": req.error,
+                "mandates_path": req.mandates_path,
+                "traceability": req.traceability,
+                "pub_sub_id": req.pub_sub_id
+            }
+            logger.info(f"🔍 [LPT_CALLBACK] Données brutes reçues: {json.dumps(raw_payload, indent=2, ensure_ascii=False)}")
+        except Exception as log_err:
+            logger.warning(f"[LPT_CALLBACK] Erreur lors du log des données brutes: {log_err}")
+        
+        # 🔐 Vérifier l'authentification
+        _require_auth(authorization)
+        
+        # ⭐ ÉTAPE 1 : Vérifier si c'est une tâche planifiée (avec task_id dans mandate_path/tasks)
+        # Utiliser mandate_path du payload (renvoyé dans le callback)
+        mandate_path = req.mandates_path
+        tasks_path = f"{mandate_path}/tasks"
+        
+        # Vérifier si le task_id existe dans {mandate_path}/tasks/{task_id}
+        task_ref = get_firestore().document(f"{tasks_path}/{req.task_id}")
+        task_doc_snap = task_ref.get()
+        
+        # Déterminer si c'est une tâche planifiée ou un LPT simple
+        is_planned_task = task_doc_snap.exists
+        
+        if is_planned_task:
+            # ⭐ CAS 1 : Tâche planifiée (task_id existe dans mandate_path/tasks)
+            task_data = task_doc_snap.to_dict()
+            logger.info(
+                "lpt_callback_planned_task task_id=%s thread=%s mandate_path=%s",
+                req.task_id,
+                req.thread_key,
+                mandate_path
+            )
+        else:
+            # ⭐ CAS 2 : LPT simple (sans task_id planifié / ordre direct)
+            # → Pas de document task dans {mandate_path}/tasks/{task_id}
+            logger.info(
+                "lpt_callback_simple_lpt task_id=%s thread=%s mandate_path=%s "
+                "(pas de task dans %s - ordre direct)",
+                req.task_id,
+                req.thread_key,
+                mandate_path,
+                tasks_path
+            )
+            
+            # Pour LPT simple, construire task_data minimal
+            from datetime import datetime, timezone
+            task_data = {
+                "task_type": req.task_type,
+                "task_id": req.task_id,
+                "thread_key": req.thread_key,
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }
+        
+        # ⭐ ÉTAPE 2 : Mettre à jour la tâche dans Firebase (seulement si tâche planifiée)
+        from datetime import datetime, timezone
+        
+        now_iso = datetime.now(timezone.utc).isoformat()
+        
+        if is_planned_task:
+            # Mise à jour uniquement pour tâches planifiées
+            update_data = {
+                "status": req.status,
+                "updated_at": now_iso,
+                "completed_at": req.completed_at or now_iso,
+                "result": req.result,
+                "error": req.error,
+                "execution_time": req.execution_time,
+                "logs_url": req.logs_url,
+                # ⭐ NOUVEAU : Sauvegarder le payload complet pour reprise
+                "original_payload": {
+                    "collection_name": req.collection_name,
+                    "user_id": req.user_id,
+                    "client_uuid": req.client_uuid,
+                    "mandates_path": req.mandates_path,
+                    "batch_id": req.batch_id,
+                    "jobs_data": req.jobs_data,
+                    "settings": req.settings,
+                    "traceability": req.traceability,
+                    "pub_sub_id": req.pub_sub_id,
+                    "start_instructions": req.start_instructions
+                },
+                "response": req.response
+            }
+            
+            # Mise à jour dans {mandate_path}/tasks/{task_id}
+            task_ref.update(update_data)
+            logger.info("lpt_callback_firebase_updated task_id=%s path=%s with_full_payload=True", req.task_id, tasks_path)
+        else:
+            # Pour LPT simple, pas de mise à jour Firebase (pas de document task)
+            logger.info("lpt_callback_skip_firebase_update task_id=%s (LPT simple, pas de document task)", req.task_id)
+        
+        # ⭐ ÉTAPE 3 : Construire le message pour l'utilisateur
+        task_type = task_data.get("task_type", "LPT")
+        
+        if req.status == "completed":
+            agent_message = f"✅ Tâche {task_type} terminée avec succès."
+            if req.result:
+                summary = req.result.get("summary", "Traitement terminé")
+                agent_message += f"\n\n**Résumé** : {summary}"
+                if "processed_items" in req.result:
+                    agent_message += f"\n**Items traités** : {req.result['processed_items']}"
+        elif req.status == "failed":
+            agent_message = f"❌ Tâche {task_type} échouée."
+            if req.error:
+                agent_message += f"\n\n**Erreur** : {req.error}"
+        else:  # partial
+            agent_message = f"⚠️ Tâche {task_type} terminée partiellement."
+            if req.result:
+                agent_message += f"\n\n**Résumé** : {req.result.get('summary', 'Traitement partiel')}"
+        
+        
+        # ⭐ ÉTAPE 4 : Reprendre le workflow (quelque soit le statut - l'agent décide)
+        # Récupérer le company_id depuis task_data ou fallback sur collection_name du payload
+        company_id = task_data.get("company_id") or req.collection_name
+        
+        if not company_id:
+            logger.error(
+                "lpt_callback_skip_resume company_id_missing task_id=%s",
+                req.task_id
+            )
+            dt_ms = int((time.time() - t0) * 1000)
+            return {
+                "ok": False,
+                "task_id": req.task_id,
+                "error": "company_id manquant",
+                "dt_ms": dt_ms
+            }
+        
+        # ⭐ ÉTAPE 4.1 : Déterminer le mode (UI ou Backend) avec check robuste
+        from .llm_service import get_llm_manager
+        
+        llm_manager = get_llm_manager()
+        
+        # Garantir que la session existe (nécessaire pour vérifier is_user_on_specific_thread)
+        session = await llm_manager._ensure_session_initialized(
+            user_id=req.user_id,
+            collection_name=company_id,
+            chat_mode="general_chat"
+        )
+        
+        # ⭐ CHECK ROBUSTE: User est-il ACTUELLEMENT sur ce thread précis?
+        # Logique:
+        # - is_on_chat_page = False → Mode BACKEND (user pas sur la page)
+        # - is_on_chat_page = True + current_active_thread = thread_key → Mode UI
+        # - is_on_chat_page = True + current_active_thread ≠ thread_key → Mode BACKEND
+        user_on_active_chat = session.is_user_on_specific_thread(req.thread_key)
+        
+        mode = "UI" if user_on_active_chat else "BACKEND"
+        
+        logger.info(
+            "lpt_callback_resume_workflow mode=%s task_id=%s thread=%s "
+            "user_on_active_chat=%s is_on_chat_page=%s current_active_thread=%s is_planned=%s",
+            mode,
+            req.task_id,
+            req.thread_key,
+            user_on_active_chat,
+            session.is_on_chat_page,
+            session.current_active_thread,
+            is_planned_task
+        )
+        
+        # Lancer la reprise du workflow en arrière-plan
+        # ⭐ _resume_workflow_after_lpt gère automatiquement :
+        # - Création de session si nécessaire (_ensure_session_initialized)
+        # - Création du brain si nécessaire (charge historique RTDB)
+        # - Streaming conditionnel (enable_streaming=user_on_active_chat)
+        asyncio.create_task(
+            llm_manager._resume_workflow_after_lpt(
+                user_id=req.user_id,
+                company_id=company_id,
+                thread_key=req.thread_key,
+                task_id=req.task_id,
+                task_data=task_data,
+                lpt_response=req.response,
+                original_payload={
+                    "collection_name": req.collection_name,
+                    "user_id": req.user_id,
+                    "client_uuid": req.client_uuid,
+                    "mandates_path": req.mandates_path,
+                    "batch_id": req.batch_id,
+                    "jobs_data": req.jobs_data,
+                    "settings": req.settings,
+                    "traceability": req.traceability,
+                    "pub_sub_id": req.pub_sub_id,
+                    "start_instructions": req.start_instructions,
+                    "task_type": req.task_type
+                },
+                user_connected=user_on_active_chat,  # ⭐ Check robuste du thread actif
+                is_planned_task=is_planned_task  # ⭐ NOUVEAU: Distinguer tâche planifiée vs LPT simple
+            )
+        )
+        
+        logger.info(
+            "lpt_callback_resume_task_created mode=%s task_id=%s is_planned=%s",
+            mode,
+            req.task_id,
+            is_planned_task
+        )
+        
+        dt_ms = int((time.time() - t0) * 1000)
+        logger.info(
+            "lpt_callback_ok task_id=%s status=%s dt_ms=%s",
+            req.task_id,
+            req.status,
+            dt_ms
+        )
+        
+        return {
+            "ok": True,
+            "task_id": req.task_id,
+            "message": "Callback traité avec succès"
+        }
+    
+    except Exception as e:
+        dt_ms = int((time.time() - t0) * 1000)
+        logger.error("lpt_callback_error code=INTERNAL task_id=%s dt_ms=%s error=%s", req.task_id, dt_ms, repr(e))
+        return {"ok": False, "error": str(e)}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
@@ -633,6 +1196,46 @@ async def websocket_endpoint(ws: WebSocket):
                 listeners_manager.start_chat_watcher(uid, space_code, thread_key, chat_mode)
         except Exception as e:
             logger.error("chat_watcher_attach_error uid=%s error=%s", uid, repr(e))
+        
+        # ⭐ NOUVEAU: Envoyer les messages bufferisés si le WebSocket du chat est connecté
+        if space_code and thread_key:
+            try:
+                from .ws_message_buffer import get_message_buffer
+                buffer = get_message_buffer()
+                
+                # Récupérer les messages en attente (et les supprimer du buffer)
+                pending_messages = buffer.get_pending_messages(
+                    user_id=uid,
+                    thread_key=thread_key,
+                    delete_after=True
+                )
+                
+                if pending_messages:
+                    logger.info(
+                        f"[WS_BUFFER] 📬 Envoi des messages bufferisés - "
+                        f"uid={uid} thread={thread_key} count={len(pending_messages)}"
+                    )
+                    
+                    # Envoyer chaque message bufferisé
+                    for message in pending_messages:
+                        await hub.broadcast(uid, message)
+                        message_type = message.get("type", "unknown")
+                        logger.info(
+                            f"[WS_BUFFER] 📡 Message bufferisé envoyé - "
+                            f"uid={uid} thread={thread_key} type={message_type}"
+                        )
+                    
+                    logger.info(
+                        f"[WS_BUFFER] ✅ Tous les messages bufferisés envoyés - "
+                        f"uid={uid} thread={thread_key} count={len(pending_messages)}"
+                    )
+            except Exception as e:
+                logger.error(
+                    f"[WS_BUFFER] ❌ Erreur envoi messages bufferisés - "
+                    f"uid={uid} thread={thread_key} error={e}",
+                    exc_info=True
+                )
+        
         while True:
             # Lectures éventuellement inutilisées (backend peut ne rien envoyer)
             await ws.receive_text()
@@ -694,7 +1297,7 @@ async def _set_presence(uid: str, status: str = "online", ttl_seconds: int | Non
         
         # NOUVEAU système (si activé)
         try:
-            from .registry_wrapper import get_registry_wrapper
+            from .registry import get_registry_wrapper
             wrapper = get_registry_wrapper()
             if wrapper.unified_enabled:
                 wrapper.update_heartbeat(uid)

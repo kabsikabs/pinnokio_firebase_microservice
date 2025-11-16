@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Any
 from .task_service import celery_app, publish_task_progress
-from .unified_registry import get_unified_registry
+from .registry import get_unified_registry
 
 @celery_app.task(bind=True, name='compute_document_analysis')
 def compute_document_analysis(self, user_id: str, document_data: dict, job_id: str):

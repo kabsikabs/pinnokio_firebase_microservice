@@ -190,7 +190,7 @@ class ChromaVectorService:
         
         # NOUVEAU : Sync silencieuse avec le registre unifié (si activé)
         try:
-            from .registry_wrapper import get_chroma_registry_wrapper
+            from .registry.registry_wrapper import get_chroma_registry_wrapper
             wrapper = get_chroma_registry_wrapper()
             if wrapper.unified_enabled:
                 wrapper.registry_wrapper.update_user_service(
@@ -218,7 +218,7 @@ class ChromaVectorService:
         
         # NOUVEAU : Sync avec registre unifié (si activé)
         try:
-            from .registry_wrapper import get_chroma_registry_wrapper
+            from .registry.registry_wrapper import get_chroma_registry_wrapper
             import time
             wrapper = get_chroma_registry_wrapper()
             if wrapper.unified_enabled:
@@ -248,7 +248,7 @@ class ChromaVectorService:
         
         # NOUVEAU : Sync avec registre unifié (si activé)
         try:
-            from .registry_wrapper import get_chroma_registry_wrapper
+            from .registry.registry_wrapper import get_chroma_registry_wrapper
             wrapper = get_chroma_registry_wrapper()
             if wrapper.unified_enabled and wrapper.registry_wrapper.unified_registry:
                 # Récupérer les collections actuelles et retirer celle-ci

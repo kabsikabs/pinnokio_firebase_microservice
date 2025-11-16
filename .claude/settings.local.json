@@ -3,7 +3,12 @@
     "allow": [
       "Read(//c/Users/Cedri/Coding/pinnokio_app/pinnokio_app/listeners/**)",
       "Read(//c/Users/Cedri/Coding/pinnokio_app/**)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Read(//c/Users/Cedri/Coding/klk_router/**)",
+      "Read(//c/Users/Cedri/Coding/klk_accountant/**)",
+      "Read(//c/Users/Cedri/Coding/klk_bank/**)",
+      "Bash(PHASE1_SUMMARY.md)",
+      "Bash(python:*)"
     ],
     "deny": [],
     "ask": []

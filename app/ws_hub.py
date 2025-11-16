@@ -42,7 +42,9 @@ class WebSocketHub:
             conns = list(self._uid_to_conns.get(uid, set()))
         
         if not conns:
-            self._logger.warning("ws_broadcast_no_connections uid=%s type=%s channel=%s", uid, msg_type, channel)
+            # DEBUG au lieu de WARNING : c'est normal si le client n'est pas connecté
+            # (ex: page fermée, déconnexion, ou pas encore connecté)
+            self._logger.debug("ws_broadcast_no_connections uid=%s type=%s channel=%s", uid, msg_type, channel)
             return
         
         sent_count = 0
@@ -53,7 +55,13 @@ class WebSocketHub:
             except Exception as e:
                 self._logger.error("ws_send_error uid=%s error=%s", uid, repr(e))
         
-        self._logger.info("ws_broadcast uid=%s type=%s channel=%s connections=%s", uid, msg_type, channel, sent_count)
+        # Logs de broadcast (sauf chunks streaming pour éviter verbosité)
+        if msg_type == "llm_stream_chunk":
+            # Logs de chunks en DEBUG uniquement pour éviter verbosité
+            chunk_len = len(message.get("payload", {}).get("chunk", ""))
+            self._logger.debug("ws_broadcast_chunk uid=%s chunk_len=%s connections=%s sent=%s", uid, chunk_len, len(conns), sent_count)
+        else:
+            self._logger.info("ws_broadcast uid=%s type=%s channel=%s connections=%s", uid, msg_type, channel, sent_count)
 
     def broadcast_threadsafe(self, uid: str, message: dict) -> None:
         """Déclenche un broadcast depuis un thread quelconque via la loop serveur."""

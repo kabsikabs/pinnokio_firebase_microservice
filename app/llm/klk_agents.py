@@ -26,149 +26,256 @@ from datetime import datetime, timezone
 from ..chroma_vector_service import ChromaVectorService
 import base64
 import logging
+import tiktoken
 
 from google import genai
 from google.genai import types
+
+# Logger pour klk_agents
+logger = logging.getLogger(__name__)
 
 class ModelPricing:
     """Structure des prix pour les différents modèles"""
     
     PRICE_STRUCTURE = {
         # OpenAI Models
+         "gpt-4.1-2025-04-14": {
+            "mode": "text",
+            "input_price": 2.00,  # Prix par million de tokens
+            "output_price": 8.00,
+            "thought_price": 8.00, 
+            "cached_input_price": 1.00, 
+            "sales_multiplier": 7.5  # Facteur de multiplication pour le prix de vente
+        },
+        "gpt-4.1-mini-2025-04-14": {
+            "mode": "text",
+            "input_price": 0.40,  # Prix par million de tokens
+            "output_price": 1.60,
+            "thought_price": 1.60, 
+            "cached_input_price": 0.20, 
+            "sales_multiplier": 7.5  # Facteur de multiplication pour le prix de vente
+        },
+        "gpt-4.1-nano-2025-04-14": {
+            "mode": "text",
+            "input_price": 0.10,  # Prix par million de tokens
+            "output_price": 0.40,
+            "sales_multiplier": 7.5  # Facteur de multiplication pour le prix de vente
+        },
+
+
         "gpt-4o-2024-08-06": {
             "mode": "text",
             "input_price": 2.50,  # Prix par million de tokens
             "output_price": 10.00,
-            "sales_multiplier": 2  # Facteur de multiplication pour le prix de vente
+            "sales_multiplier": 7.5  # Facteur de multiplication pour le prix de vente
         },
         "gpt-4o-audio-preview-2024-10-01": {
             "mode": "audio",
             "input_price": 40.00,
             "output_price": 80.00,
-            "sales_multiplier": 2
+            "sales_multiplier": 5
         },
         "gpt-4o-2024-05-13": {
             "mode": "audio",
             "input_price": 100.00,
             "output_price": 200.00,
-            "sales_multiplier": 2
+            "sales_multiplier": 3
         },
         "gpt-4o-mini-2024-07-18": {
             "mode": "text",
             "input_price": 0.150,
             "output_price": 0.600,
-            "sales_multiplier": 2
+            "sales_multiplier": 7.5
         },
         "gpt-4o-mini-audio-preview": {
             "mode": "audio",
             "input_price": 10.000,
             "output_price": 20.000,
-            "sales_multiplier": 2
+            "sales_multiplier": 7.5
         },
         "o1": {
             "mode": "text",
             "input_price": 15.00,
             "output_price": 60.00,
-            "sales_multiplier": 2
+            "sales_multiplier": 7.5
         },
         "o3-mini-2025-01-31": {
             "mode": "text",
             "input_price": 1.10,
             "output_price": 4.40,
-            "sales_multiplier": 2
+            "sales_multiplier": 7.5
         },
-
+        "o4-mini-2025-04-16": {
+            "mode": "text",
+            "input_price": 1.10,
+            "output_price": 4.40,
+            "sales_multiplier": 7.5
+        },
+        "o3-2025-04-16": {
+            "mode": "text",
+            "input_price": 10,
+            "output_price": 40,
+            "sales_multiplier": 3.5
+        },
         # Anthropic Models
         "claude-3-5-haiku-20241022": {
             "mode": "text",
-            "input_price": 1.00,
-            "output_price": 5.00,
-            "sales_multiplier": 2
+            "input_price": 0.80,
+            "output_price": 4.00,
+            "thought_price": 4.00, 
+            "cached_input_price": 0.0, 
+            "sales_multiplier": 7.5
         },
-        "claude-3-7-sonnet-20250219": {
+        "claude-sonnet-4-5-20250929": {
             "mode": "text",
             "input_price": 3.00,
             "output_price": 15.00,
-            "sales_multiplier": 2
+            "thought_price": 15.00, 
+            "cached_input_price":0.30, 
+            "sales_multiplier": 7.5
         },
-        "claude-3-opus-20240229": {
+        "claude-opus-4-20250514": {
             "mode": "text",
             "input_price": 15.00,
             "output_price": 75.00,
-            "sales_multiplier": 2
+            "sales_multiplier": 5
         },
         #Deepseek model
         "deepseek-chat": {
             "mode": "text",
             "input_price": 0.14,
             "output_price": 0.28,
-            "sales_multiplier": 2
+            "sales_multiplier": 9.5
         },
         "deepseek-reasoner": {
             "mode": "text",
             "input_price": 0.32,
             "output_price": 0.64,
-            "sales_multiplier": 2
+            "sales_multiplier": 8.5
         },
         #Gemini model
          "gemini-1.5-pro": {
             "mode": "text",
             "input_price": 2.5,
             "output_price": 10.00,
-            "sales_multiplier": 2
+            "sales_multiplier": 7.5
         },
-         "gemini-1.5-flash": {
+         "gemini-2.0-flash": {
             "mode": "text",
-            "input_price": 0.15,
-            "output_price": 0.60,
-            "sales_multiplier": 2
+            "input_price": 0.10,
+            "output_price": 0.40,
+            "thought_price": 0.40, 
+            "cached_input_price": 0.025, 
+            "sales_multiplier": 8.5
         },
         "gemini-1.5-flash-8b": {
             "mode": "text",
             "input_price": 0.075,
             "output_price": 0.30,
-            "sales_multiplier": 2
+            "sales_multiplier": 8.5
         },
+        "gemini-2.5-pro-preview-05-06": {
+            "mode": "text",
+            "input_price": 1.25,
+            "cached_input_price": 0.3125,
+            "thought_price": 10.00, 
+            "output_price": 10.00,
+            "sales_multiplier": 8.5
+        },
+
         # Perplexity Models
-        "sonar-deep-research": {
+                    "sonar-deep-research": {
             "mode": "text",
             "input_price": 3,  # $0.2 per 1M tokens
             "output_price": 8,  # $0.2 per 1M tokens
-            "sales_multiplier": 2
+            "sales_multiplier": 6.5
         },
         "sonar-reasoning-pro": {
             "mode": "text",
             "input_price": 2,  # $1.0 per 1M tokens
             "output_price": 8,  # $1.0 per 1M tokens
-            "sales_multiplier": 2
+            "sales_multiplier": 6.5
         },
         "sonar-reasoning": {
             "mode": "text",
             "input_price": 1,  # $5.0 per 1M tokens
             "output_price": 5.0,  # $5.0 per 1M tokens
-            "sales_multiplier": 2
+            "sales_multiplier": 6.5
         },
          "sonar-pro": {
             "mode": "text",
             "input_price": 3,  # $5.0 per 1M tokens
             "output_price": 15,  # $5.0 per 1M tokens
-            "sales_multiplier": 2
+            "sales_multiplier": 6.5
         },
          "sonar": {
             "mode": "text",
             "input_price": 3,  # $5.0 per 1M tokens
             "output_price": 15,  # $5.0 per 1M tokens
-            "sales_multiplier": 2
+            "sales_multiplier": 6.5
         },
         "r1-1776": {
             "mode": "text",
             "input_price": 2,  # $5.0 per 1M tokens
             "output_price": 8,  # $5.0 per 1M tokens
-            "sales_multiplier": 2
+            "sales_multiplier": 6.5
         },
-
-
     }
+
+
+
+
+
+
+    @staticmethod
+    def calculate_token_cost(model: str, input_tokens: int, output_tokens: int,thought_tokens: int = 0,cached_tokens: int = 0) -> dict:
+        """
+        Calcule le coût des tokens pour un modèle donné
+        
+        Args:
+            model: Nom du modèle
+            input_tokens: Nombre de tokens en entrée
+            output_tokens: Nombre de tokens en sortie
+            
+        Returns:
+            dict: Dictionnaire contenant les coûts d'achat et de vente
+        """
+        if model not in ModelPricing.PRICE_STRUCTURE:
+            return {
+            "buy_price": "{:.6f}".format(0),
+            "sales_price": "{:.6f}".format(0),
+            "mode": "unknown",
+            "cost_details": { # Optionnel : pour plus de détails
+            "input_cost": 0,
+            "output_cost": 0,
+            "thought_cost": 0,
+            "cached_cost": 0
+            }
+        
+        }
+            
+        pricing = ModelPricing.PRICE_STRUCTURE[model]
+        
+        # Calcul des coûts individuels
+        input_cost_val = (input_tokens / 1_000_000) * pricing.get("input_price", 0)
+        output_cost_val = (output_tokens / 1_000_000) * pricing.get("output_price", 0)
+        thought_cost_val = (thought_tokens / 1_000_000) * pricing.get("thought_price", pricing.get("output_price", 0)) # Fallback sur output_price si thought_price n'est pas défini
+        cached_cost_val = (cached_tokens / 1_000_000) * pricing.get("cached_input_price", pricing.get("input_price", 0)) # Fallback sur input_price
+
+        total_buy_price = input_cost_val + output_cost_val + thought_cost_val + cached_cost_val
+        total_sales_price = total_buy_price * pricing.get("sales_multiplier", 1.0)
+
+        return {
+            "buy_price": "{:.6f}".format(total_buy_price),
+            "sales_price": "{:.6f}".format(total_sales_price),
+            "mode": pricing.get("mode", "unknown"),
+            "cost_details": { # Optionnel : pour débogage ou reporting détaillé
+                "input_cost": "{:.6f}".format(input_cost_val),
+                "output_cost": "{:.6f}".format(output_cost_val),
+                "thought_cost": "{:.6f}".format(thought_cost_val),
+                "cached_cost": "{:.6f}".format(cached_cost_val)
+            }
+        }
 
 
 
@@ -228,7 +335,6 @@ class ModelProvider(Enum):
     LLAMA = "llama"
     DEEP_SEEK = "deep_seek"
     PERPLEXITY = "perplexity"  
-
 class BaseAIAgent:
     """
     Agent de base pour l'IA avec support de différents systèmes de gestion documentaire (DMS).
@@ -272,15 +378,15 @@ class BaseAIAgent:
         self.provider_models = {
             ModelProvider.ANTHROPIC: {
                 ModelSize.SMALL: ["claude-3-5-haiku-20241022"],
-                ModelSize.MEDIUM: ["claude-3-7-sonnet-20250219"],
+                ModelSize.MEDIUM: ["claude-sonnet-4-5-20250929"],
                 ModelSize.LARGE: ["claude-3-opus-latest"]
             },
             ModelProvider.OPENAI: {
-                ModelSize.SMALL: ["gpt-4o-mini"],
-                ModelSize.MEDIUM: ["gpt-4o"],
+                ModelSize.SMALL: ["gpt-4.1-mini-2025-04-14"],
+                ModelSize.MEDIUM: ["gpt-4.1-2025-04-14"],
                 ModelSize.LARGE: ["o1"],
-                ModelSize.REASONING_SMALL: ["o3-mini-2025-01-31"],
-                ModelSize.REASONING_LARGE: ["o1-2024-12-17"]
+                ModelSize.REASONING_SMALL: ["o4-mini-2025-04-16"],
+                ModelSize.REASONING_LARGE: ["o3-2025-04-16"]
                 
             },
             ModelProvider.GEMINI: {  # Ajout des modèles Gemini
@@ -971,7 +1077,6 @@ class BaseAIAgent:
 
         else:
             raise ValueError(f"Unsupported provider: {provider}")
-
     def _transform_tool_choice(self, tool_choice: Optional[Dict[str, Any]], provider: ModelProvider, tools_provided: bool = False) -> Union[Dict[str, Any], str, None]:
         """
         Transforme la configuration tool_choice selon le provider.
@@ -1460,6 +1565,103 @@ class BaseAIAgent:
             
         else:
             raise ValueError(f"Streaming not implemented for provider {provider}")
+    
+    async def process_tool_use_streaming(
+        self,
+        content: str,
+        tools: List[Dict[str, Any]],
+        tool_mapping: Dict[str, Callable],
+        size: Optional[ModelSize] = None,
+        provider: Optional[ModelProvider] = None,
+        max_tokens: int = 2048
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Point d'entrée unifié pour l'utilisation d'outils AVEC streaming.
+        
+        ✨ Architecture propre: Cette méthode est un simple wrapper qui délègue
+        au provider spécifique, comme process_text_streaming.
+        
+        Chaque provider gère son propre chat_history, assurant l'isolation par thread.
+        
+        Args:
+            content: Le contenu à traiter (peut être vide pour tours suivants)
+            tools: Liste des définitions d'outils
+            tool_mapping: Dictionnaire mappant les noms d'outils vers leurs fonctions
+            size: Taille du modèle à utiliser
+            provider: Provider à utiliser
+            max_tokens: Nombre maximum de tokens
+            
+        Yields:
+            Dict contenant:
+            - {"type": "text_chunk", "chunk": str} : Chunk de texte
+            - {"type": "tool_use", "tool_name": str, "tool_input": dict, "tool_id": str} : Utilisation d'outil
+            - {"type": "tool_result", "tool_name": str, "result": Any} : Résultat d'outil
+            - {"type": "error", "error": str} : Erreur
+        """
+        if provider is None:
+            if self.default_provider is None:
+                raise ValueError("Provider not specified and no default provider set.")
+            provider = self.default_provider
+        
+        # Détermination de la taille du modèle
+        if size is None:
+            size = self.get_default_model_size(provider)
+            if size is None:
+                available_sizes = list(self.provider_models[provider].keys())
+                if not available_sizes:
+                    raise ValueError(f"No model sizes available for provider {provider}")
+                size = available_sizes[0]
+        
+        model = self.get_model_by_size_and_provider(provider, size)
+        provider_instance = self.get_provider_instance(provider)
+        
+        # Récupérer le system prompt pour le passer au provider
+        system_prompt = getattr(self, 'system_prompt', None)
+        
+        # Déléguer au provider spécifique (architecture propre ✅)
+        if provider == ModelProvider.ANTHROPIC:
+            # Déléguer à la méthode du provider Anthropic
+            async for event in provider_instance.anthropic_send_message_with_tools_streaming(
+                content=content,
+                tools=tools,
+                tool_mapping=tool_mapping,
+                model_name=model,
+                max_tokens=max_tokens,
+                system_prompt=system_prompt
+            ):
+                yield event
+        
+        elif provider == ModelProvider.OPENAI:
+            # Déléguer à la méthode du provider OpenAI
+            async for event in provider_instance.openai_send_message_with_tools_streaming(
+                content=content,
+                tools=tools,
+                tool_mapping=tool_mapping,
+                model_name=model,
+                max_tokens=max_tokens,
+                system_prompt=system_prompt
+            ):
+                yield event
+        
+        elif provider == ModelProvider.GEMINI:
+            # TODO: Implémenter le streaming avec outils pour Gemini
+            yield {
+                "type": "error",
+                "error": "Streaming avec outils non implémenté pour Gemini"
+            }
+        
+        elif provider == ModelProvider.DEEP_SEEK:
+            # TODO: Implémenter le streaming avec outils pour DeepSeek
+            yield {
+                "type": "error",
+                "error": "Streaming avec outils non implémenté pour DeepSeek"
+            }
+        
+        else:
+            yield {
+                "type": "error",
+                "error": f"Streaming avec outils non implémenté pour {provider}"
+            }
 
     def process_search(self, 
                     content: str,
@@ -1538,7 +1740,6 @@ class BaseAIAgent:
         citations = response.get('citations', []) if response else []
         
         return content, citations
-
     def process_vision(self,
                     text: str,
                     size: Optional[ModelSize] = None,
@@ -1932,13 +2133,119 @@ class BaseAIAgent:
             if self.default_provider is None:
                 raise ValueError("Aucun provider spécifié et pas de provider par défaut")
             provider = self.default_provider
-        print(f"impression de provider:{provider}")
+        
         instance = self.get_provider_instance(provider)
         if hasattr(instance, 'chat_history'):
             self.chat_history[provider.value] = instance.chat_history
-            print(f"impression du chat_history: {self.chat_history[provider.value]}")
+            msg_count = len(instance.chat_history) if isinstance(instance.chat_history, list) else 0
+            logger.info(f"[SAVE_HISTORY] Historique sauvegardé pour {provider.value}: {msg_count} messages")
             return {'sucess':True,'chat_history':self.chat_history[provider.value]}
         return {'sucess':False,'chat_history':"Erreur sur la méthode save_chat_history"}
+
+    def append_system_log(
+        self,
+        message_id: str,
+        timestamp: str,
+        payload: Any,
+        provider: Optional[ModelProvider] = None
+    ) -> None:
+        """Ajoute ou remplace le bloc de log système pour un provider donné."""
+
+        if provider is None:
+            provider = self.default_provider
+
+        if provider is None:
+            logger.warning("[SYSTEM_LOG] Aucun provider défini pour l'ajout de log")
+            return
+
+        try:
+            content_text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+
+            entry = {
+                "role": "user",
+                "content": content_text,
+                "metadata": {
+                    "type": "system_log",
+                    "timestamp": timestamp,
+                    "message_id": message_id
+                }
+            }
+
+            history = self.chat_history.setdefault(provider.value, [])
+            for idx, existing in enumerate(history):
+                metadata = existing.get("metadata", {}) if isinstance(existing, dict) else {}
+                if metadata.get("message_id") == message_id:
+                    history[idx] = entry
+                    break
+            else:
+                history.append(entry)
+
+            instance = self.get_provider_instance(provider)
+            if hasattr(instance, 'chat_history') and isinstance(instance.chat_history, list):
+                provider_history = instance.chat_history
+                for idx, existing in enumerate(provider_history):
+                    if isinstance(existing, dict):
+                        existing_content = existing.get("content")
+                        if isinstance(existing_content, str) and existing_content.startswith(f"[LOG] {message_id}|"):
+                            provider_history[idx] = {"role": "user", "content": content_text}
+                            break
+                else:
+                    provider_history.append({"role": "user", "content": content_text})
+
+            logger.debug(
+                f"[SYSTEM_LOG] Log rafraîchi pour provider={provider.value} message_id={message_id}"
+            )
+
+        except Exception as e:
+            logger.error(f"[SYSTEM_LOG] Erreur append_system_log: {e}", exc_info=True)
+
+    def append_system_log(
+        self,
+        message_id: str,
+        timestamp: str,
+        payload: Any,
+        provider: Optional[ModelProvider] = None
+    ) -> None:
+        """Ajoute un log système dans l'historique sans perturber les échanges principaux."""
+
+        if provider is None:
+            provider = self.default_provider
+
+        if provider is None:
+            logger.warning("[SYSTEM_LOG] Aucun provider défini pour l'ajout de log")
+            return
+
+        try:
+            if isinstance(payload, str):
+                serialized = payload
+            else:
+                serialized = json.dumps(payload, ensure_ascii=False)
+
+            log_text = f"[LOG {timestamp}] {serialized}"
+
+            entry = {
+                "role": "user",
+                "content": log_text,
+                "metadata": {
+                    "type": "system_log",
+                    "timestamp": timestamp,
+                    "message_id": message_id
+                }
+            }
+
+            history = self.chat_history.setdefault(provider.value, [])
+            history.append(entry)
+
+            instance = self.get_provider_instance(provider)
+            if hasattr(instance, 'chat_history') and isinstance(instance.chat_history, list):
+                instance.chat_history.append({"role": "user", "content": log_text})
+
+            logger.debug(
+                f"[SYSTEM_LOG] Log ajouté pour provider={provider.value} message_id={message_id}"
+            )
+
+        except Exception as e:
+            logger.error(f"[SYSTEM_LOG] Erreur append_system_log: {e}", exc_info=True)
 
     def load_chat_history(self, provider: Optional[ModelProvider] = None, history=None):
         """
@@ -1960,19 +2267,25 @@ class BaseAIAgent:
             if self.default_provider is None:
                 raise ValueError("Aucun provider spécifié et pas de provider par défaut")
             provider = self.default_provider
-        print(f"impression de provider:{provider}")
+        
         instance = self.get_provider_instance(provider)
         history_to_load = history if history is not None else self.chat_history.get(provider.value, [])
         
         if not history_to_load:
+            logger.debug(f"[LOAD_HISTORY] Aucun historique à charger pour {provider.value}")
             return False
+        
+        logger.info(f"[LOAD_HISTORY] Chargement {len(history_to_load)} messages pour {provider.value}")
             
         if provider == ModelProvider.ANTHROPIC:
             # Format Anthropic: [{"role": "user/assistant", "content": "message"}]
             transformed_history = self._transform_for_anthropic(history_to_load)
             if hasattr(instance, 'chat_history'):
-
+                # Mettre à jour l'historique du provider (NEW_Anthropic_Agent)
                 instance.chat_history = transformed_history
+                # ⭐ IMPORTANT: Synchroniser avec BaseAIAgent.chat_history (dict)
+                self.chat_history[provider.value] = transformed_history
+                logger.debug(f"[LOAD_HISTORY] Historique synchronisé dans BaseAIAgent.chat_history['{provider.value}']")
                 return True
                 
         # Ajouter d'autres providers ici avec leurs transformations spécifiques
@@ -2070,6 +2383,133 @@ class BaseAIAgent:
         
         return usage
 
+    def count_tokens_in_messages(self, messages: List[Dict[str, Any]], model: str = "gpt-4") -> int:
+        """
+        Compte le nombre de tokens dans une liste de messages en utilisant tiktoken.
+        
+        Cette méthode est indépendante du provider et compte les tokens dans le contexte global.
+        Basé sur: https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
+        
+        Args:
+            messages: Liste de messages au format [{"role": "...", "content": "..."}]
+            model: Modèle pour l'encodage (par défaut gpt-4)
+        
+        Returns:
+            Nombre total de tokens
+        """
+        try:
+            encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            # Si le modèle n'est pas reconnu, utiliser cl100k_base (GPT-4, GPT-3.5-turbo, Claude)
+            logging.warning(f"Modèle {model} non reconnu, utilisation de cl100k_base")
+            encoding = tiktoken.get_encoding("cl100k_base")
+        
+        # Formules spécifiques selon le modèle
+        if model in ["gpt-3.5-turbo-0613", "gpt-3.5-turbo-16k-0613", "gpt-4-0314", "gpt-4-32k-0314", 
+                     "gpt-4-0613", "gpt-4-32k-0613", "gpt-4", "gpt-4o", "gpt-4o-mini"]:
+            tokens_per_message = 3  # Chaque message coûte 3 tokens de formatting
+            tokens_per_name = 1
+        elif model == "gpt-3.5-turbo-0301":
+            tokens_per_message = 4
+            tokens_per_name = -1
+        else:
+            # Par défaut, utiliser les valeurs de gpt-4
+            tokens_per_message = 3
+            tokens_per_name = 1
+        
+        num_tokens = 0
+        
+        for message in messages:
+            num_tokens += tokens_per_message
+            
+            for key, value in message.items():
+                if isinstance(value, str):
+                    num_tokens += len(encoding.encode(value))
+                elif isinstance(value, list):
+                    # Pour les messages avec images ou contenu complexe (format Anthropic/Claude)
+                    for item in value:
+                        if isinstance(item, dict):
+                            if "text" in item:
+                                num_tokens += len(encoding.encode(item["text"]))
+                            elif "type" in item and item["type"] == "text" and "text" in item:
+                                num_tokens += len(encoding.encode(item["text"]))
+                        elif isinstance(item, str):
+                            num_tokens += len(encoding.encode(item))
+                
+                if key == "name":
+                    num_tokens += tokens_per_name
+        
+        num_tokens += 3  # Chaque réponse est amorcée avec <|start|>assistant<|message|>
+        
+        return num_tokens
+    
+    def get_total_context_tokens(self, provider: Optional[ModelProvider] = None) -> int:
+        """
+        Calcule le nombre TOTAL de tokens dans le contexte actuel COMPLET.
+        
+        ⭐ CALCUL COMPLET :
+        - Chat history (messages utilisateur + assistant + tool_results)
+        - System prompt (inclus dans toutes les requêtes API)
+        
+        Cette méthode permet un tracking universel des tokens peu importe
+        quel provider est utilisé (Anthropic, OpenAI, Gemini, etc.).
+        
+        Args:
+            provider: Provider dont on veut compter l'historique. Si None, utilise default_provider.
+        
+        Returns:
+            Nombre total de tokens dans le contexte complet (chat_history + system_prompt)
+        """
+        if provider is None:
+            provider = self.default_provider
+        
+        if provider is None:
+            logging.warning("Aucun provider spécifié et pas de provider par défaut")
+            return 0
+        
+        # Récupérer l'historique de l'instance provider
+        provider_instance = self.get_provider_instance(provider)
+        
+        if not hasattr(provider_instance, 'chat_history'):
+            logging.warning(f"Provider {provider} n'a pas de chat_history")
+            return 0
+        
+        # 1. Compter les tokens de l'historique des messages
+        history = provider_instance.chat_history
+        history_tokens = 0
+        
+        if history and isinstance(history, list):
+            history_tokens = self.count_tokens_in_messages(history)
+        elif history:
+            logging.warning(f"Format d'historique non reconnu pour {provider}: {type(history)}")
+        
+        # 2. Compter les tokens du system prompt
+        system_prompt_tokens = 0
+        system_prompt = ""
+        
+        # Récupérer le system prompt depuis l'instance provider
+        if hasattr(provider_instance, 'system_prompt') and provider_instance.system_prompt:
+            system_prompt = provider_instance.system_prompt
+        
+        # Compter les tokens du system prompt
+        if system_prompt:
+            try:
+                encoding = tiktoken.get_encoding("cl100k_base")
+                system_prompt_tokens = len(encoding.encode(system_prompt))
+            except Exception as e:
+                logging.warning(f"[TOKENS] Erreur calcul tokens system prompt: {e}")
+                # Fallback: estimation grossière (1 token ≈ 4 chars)
+                system_prompt_tokens = len(system_prompt) // 4
+        
+        total_tokens = history_tokens + system_prompt_tokens
+        
+        logging.debug(
+            f"[TOKENS] Contexte complet {provider.value}: {total_tokens:,} tokens "
+            f"(history: {history_tokens:,}, system_prompt: {system_prompt_tokens:,})"
+        )
+        
+        return total_tokens
+
     def send_message_to_space(self, message: str, **kwargs):
         """
         Envoie un message via le système de chat configuré.
@@ -2134,7 +2574,6 @@ class BaseAIAgent:
         instance = self.get_provider_instance(provider if provider else self.default_provider)
         instance.add_user_message(message)
         instance.add_ai_message(ai_message)
-
     def agent_workflow(self,
                 initial_user_input: str,
                 size: ModelSize,
@@ -2549,14 +2988,17 @@ class NEW_DeepSeek_agent:
         print(f"impression du model choisi:{chosen_model}")
         try:
             # Création de la requête à l'API
-            response = self.client.chat.completions.create(
-                model=chosen_model,
-                messages=self.chat_history,
-                max_tokens=max_tokens,
-                tools=tools if tools else None,
-                tool_choice=tool_choice,
-                stream=stream
-            )
+            api_params = {
+                "model": chosen_model,
+                "messages": self.chat_history,
+                "max_tokens": max_tokens,
+                "tool_choice": tool_choice,
+                "stream": stream
+            }
+            # Ajouter tools seulement s'il y en a (évite de passer None)
+            if tools:
+                api_params["tools"] = tools
+            response = self.client.chat.completions.create(**api_params)
             
             # Mise à jour des compteurs de tokens
             self.update_token_usage(response)
@@ -2609,8 +3051,12 @@ class NEW_DeepSeek_agent:
                         print(f"Erreur de décodage JSON pour les arguments de l'outil: {e}")
                         continue
                     except Exception as e:
-                        print(f"Erreur lors de l'exécution de l'outil {tool_name}: {e}")
-                        continue
+                        print(f"Erreur lors de l'exécution de l'outil {tool_name}: {str(e)}")
+                        return {
+                            "error": str(e),
+                            "tool_name": tool_name,
+                            "provider": provider.value
+                        }
 
             # Si un message texte est présent
             if message.content:
@@ -2791,7 +3237,6 @@ class NEW_DeepSeek_agent:
                 print(f"Agent: {response}")
             else:
                 print("Erreur lors de l'envoi du message.")
-
 class NEW_Anthropic_Agent:
     def __init__(self,space_manager=None,drive_manager=None,collection_name=None,job_id=None):
         """
@@ -2828,8 +3273,8 @@ class NEW_Anthropic_Agent:
     
     def update_system_prompt(self,system_prompt):
         self.system_prompt=system_prompt
-        print(f"impression de system_prompt dans update_system_prompt: {system_prompt}")
-        print(f"Type de system_prompt: {type(system_prompt)}")
+        # print(f"impression de system_prompt dans update_system_prompt: {system_prompt}")
+        # print(f"Type de system_prompt: {type(system_prompt)}")
 
     def flush_chat_history(self):
         self.chat_history=[]
@@ -3163,14 +3608,18 @@ class NEW_Anthropic_Agent:
                         tools = [self.find_tool_by_name(tool_list, tool_name)]
                     elif isinstance(tool_name, list):
                         tools = [self.find_tool_by_name(tool_list, name) for name in tool_name]
-                    response = self.client.messages.create(
-                        model=chosen_model,
-                        max_tokens=1024,
-                        messages=[{"role": "user", "content": content}],
-                        system=self.system_prompt,
-                        tools=tools if tools else None,
-                        tool_choice=tool_choice if tool_choice else None,
-                    )
+                    api_params = {
+                        "model": chosen_model,
+                        "max_tokens": 1024,
+                        "messages": [{"role": "user", "content": content}],
+                        "system": self.system_prompt,
+                    }
+                    # Ajouter tools seulement s'il y en a (l'API Anthropic n'accepte pas None)
+                    if tools:
+                        api_params["tools"] = tools
+                    if tool_choice:
+                        api_params["tool_choice"] = tool_choice
+                    response = self.client.messages.create(**api_params)
                 else:
                     
                     response = self.client.messages.create(
@@ -3438,10 +3887,6 @@ class NEW_Anthropic_Agent:
                 batches.append(current_batch)
 
             return batches
-
-        
-
-
     def antho_agent(self, content, model_index=None,antho_tools=None, tool_mapping=None, verbose=True, tool_choice=None,max_tokens=1024,stream=False,model_name=None,raw_output=False,thinking=False):
         
         print(f"impression de model_inde:{model_index} impression de model_Name:{model_name} dans Antho_agent")
@@ -3516,7 +3961,11 @@ class NEW_Anthropic_Agent:
                     BLUE_LIGHT = "\033[94m"
                     RESET_COLOR = "\033[0m"
                     print(f"{BLUE_LIGHT}Fonction Call_back enclenché{RESET_COLOR}")
-                    search_results = function_or_none(**func_args)
+                    try:
+                        search_results = function_or_none(**func_args)
+                    except Exception as e:
+                        print(f"Erreur lors de l'exécution de l'outil {used_tool_name}: {e}")
+                        search_results = None
 
                     response_data["tool_output"] = {
                         "tool_use_id": tool_id,
@@ -3568,7 +4017,11 @@ class NEW_Anthropic_Agent:
                         BLUE_LIGHT = "\033[94m"
                         RESET_COLOR = "\033[0m"
                         print(f"{BLUE_LIGHT}Fonction Call_back enclenché{RESET_COLOR}")
-                        search_results = function_or_none(**func_args)
+                        try:
+                            search_results = function_or_none(**func_args)
+                        except Exception as e:
+                            print(f"Erreur lors de l'exécution de l'outil {single_tool_name}: {e}")
+                            search_results = None
 
                         response_data["tool_output"] = {
                             "tool_use_id": tool_id,
@@ -4188,7 +4641,6 @@ class NEW_Anthropic_Agent:
 
         except Exception as e:
             print(f"Erreur lors de l'envoi du message en streaming : {e}")
-
     async def anthropic_send_message_tool_streaming(self, content, model_index=None, model_name=None, 
                                                      tools=None, tool_mapping=None, tool_choice=None, max_tokens=1024):
         """
@@ -4406,14 +4858,11 @@ class NEW_Anthropic_Agent:
             else:
                 chosen_model = self.models[0]  # Modèle par défaut
             
-            print(f"Envoi streaming vers Anthropic avec modèle: {chosen_model}")
-            print(f"System prompt: {self.system_prompt}")
+            logger.info(f"[ANTHROPIC] Streaming avec modèle: {chosen_model}")
             
             # Préparer les messages
-            print(f"🔵 Chat history: {self.chat_history}")
-            print(f"🔵 Chat history length: {len(self.chat_history)}")
+            logger.debug(f"[ANTHROPIC] Historique: {len(self.chat_history)} messages")
             messages = [{"role": "user" if i % 2 == 0 else "assistant", "content": msg["content"]} for i, msg in enumerate(self.chat_history)]
-            print(f"🔵 Messages préparés: {messages}")
             
             # Utiliser le vrai streaming d'Anthropic avec async
             print(f"🔵 Début du streaming Anthropic...")
@@ -4432,7 +4881,7 @@ class NEW_Anthropic_Agent:
                 print(f"🔵 Tentative de création du stream async...")
                 print(f"🔵 Model: {chosen_model}")
                 print(f"🔵 Max tokens: {max_tokens}")
-                print(f"🔵 System prompt length: {len(self.system_prompt) if self.system_prompt else 0}")
+                # print(f"🔵 System prompt length: {len(self.system_prompt) if self.system_prompt else 0}")
                 print(f"🔵 Messages count: {len(messages)}")
                 
                 # Utiliser le client async (self.client_stream) pour ne pas bloquer l'event loop
@@ -4499,6 +4948,266 @@ class NEW_Anthropic_Agent:
                 "error": str(e)
             }
 
+    async def anthropic_send_message_with_tools_streaming(
+        self,
+        content: str,
+        tools: List[Dict[str, Any]],
+        tool_mapping: Dict[str, Callable],
+        model_name: str,
+        max_tokens: int = 2048,
+        system_prompt: Optional[str] = None
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Envoie un message avec outils et streaming réel depuis l'API Anthropic.
+        Gère le cycle complet: message → tool_use → tool_result → réponse
+        
+        Args:
+            content: Message utilisateur (peut être vide pour tours suivants)
+            tools: Liste des définitions d'outils Anthropic
+            tool_mapping: Dict {tool_name: fonction} pour exécuter les outils
+            model_name: Nom du modèle à utiliser
+            max_tokens: Nombre max de tokens
+            system_prompt: Prompt système (optionnel, sinon utilise self.system_prompt)
+        
+        Yields:
+            Dict avec events: text_chunk, tool_use_start, tool_use, tool_result, error
+        """
+        try:
+            # ═══════════════════════════════════════════════════════
+            # ÉTAPE 1: Préparer les messages
+            # ═══════════════════════════════════════════════════════
+            
+            # Copier l'historique existant
+            raw_messages = self.chat_history.copy()
+            
+            # 🔧 Nettoyer les messages pour retirer les champs non autorisés par l'API Anthropic
+            # L'API Anthropic n'accepte que: role, content (et éventuellement stop_reason pour assistant)
+            messages = []
+            for msg in raw_messages:
+                if isinstance(msg, dict):
+                    # Extraire uniquement les champs autorisés
+                    cleaned_msg = {
+                        "role": msg.get("role"),
+                        "content": msg.get("content")
+                    }
+                    # Retirer None values
+                    cleaned_msg = {k: v for k, v in cleaned_msg.items() if v is not None}
+                    if cleaned_msg and cleaned_msg.get("role") and cleaned_msg.get("content"):
+                        messages.append(cleaned_msg)
+                else:
+                    # Si ce n'est pas un dict, essayer de le convertir ou l'ignorer
+                    logging.warning(f"[ANTHROPIC_TOOLS] Message ignoré (format invalide): {type(msg)}")
+            
+            # 🔧 N'ajouter un nouveau message utilisateur QUE si content n'est pas vide
+            # Si content est vide, continuer avec l'historique existant (tool_results déjà présents)
+            if content and content.strip():
+                self.add_user_message(content)
+                messages.append({"role": "user", "content": content})
+            else:
+                # Tour suivant: l'historique contient déjà les tool_results
+                logging.debug("[ANTHROPIC_TOOLS] Tour suivant: utilisation historique existant")
+            
+            # ═══════════════════════════════════════════════════════
+            # ÉTAPE 2: Accumulateurs pour la réponse
+            # ═══════════════════════════════════════════════════════
+            accumulated_text = ""
+            tool_uses = []
+            current_tool_use = None
+            
+            # ═══════════════════════════════════════════════════════
+            # ÉTAPE 3: Streaming avec l'API Anthropic
+            # ═══════════════════════════════════════════════════════
+            
+            # Utiliser system_prompt fourni ou celui de l'instance
+            final_system_prompt = system_prompt if system_prompt else self.system_prompt
+            
+            stream_params = {
+                "model": model_name,
+                "max_tokens": max_tokens,
+                "messages": messages,
+            }
+            
+            # Ajouter tools seulement s'il y en a (l'API Anthropic n'accepte pas None)
+            if tools:
+                stream_params["tools"] = tools
+            
+            # Ajouter system prompt si disponible
+            if final_system_prompt:
+                stream_params["system"] = final_system_prompt
+            
+            async with self.client_stream.messages.stream(**stream_params) as stream:
+                async for event in stream:
+                    event_type = event.type
+                    
+                    # ─────────────────────────────────────────────
+                    # Début d'un bloc de contenu
+                    # ─────────────────────────────────────────────
+                    if event_type == "content_block_start":
+                        block = event.content_block
+                        
+                        if block.type == "text":
+                            # Début d'un bloc de texte
+                            pass
+                        
+                        elif block.type == "tool_use":
+                            # Début d'utilisation d'un outil
+                            current_tool_use = {
+                                "id": block.id,
+                                "name": block.name,
+                                "input": ""
+                            }
+                            
+                            yield {
+                                "type": "tool_use_start",
+                                "tool_name": block.name,
+                                "tool_id": block.id
+                            }
+                    
+                    # ─────────────────────────────────────────────
+                    # Delta (contenu qui arrive progressivement)
+                    # ─────────────────────────────────────────────
+                    elif event_type == "content_block_delta":
+                        delta = event.delta
+                        
+                        if delta.type == "text_delta":
+                            # Chunk de texte
+                            text_chunk = delta.text
+                            accumulated_text += text_chunk
+                            
+                            # 🔍 DEBUG: Log pour vérifier que les chunks sont bien reçus
+                            #logger.info(f"[ANTHROPIC_STREAM] 📝 text_delta reçu: {len(text_chunk)} chars")
+                            
+                            yield {
+                                "type": "text_chunk",
+                                "chunk": text_chunk
+                            }
+                        
+                        elif delta.type == "input_json_delta":
+                            # Chunk de l'input JSON de l'outil
+                            if current_tool_use:
+                                current_tool_use["input"] += delta.partial_json
+                    
+                    # ─────────────────────────────────────────────
+                    # Fin d'un bloc de contenu
+                    # ─────────────────────────────────────────────
+                    elif event_type == "content_block_stop":
+                        # Si on termine un outil, parser son input complet
+                        if current_tool_use:
+                            try:
+                                current_tool_use["parsed_input"] = json.loads(current_tool_use["input"])
+                            except json.JSONDecodeError:
+                                current_tool_use["parsed_input"] = {}
+                            
+                            tool_uses.append(current_tool_use)
+                            
+                            # Yield l'événement d'utilisation d'outil
+                            yield {
+                                "type": "tool_use",
+                                "tool_name": current_tool_use["name"],
+                                "tool_input": current_tool_use["parsed_input"],
+                                "tool_id": current_tool_use["id"]
+                            }
+                            
+                            current_tool_use = None
+            
+            # ═══════════════════════════════════════════════════════
+            # ÉTAPE 4: Exécuter les outils
+            # ═══════════════════════════════════════════════════════
+            tool_results = []
+            if tool_uses:
+                for tool_use in tool_uses:
+                    tool_name = tool_use["name"]
+                    tool_input = tool_use["parsed_input"]
+                    tool_id = tool_use["id"]
+                    
+                    # Récupérer la fonction de l'outil
+                    tool_func = tool_mapping.get(tool_name)
+                    
+                    if tool_func:
+                        # Exécuter l'outil (peut être async ou sync)
+                        if asyncio.iscoroutinefunction(tool_func):
+                            result = await tool_func(**tool_input)
+                        else:
+                            result = tool_func(**tool_input)
+                        
+                        # Accumuler pour le chat_history
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_id,
+                            "content": str(result)
+                        })
+                        
+                        # Yield le résultat
+                        yield {
+                            "type": "tool_result",
+                            "tool_name": tool_name,
+                            "tool_id": tool_id,
+                            "result": result
+                        }
+                    else:
+                        # Outil non trouvé
+                        error_msg = f"Tool {tool_name} not found in mapping"
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_id,
+                            "content": error_msg,
+                            "is_error": True
+                        })
+                        yield {
+                            "type": "tool_result",
+                            "tool_name": tool_name,
+                            "tool_id": tool_id,
+                            "error": error_msg
+                        }
+            
+            # ═══════════════════════════════════════════════════════
+            # ÉTAPE 5: Mettre à jour le chat_history
+            # ═══════════════════════════════════════════════════════
+            
+            # Ajouter la réponse de l'assistant (texte + tool_uses)
+            if accumulated_text or tool_uses:
+                assistant_content = []
+                if accumulated_text:
+                    assistant_content.append({"type": "text", "text": accumulated_text})
+                for tool_use in tool_uses:
+                    assistant_content.append({
+                        "type": "tool_use",
+                        "id": tool_use["id"],
+                        "name": tool_use["name"],
+                        "input": tool_use["parsed_input"]
+                    })
+                
+                # Ajouter au chat_history du provider
+                self.add_ai_message(assistant_content)
+            
+            # Ajouter les tool_results au chat_history (format Anthropic requis)
+            if tool_results:
+                self.add_user_message(tool_results)
+            
+            # ═══════════════════════════════════════════════════════
+            # ÉTAPE 6: Capturer les tokens
+            # ═══════════════════════════════════════════════════════
+            try:
+                final_message = await stream.get_final_message()
+                if hasattr(final_message, 'usage'):
+                    # Mettre à jour les tokens
+                    class TokenUsage:
+                        def __init__(self, usage_data, model_name):
+                            self.usage = usage_data
+                            self.model = model_name
+                    
+                    token_response = TokenUsage(final_message.usage, final_message.model)
+                    self.update_token_usage(token_response)
+            except Exception as token_err:
+                logging.warning(f"[TOKENS] Erreur capture tokens: {token_err}")
+        
+        except Exception as e:
+            logging.error(f"Erreur dans anthropic_send_message_with_tools_streaming: {e}", exc_info=True)
+            yield {
+                "type": "error",
+                "error": str(e)
+            }
+
     def anthropic_send_message(self, content, model_index=None,model_name=None, max_tokens=1024, streaming=False,thinking=False):
         """
         Envoie un message en utilisant un des modèles spécifiés par index, avec option de streaming.
@@ -4527,8 +5236,8 @@ class NEW_Anthropic_Agent:
             print(f"contenu de vision .....")
             # Pour le contenu vision, envoyer directement sans historique
             #print(json.dumps(content, indent=2))
-            print(f"Envoi à Anthropic - system_prompt: {self.system_prompt}")
-            print(f"Type system_prompt: {type(self.system_prompt)}")
+            # print(f"Envoi à Anthropic - system_prompt: {self.system_prompt}")
+            # print(f"Type system_prompt: {type(self.system_prompt)}")
             response = self.client.messages.create(
                 model=chosen_model,
                 messages=[{"role": "user", "content": content}],
@@ -4754,7 +5463,6 @@ class NEW_Anthropic_Agent:
         instructions=f'Le nombre de tours à été atteint {max_turns} un resumé va etre effectué et le programme devrait repartir....'
         print(f"Nombre maximum de tours ({max_turns}) atteint sans 'TERMINATE'. Fin de la conversation.")
         return False,next_step,instructions,response_text
-
     def chat_with_antho_coa_mapping(self, initial_user_input, model_index, antho_tools, tool_mapping, clerck_instance, manager_instance, auditor_instance, manager_prompt):
         print("Bienvenue dans le chat avec Anthropic!")
         print("Le chat se terminera automatiquement après 'TERMINATE' ou 10 tours.")
@@ -5251,9 +5959,6 @@ class NEW_Anthropic_Agent:
         
         print(f"Nombre maximum de tours ({max_turns}) atteint sans 'TERMINATE'. Fin de la conversation.")
         return False,None,None,response_text
-
-
-
 class NEW_OpenAiAgent:
     def __init__(self, space_manager=None, collection_name=None, job_id=None):
         """
@@ -5559,8 +6264,12 @@ class NEW_OpenAiAgent:
                         print(f"Erreur de décodage JSON pour les arguments de l'outil: {e}")
                         continue
                     except Exception as e:
-                        print(f"Erreur lors de l'exécution de l'outil {tool_name}: {e}")
-                        continue
+                        print(f"Erreur lors de l'exécution de l'outil {tool_name}: {str(e)}")
+                        return {
+                            "error": str(e),
+                            "tool_name": tool_name,
+                            "provider": provider.value
+                        }
 
             # Si un message texte est présent
             if message.content:
@@ -5830,30 +6539,40 @@ class NEW_OpenAiAgent:
                                     break
                             
                             if callable(function_or_none):
-                                print(f"🔵 Exécution de la fonction {tool_name}")
-                                # Exécution async ou sync
-                                if asyncio.iscoroutinefunction(function_or_none):
-                                    tool_output = await function_or_none(**tool_input)
-                                else:
-                                    loop = asyncio.get_event_loop()
-                                    tool_output = await loop.run_in_executor(None, lambda: function_or_none(**tool_input))
-                                
-                                # Yield du résultat
-                                yield {
-                                    "type": "tool_result",
-                                    "tool_name": tool_name,
-                                    "tool_id": tool_id,
-                                    "tool_output": tool_output,
-                                    "is_final": False,
-                                    "model": chosen_model
-                                }
-                                
-                                tool_results.append({
-                                    "tool_name": tool_name,
-                                    "tool_id": tool_id,
-                                    "input": tool_input,
-                                    "output": tool_output
-                                })
+                                try:
+                                    print(f"🔵 Exécution de la fonction {tool_name}")
+                                    # Exécution async ou sync
+                                    if asyncio.iscoroutinefunction(function_or_none):
+                                        tool_output = await function_or_none(**tool_input)
+                                    else:
+                                        loop = asyncio.get_event_loop()
+                                        tool_output = await loop.run_in_executor(None, lambda: function_or_none(**tool_input))
+                                    
+                                    # Yield du résultat
+                                    yield {
+                                        "type": "tool_result",
+                                        "tool_name": tool_name,
+                                        "tool_id": tool_id,
+                                        "tool_output": tool_output,
+                                        "is_final": False,
+                                        "model": chosen_model
+                                    }
+                                    
+                                    tool_results.append({
+                                        "tool_name": tool_name,
+                                        "tool_id": tool_id,
+                                        "input": tool_input,
+                                        "output": tool_output
+                                    })
+                                except Exception as e:
+                                    print(f"Erreur lors de l'exécution de la fonction {tool_name}: {e}")
+                                    yield {
+                                        "type": "error",
+                                        "content": f"Erreur lors de l'exécution de la fonction {tool_name}: {e}",
+                                        "is_final": True,
+                                        "error": str(e),
+                                        "model": chosen_model
+                                    }
                     
                     except json.JSONDecodeError as e:
                         print(f"🔴 Erreur décodage JSON tool arguments: {e}")
@@ -5944,10 +6663,8 @@ class NEW_OpenAiAgent:
             }
             
             try:
-                print(f"🔵 Début du streaming OpenAI...")
-                print(f"🔵 Model: {chosen_model}")
-                print(f"🔵 Max tokens: {max_tokens}")
-                print(f"🔵 Messages count: {len(self.chat_history)}")
+                logger.info(f"[OPENAI] Streaming avec modèle: {chosen_model}")
+                logger.debug(f"[OPENAI] Max tokens: {max_tokens}, Messages: {len(self.chat_history)}")
                 
                 # Déterminer le bon paramètre de tokens selon le modèle
                 api_params = {
@@ -6035,6 +6752,7 @@ class NEW_OpenAiAgent:
                 "is_final": True,
                 "error": str(e)
             }
+    
 
     def final_handle_responses(self, input_data):
         
@@ -6691,9 +7409,6 @@ class NEW_PERPLEX_AGENT:
         self.agent_init()
         data=self.search(question)
         return data
-      
-
-
 class Anthropic_KDB_AGENT:
     def __init__(self,chroma_db_instance) -> None:
         
@@ -7249,7 +7964,6 @@ class Anthropic_KDB_AGENT:
         self.agent.flush_chat_history()
 
         return final_response
-
     def CHROMADB_AGENT(self, user_query, initial_metadata_dict=None, model_index=0):
         """
         Point d'entrée principal pour l'agent de recherche dans ChromaDB
@@ -7590,6 +8304,7 @@ class Anthropic_KDB_AGENT:
         
         self.agent.flush_chat_history()
         return final_summarized_text
+
 
 class TextStreamer:
     def __init__(self, chunk_size: int = 4, delay: float = 0.05):

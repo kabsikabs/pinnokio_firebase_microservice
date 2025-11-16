@@ -838,10 +838,12 @@ class FirebaseRealtimeChat:
                         print(f"⏳ Message {message_id} en cours de traitement, ignoré")
                         return
                    
-                    message_type = event.data.get('message_type')
+                    # ⚠️ Support des deux formats: message_type (ancien) et type (nouveau)
+                    message_type = event.data.get('message_type') or event.data.get('type')
                     is_unread = not event.data.get('read', True)
                     
-                    if (message_type in ['MESSAGE', 'CARD','TOOL','CMMD'] and 
+                    # ✅ Inclure tous les types de messages gérés par le handler
+                    if (message_type in ['MESSAGE', 'CARD', 'TOOL', 'CMMD', 'FOLLOW_MESSAGE', 'WAITING_MESSAGE', 'WORKFLOW', 'CLOSE_INTERMEDIATION', 'CARD_CLICKED_PINNOKIO'] and 
                         is_unread):
                         self.processed_messages.add(message_id)
                         message_data = {
@@ -1300,10 +1302,12 @@ class X_FirebaseRealtimeChat:
                         print(f"⏳ Message {message_id} en cours de traitement, ignoré")
                         return
                    
-                    message_type = event.data.get('message_type')
+                    # ⚠️ Support des deux formats: message_type (ancien) et type (nouveau)
+                    message_type = event.data.get('message_type') or event.data.get('type')
                     is_unread = not event.data.get('read', True)
                     
-                    if (message_type in ['MESSAGE', 'CARD','TOOL','CMMD'] and 
+                    # ✅ Inclure tous les types de messages gérés par le handler
+                    if (message_type in ['MESSAGE', 'CARD', 'TOOL', 'CMMD', 'FOLLOW_MESSAGE', 'WAITING_MESSAGE', 'WORKFLOW', 'CLOSE_INTERMEDIATION', 'CARD_CLICKED_PINNOKIO'] and 
                         is_unread):
                         self.processed_messages.add(message_id)
                         message_data = {

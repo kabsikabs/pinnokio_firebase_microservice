@@ -5,8 +5,7 @@ Exécutées par Celery Beat pour maintenir la santé du système.
 
 import logging
 from .task_service import celery_app
-from .unified_registry import get_unified_registry
-from .registry_listeners import get_registry_listeners
+from .registry import get_unified_registry, get_registry_listeners
 from .firebase_client import get_firestore
 
 logger = logging.getLogger("maintenance_tasks")

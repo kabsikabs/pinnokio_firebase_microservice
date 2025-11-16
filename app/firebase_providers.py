@@ -4,8 +4,11 @@ import re
 import json
 import os
 import threading
+import asyncio
+import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Callable, Awaitable, Any
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from firebase_admin import credentials, firestore, initialize_app,auth
 import firebase_admin
 from firebase_admin import credentials
@@ -14,9 +17,12 @@ from .firebase_client import get_firestore, get_firebase_app
 from .tools.g_cred import get_secret
 import uuid
 
+# Logger pour Firebase providers
+logger = logging.getLogger(__name__)
+
 try:
     import stripe  # type: ignore
-except Exception:  # stripe facultatif si non utilisé immédiatement
+except Exception:  # stripe facultatif et non utilisé immédiatement
     stripe = None  # type: ignore[assignment]
 
 try:
@@ -472,21 +478,20 @@ class FirebaseManagement:
     def delete_scheduler_job_completely(self, job_id: str) -> bool:
         """Supprime complètement un job scheduler de Firebase."""
         try:
-            # Supposant que vos jobs sont stockés dans une collection "jobs" ou similaire
-            # Ajustez le chemin selon votre structure Firebase
-            job_ref = self.db.collection("scheduler").document(job_id)
+            # ✅ Correction : chercher dans la collection "scheduled_tasks" (et non "scheduler")
+            job_ref = self.db.collection("scheduled_tasks").document(job_id)
             
             # Vérifier si le document existe avant de le supprimer
             if job_ref.get().exists:
                 job_ref.delete()
-                print(f"✅ Document scheduler {job_id} supprimé de Firebase")
+                logger.info(f"[TASKS] ✅ Document scheduled_tasks {job_id} supprimé de Firebase")
                 return True
             else:
-                print(f"ℹ️ Document scheduler {job_id} n'existe pas dans Firebase")
+                logger.info(f"[TASKS] ℹ️ Document scheduled_tasks {job_id} n'existe pas dans Firebase")
                 return True  # Considéré comme un succès car l'objectif est atteint
             
         except Exception as e:
-            print(f"❌ Erreur lors de la suppression complète du job {job_id}: {e}")
+            logger.error(f"[TASKS] ❌ Erreur lors de la suppression complète du job {job_id}: {e}")
             return False
 
     def save_scheduler_job(self, mandate_path: str, job_type: str, job_data: dict) -> bool:
@@ -601,7 +606,6 @@ class FirebaseManagement:
         except Exception as e:
             print(f"❌ Erreur lors de la suppression des documents scheduler: {e}")
             return False
-
     def clean_telegram_users_for_mandate(self, mandate_path: str) -> bool:
         """
         Nettoie les références au mandat dans les documents telegram_users.
@@ -990,7 +994,7 @@ class FirebaseManagement:
             
             # Filtrer les documents où function_name='banker' ET collection_id correspond
             query = notifications_ref.where(
-                filter=firestore.FieldFilter("function_name", "==", "banker")
+                filter=firestore.FieldFilter("function_name", "==", "Bankbookeeper")
             ).where(
                 filter=firestore.FieldFilter("collection_id", "==", collection_id)
             )
@@ -1229,9 +1233,6 @@ class FirebaseManagement:
         except Exception as e:
             print(f"Erreur lors de la récupération du blog '{slug}' depuis Firestore: {e}")
             return None
-
-
-
     def load_dms_types(self):
         """
         Charge les types de DMS dans la collection /settings_param/dms_type.
@@ -1881,7 +1882,6 @@ class FirebaseManagement:
             import traceback
             traceback.print_exc()
             return False
-    
     def delete_expense_from_firebase(
         self, 
         mandate_path: str, 
@@ -1937,50 +1937,42 @@ class FirebaseManagement:
             return False
     
 
-    def x_check_job_status(self, user_id: str, job_id: str = None, file_id: str = None):
+    def load_automated_router_context(self, mandate_path):
         """
-        Vérifie l'état d'un job ou d'un fichier spécifique en parcourant la collection de notifications.
-        
-        Args:
-            user_id (str): L'ID de l'utilisateur
-            job_id (str, optional): L'ID du job à rechercher
-            file_id (str, optional): L'ID du fichier à rechercher
-        
-        Returns:
-            dict: Les informations du job ou du fichier, y compris son statut, ou None si aucun résultat
+        Charge les prompts automatisés depuis Firestore.
+        Retourne (definition_prompts, instruction_prompts) si existants, sinon None.
         """
         try:
-            if not job_id and not file_id:
-                print("Veuillez spécifier un job_id ou un file_id.")
-                return None
-            
-            # Construire le chemin de la collection
-            collection_path = f"clients/{user_id}/notifications"
-            collection_ref = self.db.collection(collection_path)
-            docs = collection_ref.stream()
-            
-            # Chercher le document correspondant à file_id ou job_id
-            for doc in docs:
-                doc_data = doc.to_dict()
-                
-                if file_id and doc_data.get('file_id') == file_id:
-                    print(f"Fichier {file_id} trouvé avec statut: {doc_data.get('status', 'inconnu')}")
-                    doc_data['document_id'] = doc.id
-                    return doc_data
-                
-                if job_id and doc_data.get('job_id') == job_id:
-                    print(f"Job {job_id} trouvé avec statut: {doc_data.get('status', 'inconnu')}")
-                    doc_data['document_id'] = doc.id
-                    return doc_data
-            
-            # Si aucun document correspondant n'est trouvé
-            print(f"Aucun résultat trouvé pour job_id={job_id} ou file_id={file_id}")
-            return None
-            
-        except Exception as e:
-            print(f"Erreur lors de la vérification du statut: {e}")
-            return None
+            automated_context_ref = self.db.document(f"{mandate_path}/context/automated_router_context")
+            automated_snapshot = automated_context_ref.get()
 
+            
+
+            if automated_snapshot.exists:
+                data = automated_snapshot.to_dict()
+                definition_prompt = data.get("definition_prompt", {})
+                instruct_prompt = data.get("instruct_prompt", {})
+
+                '''ordered_departments = [
+                    "invoices", "expenses", "banks_cash", "hr",
+                    "taxes", "letters", "contrats", "financial_statement"
+                ]'''
+
+                #definition_prompts = tuple(definition_prompt.get(d, "") for d in ordered_departments)
+                #instruction_prompts = tuple(instruct_prompt.get(d, "") for d in ordered_departments)
+
+                return definition_prompt, instruct_prompt
+                
+
+            else:
+                return  {}, {}
+        except Exception as e:
+            print(f"Erreur lors du chargement du contexte automatisé : {e}")
+            return None, None
+
+
+
+    
     def check_job_status(self, user_id: str, job_id: str = None, file_id: str = None):
         """
         Vérifie l'état d'un job ou d'un fichier spécifique en accédant directement au document.
@@ -2003,7 +1995,8 @@ class FirebaseManagement:
             
             # Accéder directement au document par son ID
             if file_id:
-                doc_ref = self.db.collection(collection_path).document(file_id)
+                # Convertir en string pour sécurité (Firebase attend toujours des strings)
+                doc_ref = self.db.collection(collection_path).document(str(file_id))
                 doc = doc_ref.get()
                 if doc.exists:
                     doc_data = doc.to_dict()
@@ -2015,7 +2008,8 @@ class FirebaseManagement:
                     return None
                     
             if job_id:
-                doc_ref = self.db.collection(collection_path).document(job_id)
+                # Convertir en string pour sécurité (Firebase attend toujours des strings)
+                doc_ref = self.db.collection(collection_path).document(str(job_id))
                 doc = doc_ref.get()
                 if doc.exists:
                     doc_data = doc.to_dict()
@@ -2180,42 +2174,6 @@ class FirebaseManagement:
                 'message': 'Une erreur est survenue lors de l\'initialisation du paiement'
             }
     
-    def x_process_immediate_top_up(self, user_id: str,amount: float, transaction_ref: str=None) -> None:
-        """
-        Traite immédiatement un top-up sans passer par Stripe (méthode interne).
-        Utilisée lorsque Stripe n'est pas configuré ou pour le mode de développement.
-        """
-        # Mettre à jour la transaction comme "added"
-        if transaction_ref:
-            transaction_ref.update({
-                'status': 'added',
-                'processed_at': firestore.SERVER_TIMESTAMP
-            })
-        
-        # Mettre à jour le solde actuel
-        balance_doc_ref = self.db.document(f"clients/{user_id}/billing/current_balance")
-        balance_doc = balance_doc_ref.get()
-        
-        # Initialiser les valeurs du solde
-        current_balance = 0.0
-        current_topping = 0.0
-        
-        if balance_doc.exists:
-            balance_data = balance_doc.to_dict()
-            current_balance = float(balance_data.get('current_balance', 0.0))
-            current_topping = float(balance_data.get('current_topping', 0.0))
-        
-        # Mettre à jour les valeurs
-        current_topping += amount
-        current_balance += amount
-        
-        # Enregistrer les nouvelles valeurs
-        balance_doc_ref.set({
-            'current_balance': current_balance,
-            'current_topping': current_topping,
-            'timestamp_topping': firestore.SERVER_TIMESTAMP,
-            'last_updated': firestore.SERVER_TIMESTAMP
-        }, merge=True)
     
     def process_immediate_top_up(self, user_id: str,amount: float, transaction_ref: str=None) -> None:
         """
@@ -2536,7 +2494,6 @@ class FirebaseManagement:
         except Exception as e:
             print(f"❌ Erreur get_unread_notifications: {e}")
             return []
-
     def get_notifications(self, user_id: str, read: Optional[bool] = None, limit: int = 100) -> List[Dict[str, Any]]:
         """
         Récupère les notifications avec filtrage optionnel sur 'read'.
@@ -2820,83 +2777,7 @@ class FirebaseManagement:
             }
 
 
-    def x_add_top_up(self, mandate_path: str, top_up_data: dict) -> bool:
-        """
-        Ajoute une nouvelle transaction de recharge dans Firestore et met à jour le solde courant.
-        
-        Args:
-            mandate_path (str): Chemin du mandat dans Firestore
-            top_up_data (dict): Dictionnaire contenant 'currency' et 'amount'
-            
-        Returns:
-            bool: True si l'ajout est réussi, False sinon
-        """
-        try:
-            # Validation des données
-            if not isinstance(top_up_data, dict):
-                raise ValueError("top_up_data must be a dictionary")
-            
-            required_fields = {'currency', 'amount'}
-            if not all(field in top_up_data for field in required_fields):
-                raise ValueError("Missing required fields: currency and amount")
-            
-            # Extraire l'ID utilisateur du chemin du mandat
-            path_parts = mandate_path.split('/')
-            user_id = path_parts[1] if len(path_parts) > 1 else None
-            
-            if not user_id:
-                raise ValueError("Could not extract user_id from mandate_path")
-            
-            # Convertir le montant en float
-            amount = float(top_up_data['amount'])
-            
-            # 1. Enregistrer la transaction avec le statut 'added'
-            top_up_doc = {
-                'currency': top_up_data['currency'],
-                'amount': amount,
-                'created_at': firestore.SERVER_TIMESTAMP,
-                'status': 'added'  # Définir directement comme 'added'
-            }
-            
-            # Chemin de la collection de transactions
-            transactions_path = f"{mandate_path}/billing/topping/transactions"
-            
-            # Ajouter la transaction
-            self.db.collection(transactions_path).add(top_up_doc)
-            
-            # 2. Mettre à jour le solde actuel
-            balance_doc_ref = self.db.document(f"clients/{user_id}/billing/current_balance")
-            balance_doc = balance_doc_ref.get()
-            
-            # Initialiser les valeurs du solde
-            current_balance = 0.0
-            current_topping = 0.0
-            
-            if balance_doc.exists:
-                balance_data = balance_doc.to_dict()
-                current_balance = float(balance_data.get('current_balance', 0.0))
-                current_topping = float(balance_data.get('current_topping', 0.0))
-            
-            # Mettre à jour les valeurs
-            current_topping += amount
-            current_balance += amount
-            
-            # Enregistrer les nouvelles valeurs
-            balance_doc_ref.set({
-                'current_balance': current_balance,
-                'current_topping': current_topping,
-                'timestamp_topping': firestore.SERVER_TIMESTAMP,
-                'last_updated': firestore.SERVER_TIMESTAMP
-            }, merge=True)
-            
-            return True
-            
-        except Exception as e:
-            print(f"Error adding top-up record: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return False
-
+    
     def save_context(self, context_path: str, context_data: dict):
         """
         Sauvegarde les données de contexte dans Firestore.
@@ -3175,7 +3056,6 @@ class FirebaseManagement:
             return client_uuid, drive_client_parent_id,document_path
 
         return None, None,None  # Renvoie None si aucun client correspondant n'est trouvé
-
     def check_business_name_existence(self,user_id, client_uuid, business_name):
         """
         Vérifie si un business_name spécifié existe déjà dans la sous-collection 'mandates'
@@ -3814,7 +3694,6 @@ class FirebaseManagement:
         # Référence au document Firestore
         doc_ref = self.db.document(document_path)
         doc_ref.set(data, merge=merge)
-
     def get_raw_document(self,document_path):
         
         """
@@ -4431,7 +4310,6 @@ class FirebaseManagement:
         except Exception as e:
             print(f"Error reconstructing mandate from path {mandate_path}: {str(e)}")
             return None
-
     def fetch_all_mandates_summary(self,user_id):
         # Étape 1 : Extraire toutes les collections 'mandates'
         if user_id:
@@ -5047,7 +4925,6 @@ class FirebaseManagement:
         # Mettre à jour le document avec les nouveaux messages
         internal_message_doc_ref.set(messages)
         print(f"Message {message_key} ajouté avec succès.")
-
     def get_internal_message(self,user_id, job_id):
         
         if user_id:
@@ -5677,7 +5554,6 @@ class FirebaseManagement:
             
         except Exception as e:
             print(f"Erreur lors de l'ajout du rapport d'audit : {e}")
-    
     def upload_document_to_task_job_id(self,user_id, job_id, initial_document_data):
         """
         Ajoute un rapport d'audit à une sous-collection nommée 'internal_message' 
@@ -6319,8 +6195,6 @@ class FirebaseManagement:
         }, merge=True)
 
         print(f"Profil de l'entreprise mis à jour pour le client {client_uuid}, mandat {contact_space_id}.")
-
-
     def upload_general_context_on_targets(self,user_id, client_uuid, contact_space_id, target_index, field, value):
         # Récupérer les données générales du client pour obtenir l'ID
         if user_id:
@@ -6923,9 +6797,6 @@ class FirebaseManagement:
                     all_chats.extend(context_topic_q_a[index_str]['chat'])
         
         return all_chats
-
-    
-
     def upload_general_context_init_topics_q_a(self,user_id, client_uuid, contact_space_id, get_q_and_a_topics):
         # Étape 1: Récupérer les données générales du client pour obtenir l'ID
         if user_id:
@@ -7048,20 +6919,34 @@ class FirebaseManagement:
             base_path = 'bo_clients'
         # Étape 1: Récupérer les données générales du client
         clients_query = self.db.collection(base_path).where('client_uuid', '==', client_uuid).limit(1).get()
+        client_id = None
         for client_doc in clients_query:
             client_data = client_doc.to_dict()
             client_id = client_doc.id
             full_profile.update(client_data)  # Ajouter les données du client au profil complet
+        
+        # ⭐ Vérifier qu'un client a été trouvé
+        if not client_id:
+            raise ValueError(
+                f"Aucun client trouvé pour client_uuid='{client_uuid}' dans {base_path}"
+            )
 
         # Étape 2: Récupérer le mandat spécifique en utilisant 'contact_space_id'
+        # ⭐ Stocker le client_id (disponible dès maintenant)
+        full_profile['_client_id'] = client_id
+        
         if user_id:
             base_path = f'clients/{user_id}/bo_clients/{client_id}/mandates'
         else:
             base_path =f'bo_clients/{client_id}/mandates'
-        mandates_query = self.db.collection(f'bo_clients/{client_id}/mandates').where('contact_space_id', '==', contact_space_id).get()
+        mandates_query = self.db.collection(base_path).where('contact_space_id', '==', contact_space_id).get()
         for mandate_doc in mandates_query:
             mandate_data = mandate_doc.to_dict()
             mandate_id = mandate_doc.id
+            
+            # ⭐ Stocker le mandate_id (disponible dans la boucle)
+            full_profile['_mandate_id'] = mandate_id
+            
             for key, value in mandate_data.items():
                 full_profile[f'mandate_{key}'] = value  # Préfixer les clés pour éviter les conflits
 
@@ -7085,6 +6970,77 @@ class FirebaseManagement:
                         new_key = f'{new_key}_{suffix}'
                     erp_data_accumulated[new_key] = value
             full_profile.update(erp_data_accumulated)
+            
+            # ⭐ Étape 4 : Récupérer les workflow_params (paramètres d'approbation)
+            if user_id:
+                workflow_params_path = f'clients/{user_id}/bo_clients/{client_id}/mandates/{mandate_id}/setup/workflow_params'
+            else:
+                workflow_params_path = f'bo_clients/{client_id}/mandates/{mandate_id}/setup/workflow_params'
+            
+            # Initialiser la structure par défaut
+            workflow_params = {
+                "Apbookeeper_param": {
+                    "apbookeeper_approval_contact_creation": False,
+                    "apbookeeper_approval_required": False,
+                    "apbookeeper_communication_method": ""
+                },
+                "Router_param": {
+                    "router_approval_required": False,
+                    "router_automated_workflow": False,
+                    "router_communication_method": ""
+                },
+                "Banker_param": {
+                    "banker_approval_required": False,
+                    "banker_approval_thresholdworkflow": 0,
+                    "banker_communication_method": ""
+                }
+            }
+            
+            try:
+                workflow_doc = self.db.document(workflow_params_path).get()
+                
+                if workflow_doc.exists:
+                    workflow_data = workflow_doc.to_dict()
+                    
+                    # Extraire les paramètres pour Apbookeeper
+                    if "Apbookeeper_param" in workflow_data:
+                        ap_param = workflow_data.get("Apbookeeper_param", {})
+                        workflow_params["Apbookeeper_param"] = {
+                            "apbookeeper_approval_contact_creation": ap_param.get("apbookeeper_approval_contact_creation", False),
+                            "apbookeeper_approval_required": ap_param.get("apbookeeper_approval_required", False),
+                            "apbookeeper_communication_method": ap_param.get("apbookeeper_communication_method", "")
+                        }
+                    
+                    # Extraire les paramètres pour Router
+                    if "Router_param" in workflow_data:
+                        router_param = workflow_data.get("Router_param", {})
+                        workflow_params["Router_param"] = {
+                            "router_approval_required": router_param.get("router_approval_required", False),
+                            "router_automated_workflow": router_param.get("router_automated_workflow", False),
+                            "router_communication_method": router_param.get("router_communication_method", "")
+                        }
+                    
+                    # Extraire les paramètres pour Banker
+                    if "Banker_param" in workflow_data:
+                        banker_param = workflow_data.get("Banker_param", {})
+                        workflow_params["Banker_param"] = {
+                            "banker_approval_required": banker_param.get("banker_approval_required", False),
+                            "banker_approval_thresholdworkflow": banker_param.get("banker_approval_thresholdworkflow", 0),
+                            "banker_communication_method": banker_param.get("banker_communication_method", "")
+                        }
+            except Exception as e:
+                print(f"⚠️ Erreur récupération workflow_params: {str(e)} - Utilisation des valeurs par défaut")
+            
+            # Ajouter les workflow_params au profil complet
+            full_profile['workflow_params'] = workflow_params
+        
+        # ⭐ Vérifier qu'au moins un mandat a été trouvé
+        if '_mandate_id' not in full_profile:
+            raise ValueError(
+                f"Aucun mandat trouvé pour contact_space_id='{contact_space_id}' "
+                f"dans {base_path}. Vérifiez que le mandat existe avec ce contact_space_id."
+            )
+        
         return full_profile
 
     
@@ -7173,31 +7129,7 @@ class FirebaseManagement:
             except Exception as e:
                 print(f'Erreur lors de la suppression du document à {full_path}: {e}')
 
-    def x_get_departement_job_path(self,user_id, departement_name):
-        # Rechercher le document avec le champ 'departement' correspondant à departement_name
-        if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
-        else:
-            base_path = 'klk_vision'
-        departement_query = self.db.collection(base_path).where('departement', '==', departement_name).limit(1).stream()
-
-        # Obtenir le document correspondant
-        for doc in departement_query:
-            departement_doc = doc
-            
-            # Vérifier si le document existe
-            if departement_doc.exists:
-                # Construire le chemin vers la sous-collection 'journal'
-                journal_path = f"klk_vision/{departement_doc.id}/journal"
-                # Vérifier si la sous-collection 'journal' existe
-                if not self.db.collection(journal_path).get():
-                    # Si la sous-collection 'journal' n'existe pas, la créer
-                    self.db.collection(journal_path).document()  # Cela crée un document vide dans la sous-collection
-                return journal_path
-            else:
-                print(f"Aucun document avec le département '{departement_name}' n'a été trouvé.")
-                return None
-
+   
     def get_client_doc(self,user_id, uuid):
         """
         Récupère l'ID du document ayant une clé 'client_uuid' correspondant à l'uuid fourni.
@@ -7314,102 +7246,7 @@ class FirebaseManagement:
         # Éliminer les doublons
         return list(set(shared_clients))
 
-    def x_get_client_list(self,user_id):
-        """Récupère la liste des noms de clients."""
-        if user_id:
-            base_path = f'clients/{user_id}/bo_clients'
-        else:
-            base_path = 'bo_clients'
-        clients_ref = self.db.collection(base_path)
-        docs = clients_ref.stream()
-        client_list = [doc.to_dict().get('client_name') for doc in docs]
-        return client_list
-
-    def x_create_form_data(self):
-        """Crée le form_data pour la carte Google Chat sans arguments."""
-        client_list = self.get_client_list()
-        mandate_data = self.get_mandate_data()
-        form_data = {
-            'client_list': client_list,
-            'legal_name': mandate_data.get('legal_name', ''),
-            'business_country': mandate_data.get('business_country', ''),
-            'business_name': mandate_data.get('business_name', ''),
-            'business_address': mandate_data.get('business_address', ''),
-            'isactive': mandate_data.get('isactive', False)
-        }
-        return form_data
-
-    def x_get_mandate_data_by_mandat_space_id(self,user_id, space_id):
-        """Récupère les données de mandat par l'ID de l'espace de contact.
-
-        Args:
-            space_id (str): L'identifiant de l'espace de contact à rechercher.
-
-        Returns:
-            dict: Les données du mandat correspondant à l'ID de l'espace de contact, ou None si non trouvé.
-        """
-        # Recherche dans la collection 'klk_vision'
-        if user_id:
-            base_path = f'clients/{user_id}/bo_clients'
-        else:
-            base_path = 'bo_clients'
-        klk_vision_ref = self.db.collection(base_path)
-        # Itérer sur chaque document dans 'klk_vision'
-        for client_doc in klk_vision_ref.stream():
-            # Accès à la sous-collection 'mandates' de ce document
-            mandates_ref = client_doc.reference.collection('mandates')
-            # Recherche des documents dans 'mandates' où 'contact_space_id' correspond à 'space_id'
-            matches = mandates_ref.where('contact_space_id', '==', space_id).stream()
-
-            # Si un document correspondant est trouvé, construit les données de retour avec le chemin complet
-            for match in matches:
-                mandate_data = match.to_dict()
-                # Ajouter le chemin complet du document trouvé à 'mandate_data'
-                mandate_data['full_path'] = match.reference.path
-                return mandate_data
-
-        # Si aucun document correspondant n'est trouvé, retourne None
-        return None
-
-    def x_get_combined_mandate_and_client_data(self, space_id):
-        mandate_data = self.get_mandate_data_by_mandat_space_id(space_id)
-        if mandate_data:
-            # Découper le 'full_path' pour obtenir le chemin du document client
-            client_path = '/'.join(mandate_data['full_path'].split('/')[:2])
-            
-            # Récupérer le document client en utilisant le chemin
-            client_doc_ref = self.db.document(client_path)
-            client_doc = client_doc_ref.get()
-            if client_doc.exists:
-                client_data = client_doc.to_dict()
-                
-                # Combiner les données du mandat avec celles du client
-                combined_data = {**client_data, **mandate_data}
-                # Optionnellement, supprimer 'full_path' si vous ne voulez pas l'inclure dans le résultat final
-                combined_data.pop('full_path', None)
-                
-                return combined_data
-
-        # Retourner None si les données du mandat ne sont pas trouvées ou si le document client n'existe pas
-        return None
-
-    def x_delete_document_in_journal_by_name(self,user_id, file_name, collection_name='ApBookeeper'):
-        """Supprime les documents par nom dans une collection spécifiée."""
-        # Accéder à la collection klk_vision et à la sous-collection spécifiée
-        if user_id:
-            base_path = f'clients/{user_id}/bo_clients'
-        else:
-            base_path = 'bo_clients'
-        collection_ref = self.db.collection(base_path).document(collection_name).collections()
-        
-        for sub_collection in collection_ref:
-            # Itérer sur chaque document de la sous-collection
-            docs = sub_collection.where('file_name', '==', file_name).stream()
-            for doc in docs:
-                # Supprimer le document trouvé
-                doc.reference.delete()
-                print(f"Document {doc.id} supprimé avec succès.")
-
+    
     def delete_document_and_subcollections(self, document_ref):
         """Supprime un document et toutes ses sous-collections."""
         # Supprimer les documents dans les sous-collections
@@ -7423,122 +7260,7 @@ class FirebaseManagement:
         print(f"Document et ses sous-collections supprimés avec succès : {document_ref.id}")
 
     
-    def x_delete_document_in_journal_by_mandat_id(self,user_id, mandat_id, departements):
-        """Supprime les documents par mandat_id dans la sous-collection 'journal' pour un ou plusieurs départements spécifiés."""
-        # Convertir le nom du département en liste s'il ne s'agit pas déjà d'une liste
-        if not isinstance(departements, list):
-            departements = [departements]
-
-        if not departements:
-            print("Liste des noms de département non spécifiée.")
-            return
-
-        for departement in departements:
-            if departement is None:
-                print("Nom de département non spécifié dans la liste.")
-                continue
-
-            # Itérer sur chaque document de la collection klk_vision correspondant au département actuel
-            if user_id:
-                base_path = f'clients/{user_id}/klk_vision'
-            else:
-                base_path = 'klk_vision'
-            docs = self.db.collection(base_path).where('departement', '==', departement).stream()
-
-            document_found = False
-            for doc in docs:
-                document_found = True
-                document_ref = doc.reference
-                journal_collection_ref = document_ref.collection('journal')
-
-                try:
-                    # Itérer sur chaque document de la sous-collection 'journal'
-                    journal_docs = journal_collection_ref.where('mandat_id', '==', mandat_id).stream()
-                    for journal_doc in journal_docs:
-                        # Supprimer le document trouvé
-                        self.delete_document_and_subcollections(journal_doc.reference)
-                        
-                except Exception as e:
-                    print(f"Erreur lors de la suppression des documents dans le département {departement}: {e}")
-
-            if not document_found:
-                print(f"Le département '{departement}' n'existe pas ou la collection 'journal' n'existe pas sous ce département.")
-
-    def x_delete_documents_by_space_name(self,user_id, space_name):
-        """
-        Supprime tous les documents dans la collection task_manager qui ont 
-        le champ Document_information.mandat_name correspondant au space_name spécifié.
-        
-        Args:
-            space_name (str): Le nom de l'espace à rechercher dans le champ Document_information.mandat_name
-            
-        Returns:
-            dict: Un dictionnaire contenant le nombre de documents supprimés et les erreurs éventuelles
-        """
-        result = {
-            "success": True,
-            "documents_deleted": 0,
-            "errors": []
-        }
-        
-        try:
-            # Détermination du chemin de la collection en fonction de user_id
-            if user_id:
-                base_path = f'clients/{user_id}/task_manager'
-            else:
-                base_path = 'task_manager'
-            
-            print(f"Recherche des documents avec mandat_name='{space_name}' dans la collection {base_path}")
-            
-            # Récupération des documents qui contiennent Document_information
-            # Note: Firestore ne permet pas de requêter directement sur des sous-champs imbriqués 
-            # avec des opérateurs de condition, donc nous devons récupérer tous les documents
-            # et filtrer manuellement
-            docs = self.db.collection(base_path).stream()
-            
-            document_count = 0
-            for doc in docs:
-                document_count += 1
-                doc_data = doc.to_dict()
-                
-                # Vérification de l'existence des champs nécessaires
-                if 'Document_information' in doc_data and isinstance(doc_data['Document_information'], dict):
-                    doc_info = doc_data['Document_information']
-                    
-                    # Vérification si mandat_name correspond au space_name
-                    if 'mandat_name' in doc_info and doc_info['mandat_name'] == space_name:
-                        try:
-                            # Suppression du document et de ses sous-collections éventuelles
-                            if hasattr(self, 'delete_document_and_subcollections'):
-                                self.delete_document_and_subcollections(doc.reference)
-                            else:
-                                # Suppression simple si la méthode héritée n'est pas disponible
-                                doc.reference.delete()
-                                
-                            result["documents_deleted"] += 1
-                            print(f"Document {doc.id} supprimé avec succès")
-                        except Exception as e:
-                            error_msg = f"Erreur lors de la suppression du document {doc.id}: {str(e)}"
-                            result["errors"].append(error_msg)
-                            print(error_msg)
-                            result["success"] = False
-            
-            if document_count == 0:
-                print(f"Aucun document trouvé dans la collection {base_path}")
-            elif result["documents_deleted"] == 0:
-                print(f"Aucun document avec mandat_name='{space_name}' trouvé dans {document_count} documents")
-            else:
-                print(f"{result['documents_deleted']} document(s) supprimé(s) sur {document_count} document(s) examiné(s)")
-            
-            return result
-            
-        except Exception as e:
-            error_msg = f"Erreur lors de la recherche/suppression des documents: {str(e)}"
-            print(error_msg)
-            result["success"] = False
-            result["errors"].append(error_msg)
-            return result
-
+    
     def x_delete_messages_in_internal_message_by_id(self,user_id, document_id):
         """Supprime tous les documents dans la sous-collection 'messages' de 'internal_message' pour un document spécifié."""
         
@@ -7560,104 +7282,6 @@ class FirebaseManagement:
             print(f"Tous les messages ont été supprimés pour le document ID: {document_id}")
         except Exception as e:
             print(f"Erreur lors de la suppression des messages pour le document ID {document_id}: {e}")
-
-    def x_update_document_names(self, parent_collection, document_id):
-        journal_ref = self.db.collection(parent_collection).document(document_id).collection('journal')
-        docs = journal_ref.stream()
-
-        for doc in docs:
-            doc_dict = doc.to_dict()
-            if 'document_name' in doc_dict:
-                document_name_value = doc_dict['document_name']
-                # Supprimer 'document_name'
-                journal_ref.document(doc.id).update({'document_name': firestore.DELETE_FIELD})
-                # Ajouter 'file_name' avec la valeur de 'document_name'
-                journal_ref.document(doc.id).update({'file_name': document_name_value})
-
-    def x_update_status_in_collection(self, parent_collection, document_id):
-        """ status_Index=0 routed, 1 to_process , 2 rejection  3 pending"""
-        status_index=['routed','to_process','rejection','pending']
-        journal_ref = self.db.collection(parent_collection).document(document_id).collection('journal')
-        docs = journal_ref.stream()
-
-        for doc in docs:
-            doc_dict = doc.to_dict()
-            if doc_dict.get('status') == 'routed':
-                # Mettre à jour le champ 'status' avec la nouvelle valeur 'routed'
-                journal_ref.document(doc.id).update({'status': 'to_process'})
-
-    def x_fetch_internal_messages_by_job_id(self,user_id, job_id):
-        # Accéder à la collection 'task_manager' et au document spécifié par 'job_id'
-        if user_id:
-            base_path = f'clients/{user_id}/task_manager'
-        else:
-            base_path = 'task_manager'
-        document_reference = self.db.collection(base_path).document(job_id)
-        
-        # Accéder au document '/messages' dans le chemin 'internal_message'
-        messages_document_reference = document_reference.collection('internal_message').document('messages')
-        
-        # Récupérer le document '/messages'
-        messages_document = messages_document_reference.get()  # Cela renvoie un document
-        
-        # Vérifier si le document existe avant de tenter d'extraire ses données
-        if messages_document.exists:
-            # Extraire les données du document Firestore
-            messages_data = messages_document.to_dict()  # Convertir les données du document Firestore en dictionnaire Python
-            
-            # Vous pourriez avoir besoin d'ajuster cette partie en fonction de la structure de vos données dans le document 'messages'
-            # Par exemple, si 'messages' contient un champ 'messages_list' qui est une liste de messages
-            messages_list = messages_data.get('messages_list', [])
-            
-            return messages_data
-        else:
-            # Retourner une liste vide si le document '/messages' n'existe pas
-            return []
-
-    def x_get_thread_id(self,user_id, job_id, space_id):
-        # Construit le chemin du document en utilisant job_id
-        if user_id:
-            base_path = f'clients/{user_id}/task_manager/{job_id}'
-        else:
-            base_path = f'task_manager/{job_id}'
-        #document_path = f"task_manager/{job_id}"
-        document_ref = self.db.document(base_path)
-        document = document_ref.get()
-        
-        if document.exists:
-            # Vérifie si le champ 'gchat_thread_id' existe dans le document
-            doc_data = document.to_dict()
-            if 'gchat_thread_id' in doc_data:
-                return space_id +"/threads/"+ doc_data['gchat_thread_id']
-            else:
-                print("Le champ 'gchat_thread_id' n'existe pas dans le document spécifié.")
-                return space_id
-        else:
-            print(f"Le document spécifié avec job_id {job_id} n'existe pas.")
-            return space_id
-
-    def x_update_thread_id_by_job_id(self,user_id,job_id, thread_id):
-        if user_id:
-            base_path = f'clients/{user_id}/task_manager/{job_id}'
-        else:
-            base_path = f'task_manager/{job_id}'
-        #document_path = f"task_manager/{job_id}"
-        document_ref = self.db.document(base_path)
-        document = document_ref.get()
-
-        # Vérifie si le document existe avant d'essayer de le mettre à jour
-        if document.exists:
-            if thread_id:
-                document_ref.update({'gchat_thread_id': thread_id})
-                print(f"Le champ 'gchat_thread_id' dans le document {base_path} a été mis à jour avec succès avec la valeur {thread_id}.")
-            else:
-                print("Erreur : 'thread_id' n'a pas de valeur valide.")
-        else:
-            print(f"Erreur : Le document avec job_id {job_id} n'existe pas. Aucune mise à jour effectuée.")
-            #Ici, vous pourriez choisir de créer le document s'il n'existe pas, par exemple :
-            if thread_id:
-                document_ref.set({'gchat_thread_id': thread_id})
-                print(f"Document créé avec 'gchat_thread_id' = {thread_id}.")
 
     
     def create_or_get_working_doc_2(self, mandate_path):
@@ -7707,7 +7331,827 @@ class FirebaseManagement:
             print(f"Erreur lors du téléchargement : {str(e)}")
             return {}
 
+    def get_accounting_context(self, mandate_path: str) -> Dict[str, Any]:
+        """
+        Récupère le contexte comptable depuis Firebase.
+        
+        Structure réelle:
+        {mandate_path}/context/accounting_context
+        └── data: {
+            "accounting_context_0": "...",
+            "last_refresh": "2025-..."
+        }
+        
+        Args:
+            mandate_path: Chemin du mandat (ex: clients/.../mandates/.../data)
+        
+        Returns:
+            Dict contenant:
+            - accounting_context_0: Contenu principal
+            - last_refresh: Timestamp de la dernière modification
+        """
+        try:
+            context_ref = self.db.document(f"{mandate_path}/context/accounting_context")
+            context_snapshot = context_ref.get()
+            
+            if context_snapshot.exists:
+                data = context_snapshot.to_dict()
+                # Structure réelle: le dictionnaire 'data' contient accounting_context_0 et last_refresh
+                return data.get('data', {})
+            else:
+                return {}
+        except Exception as e:
+            print(f"[Firebase] Erreur get_accounting_context: {e}")
+            return {}
 
+    def get_general_context(self, mandate_path: str) -> Dict[str, Any]:
+        """
+        Récupère le contexte général (profil entreprise) depuis Firebase.
+        
+        Structure réelle:
+        {mandate_path}/context/general_context
+        └── context_company_profile_report: "Profil d'entreprise..."
+        └── last_refresh: "2025-..."
+        
+        Args:
+            mandate_path: Chemin du mandat
+        
+        Returns:
+            Dict contenant:
+            - context_company_profile_report: Description de l'entreprise
+            - last_refresh: Timestamp (directement sur le document)
+        """
+        try:
+            context_ref = self.db.document(f"{mandate_path}/context/general_context")
+            context_snapshot = context_ref.get()
+            
+            if context_snapshot.exists:
+                # Les champs sont directement sur le document (pas de dictionnaire 'data')
+                return context_snapshot.to_dict()
+            else:
+                return {}
+        except Exception as e:
+            print(f"[Firebase] Erreur get_general_context: {e}")
+            return {}
+
+    def get_router_context(self, mandate_path: str) -> Dict[str, Any]:
+        """
+        Récupère le contexte de routage depuis Firebase.
+        
+        Structure réelle:
+        {mandate_path}/context/router_context
+        └── router_prompt: {
+            "banks_cash": "Prompt pour banks_cash...",
+            "contrats": "Prompt pour contrats...",
+            "expenses": "Prompt pour expenses...",
+            "financial_statement": "...",
+            "hr": "...",
+            "invoices": "...",
+            "letters": "...",
+            "taxes": "..."
+        }
+        └── last_refresh: "2025-..."
+        
+        Args:
+            mandate_path: Chemin du mandat
+        
+        Returns:
+            Dict contenant:
+            - router_prompt: Dictionnaire des prompts par service
+            - last_refresh: Timestamp
+        """
+        try:
+            context_ref = self.db.document(f"{mandate_path}/context/router_context")
+            context_snapshot = context_ref.get()
+            
+            if context_snapshot.exists:
+                # Les champs sont directement sur le document
+                return context_snapshot.to_dict()
+            else:
+                return {}
+        except Exception as e:
+            print(f"[Firebase] Erreur get_router_context: {e}")
+            return {}
+
+    def get_all_contexts(self, mandate_path: str) -> Dict[str, Any]:
+        """
+        Récupère tous les contextes (accounting, general, router) en une seule requête.
+        
+        ⭐ Structure Firebase :
+        
+        accounting_context/data/accounting_context_0: "TEXTE LONG..."
+        general_context/context_company_profile_report: "TEXTE LONG..."
+        router_context/router_prompt: {banks_cash: "...", hr: "...", ...}
+        
+        Args:
+            mandate_path: Chemin du mandat
+        
+        Returns:
+            Dict structuré et exploitable directement:
+            {
+                'accounting': {
+                    'accounting_context_0': "TEXTE...",
+                    'last_refresh': "..."
+                },
+                'general': {
+                    'context_company_profile_report': "TEXTE...",
+                    'last_refresh': "..."
+                },
+                'router': {
+                    'router_prompt': {banks_cash: "...", ...},
+                    'last_refresh': "..."
+                }
+            }
+        """
+        try:
+            context_folder = self.db.collection(f"{mandate_path}/context")
+            docs = context_folder.get()
+            
+            contexts = {}
+            for doc in docs:
+                doc_id = doc.id
+                data = doc.to_dict()
+                
+                if doc_id == 'accounting_context':
+                    # Pour accounting: extraire le dictionnaire 'data' qui contient accounting_context_0
+                    contexts['accounting'] = data.get('data', {})
+                elif doc_id == 'general_context':
+                    # Pour general: le document entier (context_company_profile_report est direct)
+                    contexts['general'] = data
+                elif doc_id == 'router_context':
+                    # Pour router: le document entier (router_prompt est direct)
+                    contexts['router'] = data
+            
+            return contexts
+        except Exception as e:
+            print(f"[Firebase] Erreur get_all_contexts: {e}")
+            return {}
+
+    def update_accounting_context(self, mandate_path: str, updated_content: Dict, additions: Dict = None) -> bool:
+        """
+        Met à jour le contexte comptable avec timestamp last_refresh.
+        
+        Args:
+            mandate_path: Chemin du mandat
+            updated_content: Contenu mis à jour (remplace 'accounting_context_0')
+            additions: Champs supplémentaires à ajouter (optional)
+        
+        Returns:
+            bool: True si succès
+        """
+        try:
+            context_ref = self.db.document(f"{mandate_path}/context/accounting_context")
+            
+            # Construire la donnée à mettre à jour
+            update_data = {
+                'data': {
+                    'accounting_context_0': updated_content,
+                    'last_refresh': datetime.now(timezone.utc).isoformat(),
+                }
+            }
+            
+            # Ajouter les champs supplémentaires si fournis
+            if additions:
+                update_data['data'].update(additions)
+            
+            context_ref.set(update_data, merge=True)
+            return True
+        except Exception as e:
+            print(f"[Firebase] Erreur update_accounting_context: {e}")
+            return False
+
+    def update_general_context(self, mandate_path: str, updated_content: Dict, additions: Dict = None) -> bool:
+        """
+        Met à jour le contexte général avec timestamp last_refresh.
+        
+        ⚠️ STRUCTURE: Les champs sont DIRECTEMENT sur le document (pas de sous-objet 'data')
+        
+        Args:
+            mandate_path: Chemin du mandat
+            updated_content: Contenu mis à jour (remplace 'context_company_profile_report')
+            additions: Champs supplémentaires à ajouter (optional)
+        
+        Returns:
+            bool: True si succès
+        """
+        try:
+            context_ref = self.db.document(f"{mandate_path}/context/general_context")
+            
+            # ✅ Champs directement sur le document (pas de 'data')
+            update_data = {
+                'context_company_profile_report': updated_content,
+                'last_refresh': datetime.now(timezone.utc).isoformat(),
+            }
+            
+            if additions:
+                update_data.update(additions)
+            
+            context_ref.set(update_data, merge=True)
+            return True
+        except Exception as e:
+            print(f"[Firebase] Erreur update_general_context: {e}")
+            return False
+
+    def update_router_context(self, mandate_path: str, updated_content: Dict, additions: Dict = None) -> bool:
+        """
+        Met à jour le contexte de routage avec timestamp last_refresh.
+        
+        ⚠️ STRUCTURE: Les champs sont DIRECTEMENT sur le document (pas de sous-objet 'data')
+        
+        Args:
+            mandate_path: Chemin du mandat
+            updated_content: Contenu mis à jour (dict avec les prompts par service: {banks_cash: "...", hr: "...", ...})
+            additions: Champs supplémentaires (optional)
+        
+        Returns:
+            bool: True si succès
+        """
+        try:
+            context_ref = self.db.document(f"{mandate_path}/context/router_context")
+            
+            # ✅ Champs directement sur le document (pas de 'data')
+            update_data = {
+                'router_prompt': updated_content,
+                'last_refresh': datetime.now(timezone.utc).isoformat(),
+            }
+            
+            if additions:
+                update_data.update(additions)
+            
+            context_ref.set(update_data, merge=True)
+            return True
+        except Exception as e:
+            print(f"[Firebase] Erreur update_router_context: {e}")
+            return False
+
+    # ═══════════════════════════════════════════════════════════════
+    # GESTION DES TÂCHES PLANIFIÉES (SCHEDULED TASKS)
+    # ═══════════════════════════════════════════════════════════════
+
+    def create_task(self, mandate_path: str, task_data: dict) -> dict:
+        """
+        Crée une nouvelle tâche planifiée.
+
+        Args:
+            mandate_path: Chemin du mandat (ex: "clients/user123/bo_clients/.../mandates/mandate789")
+            task_data: Données complètes de la tâche
+
+        Returns:
+            {"success": True, "task_id": "task_abc123"}
+        """
+        try:
+            # Générer task_id si absent
+            task_id = task_data.get("task_id")
+            if not task_id:
+                task_id = f"task_{uuid.uuid4().hex[:12]}"
+                task_data["task_id"] = task_id
+
+            # Ajouter timestamps
+            now = datetime.now(timezone.utc).isoformat()
+            task_data["created_at"] = now
+            task_data["updated_at"] = now
+            task_data["execution_count"] = 0
+
+            # Sauvegarder dans {mandate_path}/tasks/{task_id}
+            task_ref = self.db.document(f"{mandate_path}/tasks/{task_id}")
+            task_ref.set(task_data)
+
+            logger.info(f"[TASKS] Tâche créée: {task_id}")
+
+            # Si SCHEDULED ou ONE_TIME : sauvegarder dans /scheduled_tasks
+            # ON_DEMAND et NOW : pas de scheduler (exécution manuelle ou immédiate)
+            execution_plan = task_data.get("execution_plan")
+            if execution_plan in ["SCHEDULED", "ONE_TIME"]:
+                self._save_task_to_scheduler(mandate_path, task_data)
+
+            return {"success": True, "task_id": task_id}
+
+        except Exception as e:
+            logger.error(f"[TASKS] Erreur create_task: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
+
+    def get_task(self, mandate_path: str, task_id: str) -> Optional[dict]:
+        """Récupère une tâche."""
+        try:
+            task_ref = self.db.document(f"{mandate_path}/tasks/{task_id}")
+            task_doc = task_ref.get()
+
+            if task_doc.exists:
+                return task_doc.to_dict()
+            return None
+
+        except Exception as e:
+            logger.error(f"[TASKS] Erreur get_task: {e}", exc_info=True)
+            return None
+
+    def update_task(self, mandate_path: str, task_id: str, updates: dict) -> bool:
+        """
+        Met à jour une tâche.
+
+        Usage:
+            - Mettre à jour next_execution après CRON trigger
+            - Mettre à jour last_execution_report après completion
+            - Changer status/enabled
+        """
+        try:
+            task_ref = self.db.document(f"{mandate_path}/tasks/{task_id}")
+
+            # Ajouter timestamp de mise à jour
+            updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+            task_ref.update(updates)
+            logger.info(f"[TASKS] Tâche mise à jour: {task_id}")
+            
+            # ⭐ NOUVEAU : Synchroniser avec scheduled_tasks si la tâche est planifiée
+            try:
+                # Récupérer les données complètes de la tâche après mise à jour
+                task_doc = task_ref.get()
+                if task_doc.exists:
+                    task_data = task_doc.to_dict()
+                    execution_plan = task_data.get("execution_plan")
+                    
+                    # Si la tâche est planifiée (SCHEDULED ou ONE_TIME)
+                    if execution_plan in ["SCHEDULED", "ONE_TIME"]:
+                        self._update_scheduler(mandate_path, task_id, task_data, updates)
+            except Exception as sync_error:
+                # Ne pas échouer toute la mise à jour si la synchronisation échoue
+                logger.error(f"[TASKS] ⚠️ Erreur synchronisation scheduler: {sync_error}")
+            
+            return True
+
+        except Exception as e:
+            logger.error(f"[TASKS] Erreur update_task: {e}", exc_info=True)
+            return False
+
+    def delete_task(self, mandate_path: str, task_id: str) -> bool:
+        """
+        Supprime une tâche complètement.
+
+        Actions:
+            1. Supprimer document {mandate_path}/tasks/{task_id}
+            2. Supprimer sous-collection executions (si existante)
+            3. Supprimer de /scheduled_tasks/{job_id}
+        """
+        try:
+            # 1. Supprimer le document principal
+            task_ref = self.db.document(f"{mandate_path}/tasks/{task_id}")
+            task_ref.delete()
+
+            # 2. Supprimer sous-collection executions
+            executions_ref = self.db.collection(f"{mandate_path}/tasks/{task_id}/executions")
+            executions = executions_ref.stream()
+            for exec_doc in executions:
+                exec_doc.reference.delete()
+
+            # 3. Supprimer de /scheduled_tasks
+            job_id = f"{mandate_path.replace('/', '_')}_{task_id}"
+            self.delete_scheduler_job_completely(job_id)
+
+            logger.info(f"[TASKS] Tâche supprimée: {task_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[TASKS] Erreur delete_task: {e}", exc_info=True)
+            return False
+
+    def list_tasks_for_mandate(self, mandate_path: str, status: str = None) -> list:
+        """
+        Liste toutes les tâches d'un mandat.
+
+        Args:
+            mandate_path: Chemin du mandat
+            status: Filtrer par status ("active", "paused", "completed") ou None pour toutes
+
+        Returns:
+            Liste des tâches
+        """
+        try:
+            tasks_ref = self.db.collection(f"{mandate_path}/tasks")
+
+            if status:
+                query = tasks_ref.where("status", "==", status)
+            else:
+                query = tasks_ref
+
+            tasks = []
+            for doc in query.stream():
+                task_data = doc.to_dict()
+                tasks.append(task_data)
+
+            logger.info(f"[TASKS] {len(tasks)} tâches listées pour {mandate_path}")
+            return tasks
+
+        except Exception as e:
+            logger.error(f"[TASKS] Erreur list_tasks_for_mandate: {e}", exc_info=True)
+            return []
+
+    def _save_task_to_scheduler(self, mandate_path: str, task_data: dict):
+        """Sauvegarde une tâche dans /scheduled_tasks pour le CRON."""
+        try:
+            task_id = task_data["task_id"]
+            job_id = f"{mandate_path.replace('/', '_')}_{task_id}"
+
+            schedule = task_data.get("schedule", {})
+            
+            # ⭐ VALIDATION DE SÉCURITÉ : Vérifier que next_execution_utc n'est pas vide
+            next_execution_utc = schedule.get("next_execution_utc")
+            next_execution_local = schedule.get("next_execution_local_time")
+            
+            if not next_execution_utc or not next_execution_local:
+                logger.warning(
+                    f"[TASKS] ⚠️ next_execution vide pour task {task_id} - "
+                    f"next_execution_utc='{next_execution_utc}', next_execution_local='{next_execution_local}'. "
+                    f"Tâche NON ajoutée au scheduler (sera ignorée par le cron job)."
+                )
+                return
+
+            scheduler_data = {
+                "mandate_path": mandate_path,
+                "task_id": task_id,
+                "job_type": "scheduled_task",
+                "cron_expression": schedule.get("cron_expression"),
+                "timezone": schedule.get("timezone"),
+                "next_execution_utc": next_execution_utc,
+                "next_execution_local_time": next_execution_local,
+                "enabled": task_data.get("enabled", True),
+                "user_id": task_data.get("user_id"),
+                "company_id": task_data.get("company_id"),
+                "mission_title": task_data.get("mission", {}).get("title"),
+                "created_at": firestore.SERVER_TIMESTAMP,
+                "updated_at": firestore.SERVER_TIMESTAMP
+            }
+
+            scheduler_ref = self.db.collection("scheduled_tasks").document(job_id)
+            scheduler_ref.set(scheduler_data)
+
+            logger.info(f"[TASKS] ✅ Tâche ajoutée au scheduler: {job_id} (next_exec_utc: {next_execution_utc})")
+
+        except Exception as e:
+            logger.error(f"[TASKS] ❌ Erreur _save_task_to_scheduler: {e}", exc_info=True)
+
+    def _update_scheduler(self, mandate_path: str, task_id: str, task_data: dict, updates: dict):
+        """
+        Met à jour le document scheduler après modification d'une tâche.
+        
+        Args:
+            mandate_path: Chemin du mandat
+            task_id: ID de la tâche
+            task_data: Données complètes de la tâche (après mise à jour)
+            updates: Champs modifiés
+        """
+        try:
+            job_id = f"{mandate_path.replace('/', '_')}_{task_id}"
+            scheduler_ref = self.db.collection("scheduled_tasks").document(job_id)
+            
+            # Vérifier si le document scheduler existe
+            scheduler_doc = scheduler_ref.get()
+            if not scheduler_doc.exists:
+                logger.warning(f"[TASKS] ⚠️ Document scheduler {job_id} n'existe pas, pas de mise à jour")
+                return
+            
+            # Construire les mises à jour pour le scheduler
+            scheduler_updates = {}
+            
+            # Si le schedule a été modifié
+            if "schedule" in updates:
+                schedule = updates["schedule"]
+                if "next_execution_utc" in schedule:
+                    scheduler_updates["next_execution_utc"] = schedule["next_execution_utc"]
+                if "next_execution_local_time" in schedule:
+                    scheduler_updates["next_execution_local_time"] = schedule["next_execution_local_time"]
+                if "cron_expression" in schedule:
+                    scheduler_updates["cron_expression"] = schedule["cron_expression"]
+                if "timezone" in schedule:
+                    scheduler_updates["timezone"] = schedule["timezone"]
+            
+            # Si enabled a été modifié
+            if "enabled" in updates:
+                scheduler_updates["enabled"] = updates["enabled"]
+            
+            # Si mission.title a été modifié
+            if "mission" in updates and isinstance(updates["mission"], dict):
+                if "title" in updates["mission"]:
+                    scheduler_updates["mission_title"] = updates["mission"]["title"]
+            
+            # Si des mises à jour sont nécessaires
+            if scheduler_updates:
+                scheduler_updates["updated_at"] = firestore.SERVER_TIMESTAMP
+                scheduler_ref.update(scheduler_updates)
+                logger.info(f"[TASKS] ✅ Scheduler mis à jour: {job_id} - champs: {list(scheduler_updates.keys())}")
+            else:
+                logger.info(f"[TASKS] ℹ️ Aucune mise à jour scheduler nécessaire pour {job_id}")
+        
+        except Exception as e:
+            logger.error(f"[TASKS] ❌ Erreur _update_scheduler: {e}", exc_info=True)
+
+    # ═══════════════════════════════════════════════════════════════
+    # GESTION DES EXÉCUTIONS DE TÂCHES
+    # ═══════════════════════════════════════════════════════════════
+
+    def create_task_execution(self, mandate_path: str, task_id: str, execution_data: dict) -> str:
+        """
+        Crée un document d'exécution temporaire.
+
+        Args:
+            mandate_path: Chemin du mandat
+            task_id: ID de la tâche
+            execution_data: Données initiales
+
+        Returns:
+            execution_id
+        """
+        try:
+            execution_id = execution_data.get("execution_id")
+            if not execution_id:
+                execution_id = f"exec_{uuid.uuid4().hex[:12]}"
+                execution_data["execution_id"] = execution_id
+
+            exec_ref = self.db.document(f"{mandate_path}/tasks/{task_id}/executions/{execution_id}")
+            exec_ref.set(execution_data)
+
+            logger.info(f"[TASKS] Exécution créée: {execution_id}")
+            return execution_id
+
+        except Exception as e:
+            logger.error(f"[TASKS] Erreur create_task_execution: {e}", exc_info=True)
+            return ""
+
+    def update_task_execution(self, mandate_path: str, task_id: str, execution_id: str, updates: dict) -> bool:
+        """
+        Met à jour une exécution.
+
+        Usage:
+            - Mettre à jour workflow_checklist
+            - Ajouter/mettre à jour lpt_tasks
+            - Changer status
+        """
+        try:
+            exec_ref = self.db.document(f"{mandate_path}/tasks/{task_id}/executions/{execution_id}")
+            exec_ref.update(updates)
+
+            logger.info(f"[TASKS] Exécution mise à jour: {execution_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[TASKS] Erreur update_task_execution: {e}", exc_info=True)
+            return False
+
+    def get_task_execution(self, mandate_path: str, task_id: str, execution_id: str) -> Optional[dict]:
+        """Récupère les données d'une exécution."""
+        try:
+            exec_ref = self.db.document(f"{mandate_path}/tasks/{task_id}/executions/{execution_id}")
+            exec_doc = exec_ref.get()
+
+            if exec_doc.exists:
+                return exec_doc.to_dict()
+            return None
+
+        except Exception as e:
+            logger.error(f"[TASKS] Erreur get_task_execution: {e}", exc_info=True)
+            return None
+
+    def complete_task_execution(self, mandate_path: str, task_id: str, execution_id: str, final_report: dict) -> bool:
+        """
+        Finalise une exécution.
+
+        Actions:
+            1. Sauvegarder final_report dans task_id.last_execution_report
+            2. Incrémenter execution_count
+            3. Supprimer le document d'exécution
+        """
+        try:
+            # 1. Sauvegarder rapport dans la tâche
+            task_ref = self.db.document(f"{mandate_path}/tasks/{task_id}")
+            task_doc = task_ref.get()
+
+            if task_doc.exists:
+                task_data = task_doc.to_dict()
+                execution_count = task_data.get("execution_count", 0) + 1
+
+                task_ref.update({
+                    "last_execution_report": final_report,
+                    "execution_count": execution_count,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                })
+
+            # 2. Supprimer le document d'exécution
+            exec_ref = self.db.document(f"{mandate_path}/tasks/{task_id}/executions/{execution_id}")
+            exec_ref.delete()
+
+            logger.info(f"[TASKS] Exécution finalisée: {execution_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[TASKS] Erreur complete_task_execution: {e}", exc_info=True)
+            return False
+
+    def cleanup_completed_executions(self, mandate_path: str, task_id: str) -> int:
+        """
+        Supprime toutes les exécutions terminées pour une tâche.
+
+        Returns:
+            Nombre de documents supprimés
+        """
+        try:
+            executions_ref = self.db.collection(f"{mandate_path}/tasks/{task_id}/executions")
+            executions = executions_ref.where("status", "in", ["completed", "failed"]).stream()
+
+            count = 0
+            for exec_doc in executions:
+                exec_doc.reference.delete()
+                count += 1
+
+            logger.info(f"[TASKS] {count} exécutions nettoyées pour {task_id}")
+            return count
+
+        except Exception as e:
+            logger.error(f"[TASKS] Erreur cleanup_completed_executions: {e}", exc_info=True)
+            return 0
+
+    # ═══════════════════════════════════════════════════════════════
+    # GESTION TIMEZONE & CRON
+    # ═══════════════════════════════════════════════════════════════
+
+    def get_timezone_from_mandate(self, mandate_path: str) -> Optional[str]:
+        """
+        Récupère la timezone sauvegardée dans le mandat.
+
+        Args:
+            mandate_path: Chemin du mandat
+
+        Returns:
+            Timezone (ex: "Europe/Zurich") ou None si non définie
+        """
+        try:
+            mandate_ref = self.db.document(mandate_path)
+            mandate_doc = mandate_ref.get()
+
+            if mandate_doc.exists:
+                mandate_data = mandate_doc.to_dict()
+                return mandate_data.get("timezone")
+            return None
+
+        except Exception as e:
+            logger.error(f"[TASKS] Erreur get_timezone_from_mandate: {e}", exc_info=True)
+            return None
+
+    def save_timezone_to_mandate(self, mandate_path: str, timezone_str: str) -> bool:
+        """
+        Sauvegarde la timezone dans le mandat pour réutilisation future.
+
+        Args:
+            mandate_path: Chemin du mandat
+            timezone_str: Timezone (ex: "Europe/Zurich")
+
+        Returns:
+            True si succès
+        """
+        try:
+            mandate_ref = self.db.document(mandate_path)
+            mandate_ref.update({
+                "timezone": timezone_str,
+                "timezone_updated_at": datetime.now(timezone.utc).isoformat()
+            })
+
+            logger.info(f"[TASKS] Timezone sauvegardée: {timezone_str} pour {mandate_path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[TASKS] Erreur save_timezone_to_mandate: {e}", exc_info=True)
+            return False
+
+    def build_task_cron_expression(self, frequency: str, time_str: str, day_of_week: str = None, day_of_month: int = None) -> str:
+        """
+        Construit une expression CRON.
+
+        Args:
+            frequency: "daily" | "weekly" | "monthly"
+            time_str: "HH:MM" (ex: "03:00")
+            day_of_week: "MON" | "TUE" | ... (pour weekly)
+            day_of_month: 1-31 (pour monthly)
+
+        Returns:
+            Expression CRON (ex: "0 3 1 * *")
+        """
+        try:
+            # Parser l'heure
+            hour, minute = time_str.split(":")
+            hour = int(hour)
+            minute = int(minute)
+
+            if frequency == "daily":
+                return f"{minute} {hour} * * *"
+
+            elif frequency == "weekly":
+                day_map = {
+                    "MON": 1, "TUE": 2, "WED": 3, "THU": 4,
+                    "FRI": 5, "SAT": 6, "SUN": 0
+                }
+                day_num = day_map.get(day_of_week, 1)
+                return f"{minute} {hour} * * {day_num}"
+
+            elif frequency == "monthly":
+                day = day_of_month or 1
+                return f"{minute} {hour} {day} * *"
+
+            else:
+                raise ValueError(f"Fréquence non supportée: {frequency}")
+
+        except Exception as e:
+            logger.error(f"[TASKS] Erreur build_task_cron_expression: {e}", exc_info=True)
+            return ""
+
+    def calculate_task_next_execution(self, cron_expr: str, timezone_str: str, from_time: Optional[datetime] = None) -> tuple:
+        """
+        Calcule la prochaine exécution en local_time et UTC.
+
+        Args:
+            cron_expr: Expression CRON
+            timezone_str: Timezone (ex: "Europe/Zurich")
+            from_time: Point de départ (défaut: maintenant)
+
+        Returns:
+            (next_execution_local_time_iso, next_execution_utc_iso)
+        """
+        try:
+            import pytz
+            from croniter import croniter
+
+            # Timezone
+            tz = pytz.timezone(timezone_str)
+
+            # Point de départ
+            if from_time is None:
+                base_time = datetime.now(tz)
+            else:
+                # Convertir from_time en timezone locale
+                if from_time.tzinfo is None:
+                    from_time = pytz.utc.localize(from_time)
+                base_time = from_time.astimezone(tz)
+
+            # Calculer prochaine exécution en heure locale
+            cron = croniter(cron_expr, base_time)
+            next_local = cron.get_next(datetime)
+
+            # Convertir en UTC
+            next_utc = next_local.astimezone(pytz.utc)
+
+            return (next_local.isoformat(), next_utc.isoformat())
+
+        except Exception as e:
+            logger.error(f"[TASKS] ❌ Erreur calculate_task_next_execution - cron_expr='{cron_expr}', timezone_str='{timezone_str}': {e}", exc_info=True)
+            return ("", "")
+
+    def get_tasks_ready_for_execution_utc(self, current_time_utc: datetime) -> list:
+        """
+        Retourne les tâches dont next_execution_utc <= current_time_utc et enabled=True.
+
+        Args:
+            current_time_utc: Timestamp UTC actuel
+
+        Returns:
+            Liste des tâches complètes (depuis mandate_path/tasks/{task_id})
+        """
+        try:
+            # Query /scheduled_tasks avec enabled=True
+            scheduler_ref = self.db.collection("scheduled_tasks")
+            query = scheduler_ref.where("enabled", "==", True)
+
+            tasks_ready = []
+
+            for doc in query.stream():
+                scheduler_data = doc.to_dict()
+                next_execution_utc_str = scheduler_data.get("next_execution_utc")
+
+                if not next_execution_utc_str:
+                    continue
+
+                # Parser next_execution_utc
+                try:
+                    from dateutil import parser
+                    next_exec_utc = parser.isoparse(next_execution_utc_str)
+
+                    # Comparer avec current_time_utc
+                    if next_exec_utc <= current_time_utc:
+                        # Charger les données complètes depuis mandate_path/tasks/{task_id}
+                        mandate_path = scheduler_data.get("mandate_path")
+                        task_id = scheduler_data.get("task_id")
+
+                        if mandate_path and task_id:
+                            task_data = self.get_task(mandate_path, task_id)
+                            if task_data:
+                                tasks_ready.append(task_data)
+
+                except Exception as parse_error:
+                    logger.error(f"[TASKS] Erreur parsing next_execution_utc: {parse_error}")
+                    continue
+
+            logger.info(f"[TASKS] {len(tasks_ready)} tâches prêtes pour exécution")
+            return tasks_ready
+
+        except Exception as e:
+            logger.error(f"[TASKS] Erreur get_tasks_ready_for_execution_utc: {e}", exc_info=True)
+            return []
 
 class FirebaseRealtimeChat:
     """
@@ -7933,11 +8377,12 @@ class FirebaseRealtimeChat:
         Envoie un message direct à un utilisateur via Realtime Database.
         
         Args:
+            user_id (str): ID de l'expéditeur
             recipient_id (str): ID du destinataire
             message_data (dict): Données du message
             
         Returns:
-            bool: True si l'envoi a réussi
+            str | None: ID du message créé si succès, None sinon
         """
         try:
             # Créer la référence au nœud des messages directs du destinataire
@@ -7951,14 +8396,18 @@ class FirebaseRealtimeChat:
             if 'timestamp' not in message_data:
                 message_data['timestamp'] = datetime.now(timezone.utc).isoformat()
             
-            # Envoyer le message
-            messages_ref.push(message_data)
-            print(f"✅ Message direct envoyé à l'utilisateur {recipient_id}")
-            return True
+            # Envoyer le message et récupérer la référence
+            new_message_ref = messages_ref.push(message_data)
+            
+            # Extraire l'ID du message créé
+            message_id = new_message_ref.key
+            
+            logger.info(f"✅ Message direct envoyé à {recipient_id} - message_id={message_id}")
+            return message_id
             
         except Exception as e:
-            print(f"❌ Erreur lors de l'envoi du message direct: {e}")
-            return False
+            logger.error(f"❌ Erreur lors de l'envoi du message direct: {e}", exc_info=True)
+            return None
 
     def delete_direct_message(self, user_id: str, message_id: str) -> bool:
         """
@@ -7972,7 +8421,7 @@ class FirebaseRealtimeChat:
             bool: True si la suppression a réussi
         """
         try:
-            print(f"🗑️ Suppression du message direct {message_id} pour l'utilisateur {user_id}")
+            logger.info(f"🗑️ Suppression du message direct {message_id} pour l'utilisateur {user_id}")
             
             # Chemin du message
             message_path = f"clients/{user_id}/direct_message_notif/{message_id}"
@@ -7980,13 +8429,14 @@ class FirebaseRealtimeChat:
             # Supprimer le message
             message_ref = self.db.child(message_path)
             message_ref.delete()
-            print(f"✅ Message {message_id} supprimé avec succès")
+            logger.info(f"✅ Message {message_id} supprimé avec succès")
             return True
                 
         except Exception as e:
-            print(f"❌ Erreur lors de la suppression du message direct: {type(e).__name__}: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            logger.error(
+                f"❌ Erreur lors de la suppression du message direct: {type(e).__name__}: {str(e)}",
+                exc_info=True
+            )
             return False
     	
     def get_unread_direct_messages(self, user_id: str, companies: List[Dict] = None) -> List[Dict]:
@@ -8117,15 +8567,17 @@ class FirebaseRealtimeChat:
         Args:
             space_code (str): Code de l'espace
             thread_key (str): Identifiant du thread
-            mode (str): Mode de groupement ('job_chats' ou 'chats')
+            mode (str): Mode de groupement ('job_chats', 'chats' ou 'active_chats')
             
         Returns:
             str: Chemin complet vers le thread
         """
         if mode == 'chats':
             return f'{space_code}/chats/{thread_key}'
-        else:  # Par défaut, utilisez 'job_chats'
-            return f'{space_code}/job_chats/{thread_key}'
+        if mode == 'active_chats':
+            return f'{space_code}/active_chats/{thread_key}'
+        # Par défaut, utilisez 'job_chats'
+        return f'{space_code}/job_chats/{thread_key}'
     
     def create_chat(self,user_id: str, space_code: str, thread_name: str, mode: str = 'chats', chat_mode: str = 'general_chat',thread_key:str=None) -> dict:
         """
@@ -8140,23 +8592,15 @@ class FirebaseRealtimeChat:
         Returns:
             dict: Informations sur le thread créé (thread_key, success, etc.)
         """
-        mode_env = os.getenv("LISTENERS_MODE", "ACTUEL").strip().upper()
-        if mode_env in ["LOCAL", "PROD"]:
-            try:
-                if os.getenv("LISTENERS_DEBUG", "false").lower() == "true":
-                    print(f"[FBR→RPC] create_chat uid={user_id} space={space_code} chat_mode={chat_mode}")
-            except Exception:
-                pass
-            return self._rpc("create_chat", user_id, space_code, thread_name, mode, chat_mode)
+        
         try:
-            
-            
-            # Générer un thread_key unique basé sur le timestamp et le nom
-            if not thread_key:
-                thread_key = f"{int(time.time())}_{re.sub(r'[^a-zA-Z0-9]', '_', thread_name)}"
+            if thread_key:
+                # Utiliser le thread_key existant (pour le cas "renommer" un chat vierge)
+                print(f"📝 Utilisation du thread_key existant: {thread_key}")
             else:
-                thread_key = thread_key
-            
+                # Générer un thread_key unique basé sur le timestamp et le nom
+                thread_key = f"{int(time.time())}_{re.sub(r'[^a-zA-Z0-9]', '_', thread_name)}"
+                print(f"📝 Génération d'un nouveau thread_key: {thread_key}")
             # Construire le chemin complet pour le nouveau thread
             path = f"{space_code}/{mode}/{thread_key}"
             
@@ -8168,7 +8612,7 @@ class FirebaseRealtimeChat:
                 "created_by": user_id,
                 "chat_mode": chat_mode,  # Ajouter le chat_mode dans les données du thread
                 "messages": {}  # Messages vides au départ
-            }
+                }
             
             # Enregistrer le thread dans Firebase
             result = self.db.child(path).set(thread_data)
@@ -8244,14 +8688,7 @@ class FirebaseRealtimeChat:
         Returns:
             bool: True si le renommage a réussi, False sinon
         """
-        mode_env = os.getenv("LISTENERS_MODE", "ACTUEL").strip().upper()
-        if mode_env in ["LOCAL", "PROD"]:
-            try:
-                if os.getenv("LISTENERS_DEBUG", "false").lower() == "true":
-                    print(f"[FBR→RPC] rename_chat space={space_code} thread={thread_key} name={new_name}")
-            except Exception:
-                pass
-            return self._rpc("rename_chat", space_code, thread_key, new_name, mode)
+        
         try:
             print(f"✏️ Renommage du chat: {thread_key} → '{new_name}' (mode: {mode})")
             
@@ -8279,6 +8716,42 @@ class FirebaseRealtimeChat:
             traceback.print_exc()
             return False
 
+    def get_thread_name(self, space_code: str, thread_key: str, mode: str = 'chats') -> Optional[str]:
+        """
+        Récupère le nom d'un thread de chat dans Firebase Realtime Database.
+        
+        Args:
+            space_code (str): Code de l'espace (typiquement le companies_search_id)
+            thread_key (str): Identifiant du thread
+            mode (str): Mode de groupement ('job_chats' ou 'chats')
+            
+        Returns:
+            Optional[str]: Nom du thread si trouvé, None sinon
+        """
+        
+        try:
+            # Construire le chemin complet
+            path = f"{space_code}/{mode}/{thread_key}"
+            
+            # Référence au thread
+            thread_ref = self.db.child(path)
+            
+            # Récupérer les données du thread
+            thread_data = thread_ref.get()
+            
+            if thread_data is None:
+                logger.warning(f"⚠️ Thread {thread_key} non trouvé dans {space_code}/{mode}")
+                return None
+            
+            # Récupérer le thread_name (avec fallback sur thread_key si absent)
+            thread_name = thread_data.get('thread_name', thread_key)
+            
+            logger.info(f"✅ Nom du thread récupéré: {thread_name} (thread_key={thread_key})")
+            return thread_name
+            
+        except Exception as e:
+            logger.error(f"❌ Erreur lors de la récupération du nom du thread: {e}", exc_info=True)
+            return None
 
 
     def get_all_threads(self, space_code: str, mode: str = 'job_chats') -> Dict[str, Dict]:
@@ -8292,20 +8765,15 @@ class FirebaseRealtimeChat:
         Returns:
             Dict[str, Dict]: Dictionnaire des threads avec leurs métadonnées
         """
-        mode_env = os.getenv("LISTENERS_MODE", "ACTUEL").strip().upper()
-        if mode_env in ["LOCAL", "PROD"]:
-            try:
-                if os.getenv("LISTENERS_DEBUG", "false").lower() == "true":
-                    print(f"[FBR→RPC] get_all_threads space={space_code}")
-            except Exception:
-                pass
-            return self._rpc("get_all_threads", space_code, mode)
+        
         try:
             print(f"📚 Récupération de tous les threads pour l'espace: {space_code}, mode: {mode}")
             
             # Référence au dossier contenant les threads selon le mode
             if mode == 'chats':
                 threads_ref = self.db.child(f'{space_code}/chats')
+            elif mode == 'active_chats':
+                threads_ref = self.db.child(f'{space_code}/active_chats')
             else:  # job_chats par défaut
                 threads_ref = self.db.child(f'{space_code}/job_chats')
             
@@ -8342,9 +8810,6 @@ class FirebaseRealtimeChat:
             print("  Traceback:")
             print(traceback.format_exc())
             return {}
-
-
-
     def _get_last_activity(self, messages: Dict) -> str:
         """
         Détermine la dernière activité d'un thread en fonction des timestamps des messages.
@@ -8389,7 +8854,7 @@ class FirebaseRealtimeChat:
         action: str,
         additional_data: dict = None,
         mode: str = 'job_chats'
-    ) -> bool:
+        ) -> bool:
         """
         Envoie un message d'action speeddial via Firebase Realtime.
         Args:
@@ -8499,7 +8964,15 @@ class FirebaseRealtimeChat:
 
     
     
-    async def listen_realtime_channel(self, space_code: str, thread_key: str, callback, mode: str = 'job_chats') -> None:
+    async def listen_realtime_channel(
+        self,
+        space_code: str,
+        thread_key: str,
+        callback,
+        mode: str = 'job_chats',
+        scheduler: Optional[Callable[[Awaitable[Any], Optional[float]], Any]] = None,
+        scheduler_timeout: Optional[float] = 1.0
+    ) -> None:
         """
         Configure un écouteur pour les messages d'un canal spécifique.
         Args:
@@ -8507,6 +8980,8 @@ class FirebaseRealtimeChat:
             thread_key (str): Identifiant du thread/conversation
             callback: Fonction asynchrone à appeler lors de la réception d'un message
             mode (str): Mode de groupement ('job_chats' ou 'chats')
+            scheduler: Fonction optionnelle pour planifier l'exécution asynchrone (ex: session.schedule_coroutine)
+            scheduler_timeout: Temps d'attente max pour le scheduler (None pour ne pas attendre)
         """
         try:
             print(f"🚀 Démarrage de l'écoute Firebase Realtime")
@@ -8519,7 +8994,6 @@ class FirebaseRealtimeChat:
             messages_ref = self.db.child(f'{thread_path}/messages')
             
             print(f"📡 Référence créée: {messages_ref.path}")
-            main_loop = asyncio.get_event_loop()
             # Utiliser un ensemble pour suivre les messages en cours de traitement
 
             def on_message(event):
@@ -8533,45 +9007,73 @@ class FirebaseRealtimeChat:
                       return
                     
                     message_id = event.path.lstrip('/')
+                    message_type = event.data.get('message_type', 'N/A')
+                    print(f"📨 [LISTENER_METIER] Message reçu - path={messages_ref.path} msg_id={message_id} type={message_type}")
             
                     # Vérifier si le message est déjà en cours de traitement
                     if message_id in self.processed_messages:
-                        print(f"⏳ Message {message_id} en cours de traitement, ignoré")
+                        print(f"⏳ [LISTENER_METIER] Message {message_id} en cours de traitement, ignoré")
                         return
                    
-                    message_type = event.data.get('message_type')
+                    # ⚠️ Support des deux formats: message_type (ancien) et type (nouveau)
+                    message_type = event.data.get('message_type') or event.data.get('type')
                     is_unread = not event.data.get('read', True)
                     
-                    if (message_type in ['MESSAGE', 'CARD','TOOL','CMMD'] and 
+                    # ✅ Inclure tous les types de messages gérés par le handler
+                    if (message_type in ['MESSAGE', 'CARD', 'TOOL', 'CMMD', 'FOLLOW_MESSAGE', 'WAITING_MESSAGE', 'WORKFLOW', 'CLOSE_INTERMEDIATION', 'CARD_CLICKED_PINNOKIO'] and 
                         is_unread):
                         self.processed_messages.add(message_id)
                         message_data = {
                             'id': event.path.lstrip('/'),
                             **event.data
                         }
+                        print(f"✅ [LISTENER_METIER] Message valide détecté - msg_id={message_id} type={message_type} path={messages_ref.path}")
                         #print(f"📝 Message Pinnokio formaté: {message_data}")
                         # Marquer comme lu AVANT le traitement
                         messages_ref.child(message_id).update({'read': True})
-                        print(f"✅ Message {message_id} marqué comme lu")
+                        print(f"✅ [LISTENER_METIER] Message {message_id} marqué comme lu")
                         try:
-                            # Utiliser la boucle principale pour planifier le callback
-                            future = asyncio.run_coroutine_threadsafe(
-                                callback(message_data), 
-                                main_loop
-                            )
-                            future.result(timeout=1)
-                            # Marquer comme lu après le traitement réussi
-                            
-                            
-                        except asyncio.TimeoutError:
-                            print("⚠️ Callback timeout - continuer en arrière-plan")    
+                            print(f"🔄 [LISTENER_METIER] Envoi vers callback - msg_id={message_id}")
+
+                            if scheduler:
+                                scheduler(
+                                    callback(message_data),
+                                    timeout=scheduler_timeout
+                                )
+                            else:
+                                loop: Optional[asyncio.AbstractEventLoop]
+                                try:
+                                    loop = asyncio.get_running_loop()
+                                except RuntimeError:
+                                    try:
+                                        loop = asyncio.get_event_loop()
+                                    except RuntimeError:
+                                        loop = None
+
+                                if loop and loop.is_running():
+                                    future = asyncio.run_coroutine_threadsafe(
+                                        callback(message_data),
+                                        loop
+                                    )
+                                    future.result(timeout=1)
+                                else:
+                                    asyncio.run(callback(message_data))
+
+                            print(f"✅ [LISTENER_METIER] Callback exécuté avec succès - msg_id={message_id}")
+                            self.processed_messages.discard(message_id)
+
+                        except FutureTimeoutError:
+                            print(f"⚠️ [LISTENER_METIER] Callback timeout - msg_id={message_id}, continuer en arrière-plan")
+                            self.processed_messages.discard(message_id)
                         except Exception as e:
-                            print(f"❌ Erreur dans le callback: {e}")
-                            self.processed_messages.add(message_id)
+                            print(f"❌ [LISTENER_METIER] Erreur dans le callback - msg_id={message_id} error={e}")
+                            self.processed_messages.discard(message_id)
+                            if isinstance(e, RuntimeError) and 'Event loop is closed' in str(e):
+                                logger.exception("[LISTENER_METIER] Event loop fermé lors du callback", exc_info=True)
                         
 
                     else:
-                        print(f"⏭️ Message ignoré - Type: {message_type}, Lu: {not is_unread}")
+                        print(f"⏭️ [LISTENER_METIER] Message ignoré - Type: {message_type}, Lu: {not is_unread}, msg_id={message_id}")
             
             print("🎯 Configuration de l'écouteur...")
             listener = messages_ref.listen(on_message)
@@ -8652,7 +9154,7 @@ class FirebaseRealtimeChat:
         message_type: str = "MESSAGE_PINNOKIO",
         message_data: dict = None,
         mode: str = 'job_chats'
-    ) -> bool:
+        ) -> bool:
         """
         Envoie un message structuré via Firebase Realtime.
         Args:
@@ -8738,3 +9240,4 @@ def get_firebase_realtime() -> FirebaseRealtimeChat:
     return _FIREBASE_REALTIME_SINGLETON
 
 
+    
