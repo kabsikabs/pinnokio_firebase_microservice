@@ -948,6 +948,12 @@ class ListenersManager:
             # Extraire les données d'étapes
             step_status = doc_data.get("APBookeeper_step_status", {})
 
+            # Vérifier que step_status est bien un dictionnaire
+            if not isinstance(step_status, dict):
+                self.logger.warning("step_changes_invalid_type uid=%s job_id=%s type=%s value=%s",
+                                   uid, job_id, type(step_status).__name__, step_status)
+                return
+
             if not step_status:
                 self.logger.debug("step_changes_no_data uid=%s job_id=%s reason=no_APBookeeper_step_status", uid, job_id)
                 return

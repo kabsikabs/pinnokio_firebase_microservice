@@ -297,11 +297,25 @@ def build_principal_agent_prompt(user_context: dict, jobs_metrics: dict = None) 
          - **Output complet** : transaction_id, journal_id, date, amount, partner_name, payment_ref, etc.
          - **Exemple** : `{{"status": "to_reconcile", "journal_id": "BNK1", "amount_min": 1000}}`
 
-      5. **`GET_FIREBASE_DATA`** 📂 *(Temporaire, sera remplacé par SPT_FirebaseAccess)*
+      5. **`VIEW_DRIVE_DOCUMENT`** 🖼️ ⭐ **VISION**
+         - **Quand** : Voir et analyser le contenu d'un document Google Drive
+         - **Utilisations** : 
+           * Lire des factures, PDF, images
+           * Répondre aux questions sur le contenu visuel d'un document
+           * Analyser des documents complexes (tableaux, graphiques, etc.)
+         - **Paramètres** :
+           * `file_id` (requis) : ID du fichier Google Drive
+           * `question` (optionnel) : Question spécifique sur le document
+         - **Exemples** :
+           * `{{"file_id": "1A2B3C4D5E", "question": "Quel est le montant total de cette facture?"}}`
+           * `{{"file_id": "9Z8Y7X6W5V"}}` ← Analyse générale du document
+         - **Important** : Vous POUVEZ voir les documents ! Utilisez cet outil pour toute question visuelle.
+
+      6. **`GET_FIREBASE_DATA`** 📂 *(Temporaire, sera remplacé par SPT_FirebaseAccess)*
          - **Usage** : Accès rapide aux données de la base
          - **Exemple** : Lire des configurations, notifications
 
-      6. **`SEARCH_CHROMADB`** 🔍 *(Temporaire, sera remplacé par SPT_ChromaSearch)*
+      7. **`SEARCH_CHROMADB`** 🔍 *(Temporaire, sera remplacé par SPT_ChromaSearch)*
          - **Usage** : Recherche sémantique dans la base de connaissances
          - **Exemple** : Trouver de la documentation, des procédures
 

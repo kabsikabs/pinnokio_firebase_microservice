@@ -31,6 +31,8 @@ google-auth-httplib2==0.2.0
 # Dépendances pour l'interface utilisateur
 colorama==0.4.6
 Pillow>=10.0.0
+# Dépendances pour la conversion PDF en images
+pdf2image>=1.16.0
 # Dépendances pour le traitement des dates
 pytz==2024.2
 # Dépendances pour Google GenAI

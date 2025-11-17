@@ -9,7 +9,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timezone
 import json
 
-from ...llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_Anthropic_Agent
+from ...llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_Anthropic_Agent, NEW_OpenAiAgent
 from .agent_modes import get_agent_mode_config
 
 logger = logging.getLogger("pinnokio.brain")
@@ -51,8 +51,8 @@ class PinnokioBrain:
         self.pinnokio_agent: Optional[BaseAIAgent] = None
         
         # Configuration du provider (modèle de raisonnement)
-        self.default_provider = ModelProvider.ANTHROPIC
-        self.default_size = ModelSize.MEDIUM  # Claude Sonnet pour raisonnement
+        self.default_provider = ModelProvider.OPENAI
+        self.default_size = ModelSize.MEDIUM  # Kimi K2 pour raisonnement + streaming + tools
         
         # ⭐ NOUVELLE ARCHITECTURE: L'historique est géré par self.pinnokio_agent
         # Plus de duplication d'historique au niveau du brain
@@ -124,20 +124,18 @@ class PinnokioBrain:
             self.pinnokio_agent.default_model_size = self.default_size
             
             # ═══ 2. Créer et enregistrer l'instance du provider ═══
-            from ...llm.klk_agents import NEW_Anthropic_Agent
-            
-            # Créer l'instance Anthropic (sans arguments)
-            anthropic_instance = NEW_Anthropic_Agent()
+            # Créer l'instance OpenAI (sans arguments)
+            openai_instance = NEW_OpenAiAgent()
             
             # Enregistrer le provider dans BaseAIAgent
             # BaseAIAgent a déjà collection_name, dms_system, dms_mode, firebase_user_id
             self.pinnokio_agent.register_provider(
                 provider=self.default_provider,
-                instance=anthropic_instance,
+                instance=openai_instance,
                 default_model_size=self.default_size
             )
             
-            logger.info(f"[BRAIN] ✅ Agent principal créé (provider={self.default_provider.value}, size={self.default_size.value})")
+            logger.info(f"[BRAIN] ✅ Agent principal créé (provider={self.default_provider.value}, size={self.default_size.value}, model=Kimi K2)")
             
             # ═══ 3. Créer les agents SPT ═══
             
@@ -284,6 +282,101 @@ class PinnokioBrain:
         
         async def handle_update_context(**kwargs):
             return await context_tools.update_context(**kwargs)
+
+        # ═══ OUTIL VISION DOCUMENT DRIVE ═══
+        view_drive_document_def = {
+            "name": "VIEW_DRIVE_DOCUMENT",
+            "description": """🖼️ Visionner et analyser un document Google Drive.
+            
+            Utilisez cet outil pour:
+            - Voir le contenu d'un document/image dans Google Drive
+            - Analyser des factures, PDF, images
+            - Répondre aux questions sur le contenu visuel d'un document
+            
+            ⚠️ **WORKFLOW OBLIGATOIRE** :
+            1. **D'ABORD** : Récupérer le `drive_file_id` avec :
+               - `GET_APBOOKEEPER_JOBS` pour les factures
+               - `GET_ROUTER_JOBS` pour les documents à router
+               - `GET_BANK_TRANSACTIONS` (pas de file_id ici, ne pas utiliser)
+            2. **ENSUITE** : Utiliser ce `drive_file_id` avec VIEW_DRIVE_DOCUMENT
+            
+            ❌ **NE PAS** inventer ou deviner un file_id !
+            ❌ **NE PAS** utiliser un nom de fichier comme file_id !
+            
+            Exemples corrects:
+            1. GET_APBOOKEEPER_JOBS(file_name_contains="38653") → obtenir drive_file_id
+            2. VIEW_DRIVE_DOCUMENT(file_id="1A2B3C4D5E...", question="Détails de la facture")
+            """,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "file_id": {
+                        "type": "string",
+                        "description": "ID du fichier Google Drive à visionner (ex: '1A2B3C4D5E')"
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "Question spécifique sur le document (optionnel). Si non fourni, fait une analyse générale."
+                    }
+                },
+                "required": ["file_id"]
+            }
+        }
+        
+        async def handle_view_drive_document(**kwargs):
+            """Handler pour visionner un document Google Drive."""
+            try:
+                file_id = kwargs.get("file_id")
+                question = kwargs.get("question", "Décris le contenu de ce document en détail.")
+                
+                # ✅ VALIDATION : Vérifier que file_id est fourni et non vide
+                if not file_id or not isinstance(file_id, str) or len(file_id.strip()) == 0:
+                    error_msg = (
+                        "❌ Paramètre 'file_id' manquant ou invalide. "
+                        "Pour voir un document, tu DOIS d'abord récupérer son drive_file_id "
+                        "en utilisant GET_APBOOKEEPER_JOBS, GET_ROUTER_JOBS ou GET_BANK_TRANSACTIONS."
+                    )
+                    logger.warning(f"[VIEW_DRIVE_DOCUMENT] {error_msg}")
+                    return {
+                        "type": "error",
+                        "message": error_msg
+                    }
+                
+                # Vérifier que le DMS est disponible
+                if not self.pinnokio_agent or not self.pinnokio_agent.dms_system:
+                    return {
+                        "type": "error",
+                        "message": "Système DMS non initialisé. Impossible d'accéder aux documents Drive."
+                    }
+                
+                logger.info(f"[VIEW_DRIVE_DOCUMENT] 🖼️ Vision du document: file_id={file_id}")
+                
+                # Utiliser process_vision de BaseAIAgent avec Groq (Llama Scout)
+                response = await asyncio.to_thread(
+                    self.pinnokio_agent.process_vision,
+                    text=question,
+                    provider=self.default_provider,  # GROQ
+                    size=ModelSize.MEDIUM,  # Llama Scout 17B (vision)
+                    drive_file_ids=[file_id],
+                    method='batch',
+                    max_tokens=2000,
+                    final_resume=True
+                )
+                
+                logger.info(f"[VIEW_DRIVE_DOCUMENT] ✅ Analyse terminée")
+                
+                return {
+                    "type": "success",
+                    "file_id": file_id,
+                    "analysis": response if isinstance(response, str) else response.get('text_output', str(response))
+                }
+                
+            except Exception as e:
+                logger.error(f"[VIEW_DRIVE_DOCUMENT] ❌ Erreur: {e}", exc_info=True)
+                return {
+                    "type": "error",
+                    "message": f"Erreur lors de la vision du document: {str(e)}"
+                }
 
         # ═══ OUTILS TASK (gestion tâches planifiées) ═══
         from ..tools.task_tools import TaskTools
@@ -626,7 +719,7 @@ class PinnokioBrain:
             }
         }
         
-        # Combiner tous les outils (avec les 3 outils jobs + 4 outils context + CREATE_TASK + checklist)
+        # Combiner tous les outils (avec les 3 outils jobs + 4 outils context + VIEW_DRIVE_DOCUMENT + CREATE_TASK + checklist)
         tool_set = [
             get_apbookeeper_jobs_def,
             get_router_jobs_def,
@@ -635,6 +728,7 @@ class PinnokioBrain:
             apbookeeper_context_def,
             company_context_def,
             update_context_def,
+            view_drive_document_def,  # ⭐ Outil de vision Drive
             create_task_def,
             create_checklist_tool,
             update_step_tool
@@ -648,6 +742,7 @@ class PinnokioBrain:
             "APBOOKEEPER_CONTEXT": handle_apbookeeper_context,
             "COMPANY_CONTEXT": handle_company_context,
             "UPDATE_CONTEXT": handle_update_context,
+            "VIEW_DRIVE_DOCUMENT": handle_view_drive_document,  # ⭐ Handler vision Drive
             "CREATE_TASK": handle_create_task,
             "CREATE_CHECKLIST": handle_create_checklist,
             "UPDATE_STEP": handle_update_step,

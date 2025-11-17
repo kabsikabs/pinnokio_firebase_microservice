@@ -35,7 +35,10 @@
         {"name": "PORT", "value": "8090"},
         {"name": "STRIPE_KEYS", "value": "stripe_keys"},
         {"name": "STRIPE_SUCCESS_URL", "value": "https://www.pinnokioagent.com/payment-success/"},
-        {"name": "STRIPE_CANCEL_URL", "value": "https://www.pinnokioagent.com/payment-canceled/"}
+        {"name": "STRIPE_CANCEL_URL", "value": "https://www.pinnokioagent.com/payment-canceled/"},
+        {"name": "PINNOKIO_ENVIRONMENT", "value": "PROD"},
+        {"name": "PINNOKIO_AWS_URL", "value": "http://klk-load-balancer-http-https-435479360.us-east-1.elb.amazonaws.com"},
+        {"name": "PINNOKIO_SOURCE", "value": "aws"}
       ],
       "logConfiguration": {
         "logDriver": "awslogs",

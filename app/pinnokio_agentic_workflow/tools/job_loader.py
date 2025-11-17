@@ -32,6 +32,30 @@ class JobLoader:
         self.company_id = company_id
         self.client_uuid = client_uuid
     
+    @staticmethod
+    def _normalize_timestamp(timestamp_value) -> str:
+        """
+        Convertit n'importe quel type de timestamp en string ISO.
+        Gère : DatetimeWithNanoseconds (Firebase), datetime, string, etc.
+        """
+        if not timestamp_value:
+            return ''
+        
+        try:
+            # Si c'est déjà une string, la retourner telle quelle
+            if isinstance(timestamp_value, str):
+                return timestamp_value
+            
+            # Si c'est un objet avec isoformat (datetime, DatetimeWithNanoseconds, etc.)
+            if hasattr(timestamp_value, 'isoformat'):
+                return timestamp_value.isoformat()
+            
+            # Sinon, convertir en string
+            return str(timestamp_value)
+        except Exception as e:
+            logger.warning(f"[JOB_LOADER] Erreur conversion timestamp: {e}")
+            return str(timestamp_value) if timestamp_value else ''
+    
     async def load_all_jobs(self, mode: str, user_context: Dict) -> Tuple[Dict, Dict]:
         """
         Charge tous les jobs de tous les départements.
@@ -403,7 +427,7 @@ class JobLoader:
                     "drive_file_id": doc['data'].get('drive_file_id', ''),
                     "file_name": doc['data'].get('file_name', ''),
                     "status": doc['data'].get('status', 'to_process'),
-                    "timestamp": doc['data'].get('timestamp', ''),
+                    "timestamp": self._normalize_timestamp(doc['data'].get('timestamp', '')),
                     "uri_drive_link": doc['data'].get('uri_drive_link', ''),
                     "source": doc['data'].get('source', ''),
                     "client": doc['data'].get('client', '')
@@ -533,7 +557,7 @@ class JobLoader:
                 drive_doc = {
                     "id": doc.get('id', ''),                      # ← Format Reflex
                     "name": doc.get('name', ''),                  # ← Format Reflex
-                    "created_time": doc.get('createdTime', ''),
+                    "created_time": self._normalize_timestamp(doc.get('createdTime', '')),
                     "status": "to_process",
                     "router_drive_view_link": doc.get('webViewLink', ''),
                     "client": user_context.get("company_name", "")  # ← Ajouté pour Reflex
@@ -704,7 +728,7 @@ class JobLoader:
                     "transaction_name": tx.get("move_name", ""),
                     "journal_id": str(journal_id) if journal_id is not None else "",
                     "journal_name": journal_name,
-                    "date": tx.get("date", ""),
+                    "date": self._normalize_timestamp(tx.get("date", "")),
                     "amount": float(tx.get("amount", 0)),
                     "partner_name": tx.get("partner_name", ""),
                     "partner_id": tx.get("partner_id"),

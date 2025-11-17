@@ -52,6 +52,100 @@ class LPTClient:
             f"Onboarding: {self.onboarding_url}"
         )
     
+    def check_balance_before_lpt(
+        self, 
+        user_id: str = None,
+        mandate_path: str = None,
+        estimated_cost: float = 1.0,
+        lpt_tool_name: str = "LPT"
+    ) -> Dict[str, Any]:
+        """
+        Vérifie si l'utilisateur a un solde suffisant avant d'exécuter un outil LPT.
+        
+        Args:
+            user_id: ID de l'utilisateur
+            mandate_path: Chemin du mandat dans Firebase (prioritaire sur user_id)
+            estimated_cost: Coût estimé de l'opération en $ (par défaut 1.0)
+            lpt_tool_name: Nom de l'outil LPT pour les logs (APBookkeeper, Router, Banker, etc.)
+            
+        Returns:
+            dict: 
+                - "sufficient": True si le solde est suffisant, False sinon
+                - "current_balance": Solde actuel du compte
+                - "required_balance": Solde requis (estimated_cost * 1.2)
+                - "message": Message à retourner à l'agent si insuffisant
+        """
+        try:
+            from ...firebase_providers import FirebaseManagement
+            firebase_management = FirebaseManagement()
+            
+            # 🔍 Récupérer les informations de solde
+            balance_info = firebase_management.get_balance_info(
+                mandate_path=mandate_path,
+                user_id=user_id
+            )
+            
+            current_balance = balance_info.get('current_balance', 0.0)
+            
+            # 💰 Calculer le solde requis (marge de sécurité de 20%)
+            required_balance = estimated_cost * 1.2
+            
+            is_sufficient = current_balance >= required_balance
+            
+            logger.info(
+                f"[BALANCE_CHECK_{lpt_tool_name}] 💰 Vérification solde - "
+                f"Solde actuel: {current_balance:.2f}$ | "
+                f"Requis: {required_balance:.2f}$ (coût estimé: {estimated_cost:.2f}$) | "
+                f"Statut: {'✅ SUFFISANT' if is_sufficient else '❌ INSUFFISANT'}"
+            )
+            
+            if not is_sufficient:
+                # 📢 Message clair à retourner à l'agent
+                insufficient_message = (
+                    f"⚠️ **SOLDE INSUFFISANT** ⚠️\n\n"
+                    f"L'exécution de l'outil **{lpt_tool_name}** nécessite un solde minimum.\n\n"
+                    f"📊 **État du compte :**\n"
+                    f"• Solde actuel : **{current_balance:.2f} $**\n"
+                    f"• Solde requis : **{required_balance:.2f} $**\n"
+                    f"• Montant manquant : **{(required_balance - current_balance):.2f} $**\n\n"
+                    f"💡 **Action requise :**\n"
+                    f"Veuillez inviter l'utilisateur à **recharger son compte** depuis le tableau de bord "
+                    f"pour continuer à utiliser les services.\n\n"
+                    f"🔗 L'utilisateur peut recharger son compte dans la section **Facturation** du tableau de bord."
+                )
+                
+                logger.warning(
+                    f"[BALANCE_CHECK_{lpt_tool_name}] ⚠️ SOLDE INSUFFISANT - "
+                    f"Besoin de {(required_balance - current_balance):.2f}$ supplémentaires"
+                )
+                
+                return {
+                    "sufficient": False,
+                    "current_balance": current_balance,
+                    "required_balance": required_balance,
+                    "estimated_cost": estimated_cost,
+                    "missing_amount": required_balance - current_balance,
+                    "message": insufficient_message
+                }
+            
+            return {
+                "sufficient": True,
+                "current_balance": current_balance,
+                "required_balance": required_balance,
+                "estimated_cost": estimated_cost
+            }
+            
+        except Exception as e:
+            logger.error(f"[BALANCE_CHECK_{lpt_tool_name}] ❌ Erreur vérification solde: {e}", exc_info=True)
+            # En cas d'erreur, on autorise par défaut (failsafe)
+            return {
+                "sufficient": True,
+                "current_balance": 0.0,
+                "required_balance": 0.0,
+                "error": str(e),
+                "message": "⚠️ Impossible de vérifier le solde. Opération autorisée par défaut."
+            }
+    
     def get_tools_definitions_and_mapping(
         self, 
         user_id: str, 
@@ -427,6 +521,49 @@ Le payload respecte le format notifications Banker (transactions regroupées par
             if not brain:
                 raise ValueError("Brain est requis pour lancer APBookkeeper_ALL")
             
+            context = brain.get_user_context()
+            mandate_path = context.get('mandate_path')
+            
+            # 🔍 Compter le nombre de factures à traiter
+            apbookeeper_jobs = ((brain.jobs_data or {}).get("APBOOKEEPER", {}) if brain else {}).get("to_do", []) or []
+            nb_invoices = len(apbookeeper_jobs)
+            
+            # 🛡️ VÉRIFICATION DU SOLDE AVANT L'ENVOI
+            # Coût estimé : 1.0$ par facture
+            estimated_cost = nb_invoices * 1.0
+            
+            balance_check = self.check_balance_before_lpt(
+                mandate_path=mandate_path,
+                user_id=user_id,
+                estimated_cost=estimated_cost,
+                lpt_tool_name="APBookkeeper_ALL"
+            )
+            
+            if not balance_check.get("sufficient", False):
+                # ❌ SOLDE INSUFFISANT - Retourner le message à l'agent
+                logger.warning(
+                    f"[LPT_APBookkeeper_ALL] ❌ BLOCAGE - Solde insuffisant "
+                    f"({balance_check.get('current_balance', 0):.2f}$ < {balance_check.get('required_balance', 0):.2f}$)"
+                )
+                return {
+                    "status": "insufficient_balance",
+                    "error": "Solde insuffisant pour exécuter cette opération",
+                    "balance_info": {
+                        "current_balance": balance_check.get("current_balance", 0.0),
+                        "required_balance": balance_check.get("required_balance", 0.0),
+                        "missing_amount": balance_check.get("missing_amount", 0.0)
+                    },
+                    "nb_invoices_to_process": nb_invoices,
+                    "message": balance_check.get("message", "Solde insuffisant")
+                }
+            
+            # ✅ SOLDE SUFFISANT - Continuer l'exécution
+            logger.info(
+                f"[LPT_APBookkeeper_ALL] ✅ Solde vérifié et suffisant "
+                f"({balance_check.get('current_balance', 0):.2f}$ >= {balance_check.get('required_balance', 0):.2f}$) "
+                f"pour {nb_invoices} factures"
+            )
+            
             ap_jobs = (brain.jobs_data or {}).get("APBOOKEEPER", {}) if brain else {}
             to_do_jobs = ap_jobs.get("to_do", []) or []
             
@@ -503,6 +640,41 @@ Le payload respecte le format notifications Banker (transactions regroupées par
                 raise ValueError("Brain est requis pour lancer APBookkeeper")
             
             context = brain.get_user_context()
+            mandate_path = context.get('mandate_path')
+            
+            # 🛡️ VÉRIFICATION DU SOLDE AVANT L'ENVOI
+            # Coût estimé : 1.0$ par facture (ajustable selon vos tarifs)
+            estimated_cost = len(job_ids) * 1.0
+            
+            balance_check = self.check_balance_before_lpt(
+                mandate_path=mandate_path,
+                user_id=user_id,
+                estimated_cost=estimated_cost,
+                lpt_tool_name="APBookkeeper"
+            )
+            
+            if not balance_check.get("sufficient", False):
+                # ❌ SOLDE INSUFFISANT - Retourner le message à l'agent
+                logger.warning(
+                    f"[LPT_APBookkeeper] ❌ BLOCAGE - Solde insuffisant "
+                    f"({balance_check.get('current_balance', 0):.2f}$ < {balance_check.get('required_balance', 0):.2f}$)"
+                )
+                return {
+                    "status": "insufficient_balance",
+                    "error": "Solde insuffisant pour exécuter cette opération",
+                    "balance_info": {
+                        "current_balance": balance_check.get("current_balance", 0.0),
+                        "required_balance": balance_check.get("required_balance", 0.0),
+                        "missing_amount": balance_check.get("missing_amount", 0.0)
+                    },
+                    "message": balance_check.get("message", "Solde insuffisant")
+                }
+            
+            # ✅ SOLDE SUFFISANT - Continuer l'exécution
+            logger.info(
+                f"[LPT_APBookkeeper] ✅ Solde vérifié et suffisant "
+                f"({balance_check.get('current_balance', 0):.2f}$ >= {balance_check.get('required_balance', 0):.2f}$)"
+            )
             logger.info(f"[LPT_APBookkeeper] Contexte récupéré depuis brain: mandate_path={context.get('mandate_path')}")
             
             # ⭐ NOUVEAU: Récupérer les paramètres d'approbation depuis workflow_params
@@ -771,7 +943,48 @@ Le payload respecte le format notifications Banker (transactions regroupées par
                 raise ValueError("Brain est requis pour lancer Router_ALL")
             
             context = brain.get_user_context()
-            logger.info(f"[LPT_Router_ALL] Contexte récupéré: mandate_path={context.get('mandate_path')}")
+            mandate_path = context.get('mandate_path')
+            
+            # 🔍 Compter le nombre de documents à router
+            router_jobs = ((brain.jobs_data or {}).get("ROUTER", {}) if brain else {}).get("to_process", []) or []
+            nb_documents = len(router_jobs)
+            
+            # 🛡️ VÉRIFICATION DU SOLDE AVANT L'ENVOI
+            # Coût estimé : 0.5$ par document
+            estimated_cost = nb_documents * 0.5
+            
+            balance_check = self.check_balance_before_lpt(
+                mandate_path=mandate_path,
+                user_id=user_id,
+                estimated_cost=estimated_cost,
+                lpt_tool_name="Router_ALL"
+            )
+            
+            if not balance_check.get("sufficient", False):
+                # ❌ SOLDE INSUFFISANT - Retourner le message à l'agent
+                logger.warning(
+                    f"[LPT_Router_ALL] ❌ BLOCAGE - Solde insuffisant "
+                    f"({balance_check.get('current_balance', 0):.2f}$ < {balance_check.get('required_balance', 0):.2f}$)"
+                )
+                return {
+                    "status": "insufficient_balance",
+                    "error": "Solde insuffisant pour exécuter cette opération",
+                    "balance_info": {
+                        "current_balance": balance_check.get("current_balance", 0.0),
+                        "required_balance": balance_check.get("required_balance", 0.0),
+                        "missing_amount": balance_check.get("missing_amount", 0.0)
+                    },
+                    "nb_documents_to_route": nb_documents,
+                    "message": balance_check.get("message", "Solde insuffisant")
+                }
+            
+            # ✅ SOLDE SUFFISANT - Continuer l'exécution
+            logger.info(
+                f"[LPT_Router_ALL] ✅ Solde vérifié et suffisant "
+                f"({balance_check.get('current_balance', 0):.2f}$ >= {balance_check.get('required_balance', 0):.2f}$) "
+                f"pour {nb_documents} documents"
+            )
+            logger.info(f"[LPT_Router_ALL] Contexte récupéré: mandate_path={mandate_path}")
             
             workflow_params = context.get('workflow_params', {})
             router_params = workflow_params.get('Router_param', {})
@@ -949,7 +1162,42 @@ Le payload respecte le format notifications Banker (transactions regroupées par
                 raise ValueError("Brain est requis pour lancer Router")
             
             context = brain.get_user_context()
-            logger.info(f"[LPT_Router] Contexte récupéré depuis brain: mandate_path={context.get('mandate_path')}")
+            mandate_path = context.get('mandate_path')
+            
+            # 🛡️ VÉRIFICATION DU SOLDE AVANT L'ENVOI
+            # Coût estimé : 0.5$ par document (ajustable selon vos tarifs)
+            estimated_cost = 0.5
+            
+            balance_check = self.check_balance_before_lpt(
+                mandate_path=mandate_path,
+                user_id=user_id,
+                estimated_cost=estimated_cost,
+                lpt_tool_name="Router"
+            )
+            
+            if not balance_check.get("sufficient", False):
+                # ❌ SOLDE INSUFFISANT - Retourner le message à l'agent
+                logger.warning(
+                    f"[LPT_Router] ❌ BLOCAGE - Solde insuffisant "
+                    f"({balance_check.get('current_balance', 0):.2f}$ < {balance_check.get('required_balance', 0):.2f}$)"
+                )
+                return {
+                    "status": "insufficient_balance",
+                    "error": "Solde insuffisant pour exécuter cette opération",
+                    "balance_info": {
+                        "current_balance": balance_check.get("current_balance", 0.0),
+                        "required_balance": balance_check.get("required_balance", 0.0),
+                        "missing_amount": balance_check.get("missing_amount", 0.0)
+                    },
+                    "message": balance_check.get("message", "Solde insuffisant")
+                }
+            
+            # ✅ SOLDE SUFFISANT - Continuer l'exécution
+            logger.info(
+                f"[LPT_Router] ✅ Solde vérifié et suffisant "
+                f"({balance_check.get('current_balance', 0):.2f}$ >= {balance_check.get('required_balance', 0):.2f}$)"
+            )
+            logger.info(f"[LPT_Router] Contexte récupéré depuis brain: mandate_path={mandate_path}")
             
             # ⭐ NOUVEAU: Récupérer les paramètres depuis workflow_params
             workflow_params = context.get('workflow_params', {})
@@ -1390,6 +1638,49 @@ Le payload respecte le format notifications Banker (transactions regroupées par
                 raise ValueError("Brain est requis pour lancer Banker_ALL")
             
             context = brain.get_user_context()
+            mandate_path = context.get('mandate_path')
+            
+            # 🔍 Compter le nombre de transactions à traiter
+            bank_data = (brain.jobs_data or {}).get("BANK", {}) if brain else {}
+            unprocessed_transactions = bank_data.get("unprocessed", []) or []
+            nb_transactions = len(unprocessed_transactions)
+            
+            # 🛡️ VÉRIFICATION DU SOLDE AVANT L'ENVOI
+            # Coût estimé : 0.3$ par transaction
+            estimated_cost = nb_transactions * 0.3
+            
+            balance_check = self.check_balance_before_lpt(
+                mandate_path=mandate_path,
+                user_id=user_id,
+                estimated_cost=estimated_cost,
+                lpt_tool_name="Banker_ALL"
+            )
+            
+            if not balance_check.get("sufficient", False):
+                # ❌ SOLDE INSUFFISANT - Retourner le message à l'agent
+                logger.warning(
+                    f"[LPT_Banker_ALL] ❌ BLOCAGE - Solde insuffisant "
+                    f"({balance_check.get('current_balance', 0):.2f}$ < {balance_check.get('required_balance', 0):.2f}$)"
+                )
+                return {
+                    "status": "insufficient_balance",
+                    "error": "Solde insuffisant pour exécuter cette opération",
+                    "balance_info": {
+                        "current_balance": balance_check.get("current_balance", 0.0),
+                        "required_balance": balance_check.get("required_balance", 0.0),
+                        "missing_amount": balance_check.get("missing_amount", 0.0)
+                    },
+                    "nb_transactions_to_process": nb_transactions,
+                    "message": balance_check.get("message", "Solde insuffisant")
+                }
+            
+            # ✅ SOLDE SUFFISANT - Continuer l'exécution
+            logger.info(
+                f"[LPT_Banker_ALL] ✅ Solde vérifié et suffisant "
+                f"({balance_check.get('current_balance', 0):.2f}$ >= {balance_check.get('required_balance', 0):.2f}$) "
+                f"pour {nb_transactions} transactions"
+            )
+            
             workflow_params = context.get('workflow_params', {})
             banker_params = workflow_params.get('Banker_param', {})
             approval_required = banker_params.get('banker_approval_required', False)
@@ -1663,7 +1954,42 @@ Le payload respecte le format notifications Banker (transactions regroupées par
                 raise ValueError("Brain est requis pour lancer Banker")
             
             context = brain.get_user_context()
-            logger.info(f"[LPT_Banker] Contexte récupéré depuis brain: mandate_path={context.get('mandate_path')}")
+            mandate_path = context.get('mandate_path')
+            
+            # 🛡️ VÉRIFICATION DU SOLDE AVANT L'ENVOI
+            # Coût estimé : 0.3$ par transaction (ajustable selon vos tarifs)
+            estimated_cost = len(transaction_ids) * 0.3
+            
+            balance_check = self.check_balance_before_lpt(
+                mandate_path=mandate_path,
+                user_id=user_id,
+                estimated_cost=estimated_cost,
+                lpt_tool_name="Banker"
+            )
+            
+            if not balance_check.get("sufficient", False):
+                # ❌ SOLDE INSUFFISANT - Retourner le message à l'agent
+                logger.warning(
+                    f"[LPT_Banker] ❌ BLOCAGE - Solde insuffisant "
+                    f"({balance_check.get('current_balance', 0):.2f}$ < {balance_check.get('required_balance', 0):.2f}$)"
+                )
+                return {
+                    "status": "insufficient_balance",
+                    "error": "Solde insuffisant pour exécuter cette opération",
+                    "balance_info": {
+                        "current_balance": balance_check.get("current_balance", 0.0),
+                        "required_balance": balance_check.get("required_balance", 0.0),
+                        "missing_amount": balance_check.get("missing_amount", 0.0)
+                    },
+                    "message": balance_check.get("message", "Solde insuffisant")
+                }
+            
+            # ✅ SOLDE SUFFISANT - Continuer l'exécution
+            logger.info(
+                f"[LPT_Banker] ✅ Solde vérifié et suffisant "
+                f"({balance_check.get('current_balance', 0):.2f}$ >= {balance_check.get('required_balance', 0):.2f}$)"
+            )
+            logger.info(f"[LPT_Banker] Contexte récupéré depuis brain: mandate_path={mandate_path}")
             
             # ⭐ NOUVEAU: Récupérer les paramètres depuis workflow_params
             workflow_params = context.get('workflow_params', {})

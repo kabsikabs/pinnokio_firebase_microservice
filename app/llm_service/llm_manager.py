@@ -1180,14 +1180,18 @@ class LLMManager:
                         await session.initialize_session_data(client_uuid)
                         logger.info(f"[SESSION] ✅ user_context rechargé avec nouveau contexte")
                     
+                    # ⭐ UTILISER le dms_system depuis user_context (priorité sur le paramètre)
+                    actual_dms_system = session.user_context.get("dms_system", "google_drive") if session.user_context else dms_system
+                    
                     # Mettre à jour le contexte si nécessaire
-                    if (session.context.dms_system != dms_system or 
+                    if (session.context.dms_system != actual_dms_system or 
                         session.context.chat_mode != chat_mode):
                         session.update_context(
-                            dms_system=dms_system,
+                            dms_system=actual_dms_system,  # ⭐ Utiliser la valeur du user_context
                             dms_mode=dms_mode,
                             chat_mode=chat_mode
                         )
+                        logger.info(f"[SESSION] 🔄 DMS mis à jour depuis user_context: {actual_dms_system}")
                     
                     # ✅ RAFRAÎCHIR les jobs et métriques (même si session existe)
                     # ⭐ Maintenant avec le BON user_context (rechargé ci-dessus si nécessaire)
@@ -1259,6 +1263,13 @@ class LLMManager:
                 logger.info(f"Initialisation données session...")
                 await session.initialize_session_data(client_uuid)
                 logger.info(f"Données session initialisées avec succès")
+                
+                # ⭐ METTRE À JOUR le dms_system depuis le user_context chargé
+                if session.user_context and session.user_context.get("dms_system"):
+                    actual_dms_system = session.user_context.get("dms_system", "google_drive")
+                    if session.context.dms_system != actual_dms_system:
+                        session.update_context(dms_system=actual_dms_system)
+                        logger.info(f"[SESSION] 🔄 DMS mis à jour depuis user_context lors de la création: {actual_dms_system}")
                 
                 # Stocker en cache
                 logger.info(f"Stockage de la session en cache...")
@@ -2528,29 +2539,52 @@ class LLMManager:
         try:
             base_session_key = f"{user_id}:{collection_name}"
             
-            logger.info(f"Arrêt streaming pour session: {base_session_key}")
+            logger.info(
+                f"[STOP_STREAMING] 🛑 Demande reçue - "
+                f"session={base_session_key}, thread={thread_key or 'ALL'}"
+            )
+            
+            # Debug: Afficher les streams actifs avant l'arrêt
+            active_streams = await self.streaming_controller.get_active_streams(base_session_key)
+            logger.info(
+                f"[STOP_STREAMING] 📊 Streams actifs pour cette session: "
+                f"{list(active_streams.keys()) if active_streams else 'AUCUN'}"
+            )
             
             if thread_key:
                 # Arrêter un thread spécifique
+                logger.info(f"[STOP_STREAMING] 🎯 Tentative d'arrêt du thread: {thread_key}")
                 success = await self.streaming_controller.stop_stream(base_session_key, thread_key)
+                
                 if success:
-                    logger.info(f"Stream arrêté pour thread: {thread_key}")
+                    logger.info(
+                        f"[STOP_STREAMING] ✅ Stream arrêté avec succès - "
+                        f"thread={thread_key}"
+                    )
                     return {
                         "success": True,
                         "message": f"Stream arrêté pour thread {thread_key}",
                         "thread_key": thread_key
                     }
                 else:
+                    logger.warning(
+                        f"[STOP_STREAMING] ⚠️ Thread non trouvé ou déjà arrêté - "
+                        f"thread={thread_key}, active_streams={list(active_streams.keys())}"
+                    )
                     return {
                         "success": False,
                         "error": "Thread non trouvé ou déjà arrêté",
-                        "message": f"Thread {thread_key} non trouvé"
+                        "message": f"Thread {thread_key} non trouvé dans les streams actifs"
                     }
             else:
                 # Arrêter tous les threads de la session
+                logger.info(f"[STOP_STREAMING] 🌐 Arrêt de TOUS les streams de la session")
                 stopped_count = await self.streaming_controller.stop_all_streams(base_session_key)
                 
-                logger.info(f"Tous les streams arrêtés: {stopped_count}")
+                logger.info(
+                    f"[STOP_STREAMING] ✅ Tous les streams arrêtés - "
+                    f"count={stopped_count}"
+                )
                 return {
                     "success": True,
                     "message": f"Tous les streams arrêtés ({stopped_count} threads)",
@@ -2558,7 +2592,7 @@ class LLMManager:
                 }
                 
         except Exception as e:
-            logger.error(f"Erreur stop_streaming: {e}", exc_info=True)
+            logger.error(f"[STOP_STREAMING] ❌ Erreur: {e}", exc_info=True)
             return {
                 "success": False,
                 "error": str(e),
@@ -5303,7 +5337,7 @@ The intermediation session has been closed {reason_text}. You can now continue t
                     tools=tools,
                     tool_mapping=tool_mapping,
                     provider=brain.default_provider,
-                    size=ModelSize.MEDIUM,
+                    size=brain.default_size,  # Utiliser la taille par défaut du brain (REASONING_MEDIUM pour Groq/Kimi K2)
                     max_tokens=2048
                     ):
                     event_type = event.get("type")

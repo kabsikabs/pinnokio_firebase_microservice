@@ -13,13 +13,12 @@ import base64
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 from ..driveClientService import DriveClientService
 from ..firebase_providers import FirebaseManagement
 from enum import Enum
 from typing import Optional, Dict, Any, List, Tuple, Union,Callable,AsyncGenerator
 from ..tools.g_cred import get_secret
-
 from abc import ABC, abstractmethod
 import json
 from datetime import datetime, timezone
@@ -220,6 +219,82 @@ class ModelPricing:
             "output_price": 8,  # $5.0 per 1M tokens
             "sales_multiplier": 6.5
         },
+        # Groq Models
+        "llama-3.1-8b-instant": {
+            "mode": "text",
+            "input_price": 0.05,  # $0.05 per 1M tokens
+            "output_price": 0.08,  # $0.08 per 1M tokens
+            "sales_multiplier": 8.5
+        },
+        "llama-3.3-70b-versatile": {
+            "mode": "text",
+            "input_price": 0.59,  # $0.59 per 1M tokens
+            "output_price": 0.79,  # $0.79 per 1M tokens
+            "sales_multiplier": 7.5
+        },
+        "openai/gpt-oss-120b": {
+            "mode": "text",
+            "input_price": 0.15,  # $0.15 per 1M tokens
+            "output_price": 0.60,  # $0.60 per 1M tokens
+            "sales_multiplier": 7.5
+        },
+        "openai/gpt-oss-20b": {
+            "mode": "text",
+            "input_price": 0.075,  # $0.075 per 1M tokens
+            "output_price": 0.30,  # $0.30 per 1M tokens
+            "sales_multiplier": 7.5
+        },
+        # Groq Vision Models
+        "meta-llama/llama-4-scout-17b-16e-instruct": {
+            "mode": "text",
+            "input_price": 0.11,  # $0.11 per 1M tokens
+            "output_price": 0.34,  # $0.34 per 1M tokens
+            "sales_multiplier": 8.0
+        },
+        "meta-llama/llama-4-maverick-17b-128e-instruct": {
+            "mode": "text",
+            "input_price": 0.20,  # $0.20 per 1M tokens
+            "output_price": 0.60,  # $0.60 per 1M tokens
+            "sales_multiplier": 7.5
+        },
+        # Groq Reasoning Models (Streaming + Raisonnement + Tools)
+        "moonshotai/kimi-k2-instruct-0905": {
+            "mode": "text",
+            "input_price": 1.00,  # $1.00 per 1M tokens
+            "output_price": 3.00,  # $3.00 per 1M tokens
+            "sales_multiplier": 6.5
+        },
+        "qwen/qwen3-32b": {
+            "mode": "text",
+            "input_price": 0.29,  # $0.29 per 1M tokens
+            "output_price": 0.59,  # $0.59 per 1M tokens
+            "sales_multiplier": 7.5
+        },
+        "qwen-qwq-32b": {
+            "mode": "text",
+            "input_price": 0.30,  # Estimation basée sur qwen3-32b
+            "output_price": 0.60,
+            "sales_multiplier": 7.5
+        },
+        "deepseek-r1-distill-llama-70b": {
+            "mode": "text",
+            "input_price": 0.60,  # Estimation basée sur la taille
+            "output_price": 0.80,
+            "sales_multiplier": 7.5
+        },
+        # Groq Tool-Use Specialized Models
+        "llama3-groq-70b-tool-use": {
+            "mode": "text",
+            "input_price": 0.60,  # Estimation basée sur llama-3.3-70b
+            "output_price": 0.80,
+            "sales_multiplier": 7.5
+        },
+        "llama3-groq-8b-tool-use": {
+            "mode": "text",
+            "input_price": 0.05,  # Même prix que llama-3.1-8b
+            "output_price": 0.08,
+            "sales_multiplier": 8.5
+        },
     }
 
 
@@ -334,7 +409,8 @@ class ModelProvider(Enum):
     MISTRAL = "mistral"
     LLAMA = "llama"
     DEEP_SEEK = "deep_seek"
-    PERPLEXITY = "perplexity"  
+    PERPLEXITY = "perplexity"
+    GROQ = "groq"  
 class BaseAIAgent:
     """
     Agent de base pour l'IA avec support de différents systèmes de gestion documentaire (DMS).
@@ -409,6 +485,14 @@ class BaseAIAgent:
             ModelSize.REASONING_MEDIUM:['sonar-reasoning-pro'],
             ModelSize.REASONING_SMALL:['sonar-reasoning'],
 
+            },
+            ModelProvider.GROQ: {
+                ModelSize.SMALL: ["llama-3.1-8b-instant", "llama3-groq-8b-tool-use"],
+                ModelSize.MEDIUM: ["meta-llama/llama-4-scout-17b-16e-instruct", "openai/gpt-oss-20b", "llama-3.3-70b-versatile"],  # Scout en premier pour vision
+                ModelSize.LARGE: ["openai/gpt-oss-120b"],
+                ModelSize.REASONING_SMALL: ["qwen-qwq-32b"],
+                ModelSize.REASONING_MEDIUM: ["moonshotai/kimi-k2-instruct-0905", "qwen/qwen3-32b"],
+                ModelSize.REASONING_LARGE: ["deepseek-r1-distill-llama-70b"],
             },
         }
         self.current_model = None
@@ -695,6 +779,26 @@ class BaseAIAgent:
             )
                 # Pour Gemini, on retourne une liste avec l'image suivie du texte
                 return [image_part, text]
+            
+            elif provider == ModelProvider.GROQ:
+                # Groq utilise le même format qu'OpenAI (compatible OpenAI API)
+                return [{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": text
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{media_type};base64,{base64.b64encode(img_data).decode('utf-8')}",
+                                "detail": "high"
+                            }
+                        }
+                    ]
+                }]
+            
             else:
                 raise ValueError(f"Provider {provider} non supporté pour le traitement d'images")
 
@@ -754,7 +858,7 @@ class BaseAIAgent:
                     for img in images:
                         img_size = get_image_size(img)
                         processed_img = process_image_if_needed(img, img_size)
-                        all_images.append((processed_img, self.get_image_size(processed_img)))
+                        all_images.append((processed_img, get_image_size(processed_img)))
                 except Exception as e:
                     print(f"Erreur lors du traitement du fichier local {file_path}: {e}")
 
@@ -1074,6 +1178,48 @@ class BaseAIAgent:
                 transformed_tools.append(transformed_tool)
             
             return transformed_tools
+        
+        elif provider == ModelProvider.GROQ:
+            # Groq utilise le format OpenAI standard
+            # Si les outils sont déjà au bon format, on les retourne tels quels
+            # Sinon on applique la transformation OpenAI
+            
+            # Vérifier si les outils sont déjà au format OpenAI
+            if tools and isinstance(tools[0], dict) and "type" in tools[0] and tools[0]["type"] == "function":
+                return tools  # Déjà au bon format
+            
+            # Sinon, transformer depuis le format Anthropic
+            transformed_tools = []
+            for tool in tools:
+                transformed_tool = {
+                    "type": "function",
+                    "function": {
+                        "name": tool.get("name"),
+                        "description": tool.get("description"),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                            "additionalProperties": False
+                        }
+                    }
+                }
+                
+                # Récupération des propriétés depuis input_schema
+                if "input_schema" in tool:
+                    input_schema = tool["input_schema"]
+                    if "properties" in input_schema:
+                        transformed_tool["function"]["parameters"]["properties"] = \
+                            input_schema["properties"]
+                    
+                    # Gérer les champs requis
+                    if "required" in input_schema:
+                        transformed_tool["function"]["parameters"]["required"] = \
+                            input_schema["required"]
+                
+                transformed_tools.append(transformed_tool)
+            
+            return transformed_tools
 
         else:
             raise ValueError(f"Unsupported provider: {provider}")
@@ -1181,6 +1327,32 @@ class BaseAIAgent:
 
             # Utiliser le mapping ou retourner "auto" par défaut
             return openai_mappings.get(tool_choice_type, "auto")
+        
+        elif provider == ModelProvider.GROQ:
+            # Groq utilise le format OpenAI standard
+            if not isinstance(tool_choice, dict):
+                return "auto"
+
+            tool_choice_type = tool_choice.get("type", "auto")
+
+            # Mappings pour Groq (compatible OpenAI)
+            groq_mappings = {
+                "auto": "auto",
+                "any": "required",
+                "none": "none"
+            }
+
+            # Cas spécial pour les outils nommés
+            if tool_choice_type == "tool" and "name" in tool_choice:
+                return {
+                    "type": "function",
+                    "function": {
+                        "name": tool_choice["name"]
+                    }
+                }
+
+            # Utiliser le mapping ou retourner "auto" par défaut
+            return groq_mappings.get(tool_choice_type, "auto")
 
         
 
@@ -1387,6 +1559,16 @@ class BaseAIAgent:
             )
             #print(f"impression de response d'OpenAI")
             # Formatage de la réponse OpenAI pour correspondre au format unifié
+            return data
+        
+        elif provider == ModelProvider.GROQ:
+            data = provider_instance.groq_send_message(
+                content=content,
+                model_name=self._get_model_index(model),
+                stream=stream,
+                max_tokens=max_tokens
+            )
+            # Formatage de la réponse Groq pour correspondre au format unifié
             return data
 
         
@@ -1618,12 +1800,16 @@ class BaseAIAgent:
         # Récupérer le system prompt pour le passer au provider
         system_prompt = getattr(self, 'system_prompt', None)
         
+        # ⭐ TRANSFORMER LES OUTILS POUR LE PROVIDER (format Anthropic → format natif)
+        # Cohérence avec process_tool_use() non-streaming
+        transformed_tools = self._transform_tools_for_provider(tools, provider)
+        
         # Déléguer au provider spécifique (architecture propre ✅)
         if provider == ModelProvider.ANTHROPIC:
             # Déléguer à la méthode du provider Anthropic
             async for event in provider_instance.anthropic_send_message_with_tools_streaming(
                 content=content,
-                tools=tools,
+                tools=transformed_tools,  # Outils transformés
                 tool_mapping=tool_mapping,
                 model_name=model,
                 max_tokens=max_tokens,
@@ -1635,7 +1821,19 @@ class BaseAIAgent:
             # Déléguer à la méthode du provider OpenAI
             async for event in provider_instance.openai_send_message_with_tools_streaming(
                 content=content,
-                tools=tools,
+                tools=transformed_tools,  # Outils transformés
+                tool_mapping=tool_mapping,
+                model_name=model,
+                max_tokens=max_tokens,
+                system_prompt=system_prompt
+            ):
+                yield event
+        
+        elif provider == ModelProvider.GROQ:
+            # Déléguer à la méthode du provider Groq (Kimi K2)
+            async for event in provider_instance.groq_send_message_with_tools_streaming(
+                content=content,
+                tools=transformed_tools,  # Outils transformés (format OpenAI)
                 tool_mapping=tool_mapping,
                 model_name=model,
                 max_tokens=max_tokens,
@@ -1810,8 +2008,9 @@ class BaseAIAgent:
             if tool_choice is not None:
                 transformed_tool_choice = self._transform_tool_choice(tool_choice, provider)
 
-        # Vérification de la disponibilité du DMS si des file_ids sont fournis
-        if not self.dms_system:
+        # Vérification de la disponibilité du DMS SEULEMENT si des file_ids sont fournis
+        # local_files et files_to_download ne nécessitent pas de DMS
+        if file_ids and not self.dms_system:
             raise ValueError("DMS non configuré alors que des file_ids sont fournis")
 
         
@@ -1819,6 +2018,14 @@ class BaseAIAgent:
 
         content=self._transforme_image_for_provider(provider=provider,drive_files_ids=file_ids,files_to_download=files_to_download,
                                                 local_files=local_files,text=text,method=method)
+        
+        # Vérifier que le contenu n'est pas vide (erreur de conversion PDF, etc.)
+        if not content or (isinstance(content, list) and len(content) == 0):
+            raise ValueError(
+                "Aucun contenu d'image n'a pu être généré. "
+                "Vérifiez que pdf2image est installé (pip install pdf2image) "
+                "et que poppler est disponible sur votre système."
+            )
         
         if provider == ModelProvider.ANTHROPIC:
             
@@ -1852,20 +2059,22 @@ class BaseAIAgent:
 
             
         if provider == ModelProvider.OPENAI:
-            # Appeler la méthode openai_send_message
+            # Appeler la méthode openai_send_message avec max_tokens
             if transformed_tools:
                 response = provider_instance.openai_send_message_tool(
                     content=content,
                     model_name=self._get_model_index(model),
                     tool_list=transformed_tools,
                     tool_name=tool_mapping.keys(),
-                    tool_choice=transformed_tool_choice
+                    tool_choice=transformed_tool_choice,
+                    max_tokens=max_tokens
                 )
                 print(f"impression de response avant la transofmration avec outil:{response}")
             else:
                 response = provider_instance.openai_send_message(
                     content=content,
-                    model_name=self._get_model_index(model)
+                    model_name=self._get_model_index(model),
+                    max_tokens=max_tokens
                 )
                 print(f"impression de response avant la transofmration:{response}")
             # Si un résumé final est demandé
@@ -1879,10 +2088,13 @@ class BaseAIAgent:
                 
                 final_summary = provider_instance.openai_send_message(
                     content=resume_prompt,
-                    model_name=self._get_model_index(model)
+                    model_name=self._get_model_index(model),
+                    max_tokens=max_tokens
                 )
                 print(f"impression de response avant la transofmration:{final_summary}")
                 return final_summary
+            
+            return response
         
         if provider == ModelProvider.GEMINI:
             
@@ -1917,6 +2129,56 @@ class BaseAIAgent:
                     max_tokens=max_tokens
                 )
                 return final_response
+        
+        if provider == ModelProvider.GROQ:
+            # Groq utilise le format OpenAI, donc logique similaire
+            # Groq supporte la vision avec des modèles comme llama-4-scout
+            if transformed_tools:
+                response = provider_instance.groq_agent(
+                    content=content,
+                    model_name=self._get_model_index(model),
+                    tools=transformed_tools,
+                    tool_mapping=transformed_tool_mapping,
+                    tool_choice=transformed_tool_choice,
+                    max_tokens=max_tokens
+                )
+                print(f"impression de response vision avec outils pour Groq:{response}")
+            else:
+                response = provider_instance.groq_send_message(
+                    content=content,
+                    model_name=self._get_model_index(model),
+                    max_tokens=max_tokens
+                )
+                print(f"impression de response vision pour Groq:{response}")
+            
+            # Si un résumé final est demandé
+            if final_resume and response:
+                # Extraire le texte de la première réponse
+                response_text = response.get('text_output', response) if isinstance(response, dict) else response
+                
+                resume_prompt = f"""Un document a été traité avec plusieurs pages. 
+                Voici les réponses par page: {response_text}
+                
+                Question initiale: {text}
+                
+                Merci de faire une synthèse des réponses."""
+                
+                final_summary = provider_instance.groq_send_message(
+                    content=resume_prompt,
+                    model_name=self._get_model_index(model),
+                    max_tokens=max_tokens
+                )
+                print(f"impression du résumé final pour Groq:{final_summary}")
+                
+                # Retourner uniquement le texte pour éviter les problèmes de sérialisation
+                if isinstance(final_summary, dict) and 'text_output' in final_summary:
+                    return final_summary['text_output']
+                return final_summary
+            
+            # Retourner la réponse directe (sans résumé)
+            if isinstance(response, dict) and 'text_output' in response:
+                return response['text_output']
+            return response
 
 
         else:
@@ -2029,6 +2291,19 @@ class BaseAIAgent:
             )
             return response  # Transformation de la réponse
         
+        elif provider == ModelProvider.GROQ:
+            response = provider_instance.groq_agent(
+                content=content,
+                model_name=self._get_model_index(model),
+                tools=transformed_tools,  # Utilise les outils transformés
+                tool_mapping=transformed_mapping,
+                tool_choice=transformed_tool_choice,
+                stream=stream,
+                raw_output=raw_output,
+                max_tokens=max_tokens
+            )
+            return response
+        
         else:
             raise ValueError(f"Provider {provider} not implemented")
 
@@ -2080,6 +2355,20 @@ class BaseAIAgent:
             return self.provider_models[ModelProvider.PERPLEXITY][ModelSize.MEDIUM][0]
         elif model in self.provider_models[ModelProvider.PERPLEXITY][ModelSize.LARGE]:
             return self.provider_models[ModelProvider.PERPLEXITY][ModelSize.LARGE][0]
+        
+        # Groq models
+        elif model in self.provider_models[ModelProvider.GROQ][ModelSize.SMALL]:
+            return self.provider_models[ModelProvider.GROQ][ModelSize.SMALL][0]
+        elif model in self.provider_models[ModelProvider.GROQ][ModelSize.MEDIUM]:
+            return self.provider_models[ModelProvider.GROQ][ModelSize.MEDIUM][0]
+        elif model in self.provider_models[ModelProvider.GROQ][ModelSize.LARGE]:
+            return self.provider_models[ModelProvider.GROQ][ModelSize.LARGE][0]
+        elif model in self.provider_models[ModelProvider.GROQ][ModelSize.REASONING_SMALL]:
+            return self.provider_models[ModelProvider.GROQ][ModelSize.REASONING_SMALL][0]
+        elif model in self.provider_models[ModelProvider.GROQ][ModelSize.REASONING_MEDIUM]:
+            return self.provider_models[ModelProvider.GROQ][ModelSize.REASONING_MEDIUM][0]
+        elif model in self.provider_models[ModelProvider.GROQ][ModelSize.REASONING_LARGE]:
+            return self.provider_models[ModelProvider.GROQ][ModelSize.REASONING_LARGE][0]
 
 
         raise ValueError(f"Unknown model: {model}")
@@ -2148,7 +2437,7 @@ class BaseAIAgent:
         timestamp: str,
         payload: Any,
         provider: Optional[ModelProvider] = None
-    ) -> None:
+        ) -> None:
         """Ajoute ou remplace le bloc de log système pour un provider donné."""
 
         if provider is None:
@@ -2205,7 +2494,7 @@ class BaseAIAgent:
         timestamp: str,
         payload: Any,
         provider: Optional[ModelProvider] = None
-    ) -> None:
+        ) -> None:
         """Ajoute un log système dans l'historique sans perturber les échanges principaux."""
 
         if provider is None:
@@ -2287,6 +2576,17 @@ class BaseAIAgent:
                 self.chat_history[provider.value] = transformed_history
                 logger.debug(f"[LOAD_HISTORY] Historique synchronisé dans BaseAIAgent.chat_history['{provider.value}']")
                 return True
+        
+        elif provider == ModelProvider.OPENAI:
+            # Format OpenAI: [{"role": "user/assistant", "content": "message"}]
+            transformed_history = self._transform_for_openai(history_to_load)
+            if hasattr(instance, 'chat_history'):
+                # Mettre à jour l'historique du provider (NEW_OpenAiAgent)
+                instance.chat_history = transformed_history
+                # ⭐ IMPORTANT: Synchroniser avec BaseAIAgent.chat_history (dict)
+                self.chat_history[provider.value] = transformed_history
+                logger.debug(f"[LOAD_HISTORY] Historique synchronisé dans BaseAIAgent.chat_history['{provider.value}']")
+                return True
                 
         # Ajouter d'autres providers ici avec leurs transformations spécifiques
                 
@@ -2309,6 +2609,31 @@ class BaseAIAgent:
                 # Anthropic n'accepte que 'user' ou 'assistant' comme rôles
                 role = msg['role']
                 if role not in ['user', 'assistant']:
+                    continue
+                    
+                transformed.append({
+                    "role": role,
+                    "content": msg['content']
+                })
+        return transformed
+
+    def _transform_for_openai(self, history):
+        """
+        Transforme l'historique au format attendu par OpenAI.
+        
+        Args:
+            history: L'historique à transformer
+            
+        Returns:
+            list: L'historique transformé au format OpenAI
+        """
+        transformed = []
+        for msg in history:
+            # Assurez-vous que le message a le bon format
+            if isinstance(msg, dict) and 'role' in msg and 'content' in msg:
+                # OpenAI accepte 'user', 'assistant', et 'system' comme rôles
+                role = msg['role']
+                if role not in ['user', 'assistant', 'system']:
                     continue
                     
                 transformed.append({
@@ -2520,6 +2845,7 @@ class BaseAIAgent:
     def add_user_message(self, message: str, provider: Optional[ModelProvider] = None):
         """
         Point d'entrée unifié pour l'ajout de messages utilisateur.
+        Appelle automatiquement la méthode du provider sans vérification explicite.
         """
         if provider is None:
             if self.default_provider is None:
@@ -2527,21 +2853,17 @@ class BaseAIAgent:
             provider = self.default_provider
         
         provider_instance = self.get_provider_instance(provider)
-
-        if provider == ModelProvider.ANTHROPIC:
-            provider_instance.add_user_message(message)
-        elif provider == ModelProvider.OPENAI:
-            provider_instance.add_user_message(message)
-        elif provider == ModelProvider.GEMINI:
-            provider_instance.add_user_message(message)
-        elif provider == ModelProvider.DEEP_SEEK:
+        
+        # Appel direct de la méthode si elle existe
+        if hasattr(provider_instance, 'add_user_message') and callable(getattr(provider_instance, 'add_user_message')):
             provider_instance.add_user_message(message)
         else:
-            raise ValueError(f"Provider {provider} not implemented")
+            raise ValueError(f"Provider {provider} does not implement add_user_message()")
 
     def add_ai_message(self, message: str, provider: Optional[ModelProvider] = None):
         """
-        Point d'entrée unifié pour l'ajout de messages utilisateur.
+        Point d'entrée unifié pour l'ajout de messages AI.
+        Appelle automatiquement la méthode du provider sans vérification explicite.
         """
         if provider is None:
             if self.default_provider is None:
@@ -2549,17 +2871,12 @@ class BaseAIAgent:
             provider = self.default_provider
         
         provider_instance = self.get_provider_instance(provider)
-
-        if provider == ModelProvider.ANTHROPIC:
-            provider_instance.add_ai_message(message)
-        elif provider == ModelProvider.OPENAI:
-            provider_instance.add_ai_message(message)
-        elif provider == ModelProvider.GEMINI:
-            provider_instance.add_ai_message(message)
-        elif provider == ModelProvider.DEEP_SEEK:
+        
+        # Appel direct de la méthode si elle existe
+        if hasattr(provider_instance, 'add_ai_message') and callable(getattr(provider_instance, 'add_ai_message')):
             provider_instance.add_ai_message(message)
         else:
-            raise ValueError(f"Provider {provider} not implemented")
+            raise ValueError(f"Provider {provider} does not implement add_ai_message()")
 
     def add_messages_ai_hu(self, message: str, ai_message: Optional[str] = None, mode: str = 'simple', provider: Optional[ModelProvider] = None):
         """
@@ -2574,6 +2891,7 @@ class BaseAIAgent:
         instance = self.get_provider_instance(provider if provider else self.default_provider)
         instance.add_user_message(message)
         instance.add_ai_message(ai_message)
+    
     def agent_workflow(self,
                 initial_user_input: str,
                 size: ModelSize,
@@ -5972,12 +6290,18 @@ class NEW_OpenAiAgent:
         self.space_manager = space_manager
         self.collection_name = collection_name
         self.job_id = job_id
+        self.system_prompt = None
         self.api_key = get_secret('openai_pinnokio')
-        self.client=OpenAI(api_key=self.api_key)
+        # Client synchrone pour les appels bloquants
+        self.client = OpenAI(api_key=self.api_key)
+        # Client asynchrone pour le streaming et les opérations async
+        self.client_stream = AsyncOpenAI(api_key=self.api_key)
         self.token_usage = {}
         self.current_model = None
-        self.models=['gpt-4o-mini','gpt-4o', 'gpt-4-turbo', 'gpt-3.5-turbo-0125']
-        self.reasoning_models=['o1-mini-2024-09-12','o1-2024-12-17']
+        self.models = ['gpt-4o-mini','gpt-4o', 'gpt-4-turbo', 'gpt-3.5-turbo-0125']
+        self.reasoning_models = ['o1-mini-2024-09-12','o1-2024-12-17']
+        # ThreadPoolExecutor pour l'exécution de fonctions synchrones dans un contexte async
+        self.thread_pool = ThreadPoolExecutor()
 
     def update_token_usage(self, raw_response):
         """
@@ -6303,7 +6627,7 @@ class NEW_OpenAiAgent:
                 }
             }]
 
-    def openai_send_message(self, content, model_index=None,model_name=None):
+    def openai_send_message(self, content, model_index=None, model_name=None, max_tokens=1024):
         """
         Envoie un message en utilisant un des modèles spécifiés par index.
         Liste des modèles : ['gpt-4o', 'gpt-4-turbo', 'gpt-3.5-turbo-0125']
@@ -6311,6 +6635,8 @@ class NEW_OpenAiAgent:
         Args:
             content (str): Le contenu du message à envoyer.
             model_index (int): L'index du modèle à utiliser pour envoyer le message.
+            model_name (str): Le nom du modèle à utiliser (si model_index n'est pas un int).
+            max_tokens (int): Nombre maximum de tokens pour la réponse (défaut: 1024).
         """
         
         
@@ -6335,11 +6661,20 @@ class NEW_OpenAiAgent:
 
         
         try:
-            response = self.client.chat.completions.create(
-                model=chosen_model,
-                messages=messages,
-                max_tokens=1024
-            )
+            # Utiliser max_completion_tokens pour les modèles compatibles (GPT-4o, etc.)
+            # ou max_tokens pour les anciens modèles
+            api_params = {
+                "model": chosen_model,
+                "messages": messages,
+            }
+            
+            # GPT-4o et modèles récents utilisent max_completion_tokens
+            if "gpt-4o" in chosen_model.lower() or "gpt-4-turbo" in chosen_model.lower():
+                api_params["max_completion_tokens"] = max_tokens
+            else:
+                api_params["max_tokens"] = max_tokens
+            
+            response = self.client.chat.completions.create(**api_params)
             #print(response)
             self.update_token_usage(response)
             ai_response = response.choices[0].message.content
@@ -6428,10 +6763,55 @@ class NEW_OpenAiAgent:
                 print(f"🔵 Model: {chosen_model}")
                 print(f"🔵 Tools count: {len(tools) if tools else 0}")
                 
+                # 🔧 NETTOYER le chat_history pour OpenAI (enlever formats Anthropic)
+                cleaned_messages = []
+                for msg in self.chat_history:
+                    if not isinstance(msg, dict):
+                        continue
+                    
+                    role = msg.get("role")
+                    content_msg = msg.get("content")
+                    
+                    # Si le message a des tool_calls (format OpenAI natif), garder tel quel
+                    if "tool_calls" in msg:
+                        cleaned_messages.append(msg)
+                        continue
+                    
+                    # Si le message a role="tool" (format OpenAI natif), garder tel quel
+                    if role == "tool":
+                        cleaned_messages.append(msg)
+                        continue
+                    
+                    # Si content est une string, garder tel quel
+                    if isinstance(content_msg, str):
+                        cleaned_messages.append(msg)
+                        continue
+                    
+                    # Si content est None ou manquant, garder le message tel quel (peut avoir tool_calls)
+                    if content_msg is None:
+                        cleaned_messages.append(msg)
+                        continue
+                    
+                    # Si content est une liste (format Anthropic), extraire seulement le texte
+                    if isinstance(content_msg, list):
+                        text_parts = []
+                        for item in content_msg:
+                            if isinstance(item, dict) and item.get("type") == "text":
+                                text_parts.append(item.get("text", ""))
+                        
+                        # Créer message nettoyé avec seulement le texte
+                        if text_parts:
+                            cleaned_messages.append({
+                                "role": role,
+                                "content": " ".join(text_parts)
+                            })
+                
+                print(f"🔧 Messages nettoyés: {len(self.chat_history)} → {len(cleaned_messages)}")
+                
                 # Déterminer le bon paramètre de tokens
                 api_params = {
                     "model": chosen_model,
-                    "messages": self.chat_history,
+                    "messages": cleaned_messages,
                     "stream": True
                 }
                 
@@ -6457,56 +6837,78 @@ class NEW_OpenAiAgent:
                 tool_calls_data = {}  # Dictionnaire pour stocker les appels d'outils en cours
                 tool_results = []
                 
-                # Créer le stream OpenAI
-                stream = self.client.chat.completions.create(**api_params)
-                
-                print(f"🔵 Stream OpenAI créé, début de l'itération...")
+                # ✅ Créer le stream OpenAI avec fermeture manuelle (le SDK n'est pas un context manager async)
+                print(f"🔵 Création du stream OpenAI (outil) ...")
+                stream = await self.client_stream.chat.completions.create(**api_params)
+                print(f"🔵 Stream OpenAI (outil) créé, début de l'itération ...")
                 chunk_count = 0
-                
-                # Itérer sur les chunks du stream
-                for chunk in stream:
-                    if chunk.choices and len(chunk.choices) > 0:
-                        delta = chunk.choices[0].delta
-                        chunk_count += 1
-                        
-                        # Vérifier si le delta contient du texte
-                        if hasattr(delta, 'content') and delta.content:
-                            text = delta.content
-                            accumulated_text += text
+                try:
+                    # Itérer sur les chunks du stream de manière asynchrone
+                    async for chunk in stream:
+                        if chunk.choices and len(chunk.choices) > 0:
+                            delta = chunk.choices[0].delta
+                            chunk_count += 1
                             
-                            yield {
-                                "type": "text",
-                                "content": text,
-                                "is_final": False,
-                                "model": chosen_model
-                            }
-                            await asyncio.sleep(0)
-                        
-                        # Vérifier si le delta contient des appels d'outils
-                        if hasattr(delta, 'tool_calls') and delta.tool_calls:
-                            for tool_call_delta in delta.tool_calls:
-                                tool_call_id = tool_call_delta.id if tool_call_delta.id else None
-                                tool_index = tool_call_delta.index
+                            # Vérifier si le delta contient du texte
+                            if hasattr(delta, 'content') and delta.content:
+                                text = delta.content
+                                accumulated_text += text
                                 
-                                # Initialiser l'entrée pour ce tool_call si nécessaire
-                                if tool_index not in tool_calls_data:
-                                    tool_calls_data[tool_index] = {
-                                        "id": tool_call_id,
-                                        "name": "",
-                                        "arguments": ""
-                                    }
-                                
-                                # Mettre à jour l'ID si fourni
-                                if tool_call_id:
-                                    tool_calls_data[tool_index]["id"] = tool_call_id
-                                
-                                # Accumuler le nom de la fonction
-                                if hasattr(tool_call_delta.function, 'name') and tool_call_delta.function.name:
-                                    tool_calls_data[tool_index]["name"] += tool_call_delta.function.name
-                                
-                                # Accumuler les arguments
-                                if hasattr(tool_call_delta.function, 'arguments') and tool_call_delta.function.arguments:
-                                    tool_calls_data[tool_index]["arguments"] += tool_call_delta.function.arguments
+                                yield {
+                                    "type": "text_chunk",
+                                    "chunk": text
+                                }
+                                await asyncio.sleep(0)
+                            
+                            # Vérifier si le delta contient des appels d'outils
+                            if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                                for tool_call_delta in delta.tool_calls:
+                                    tool_call_id = tool_call_delta.id if tool_call_delta.id else None
+                                    tool_index = tool_call_delta.index
+                                    
+                                    # Initialiser l'entrée pour ce tool_call si nécessaire
+                                    if tool_index not in tool_calls_data:
+                                        tool_calls_data[tool_index] = {
+                                            "id": tool_call_id,
+                                            "name": "",
+                                            "arguments": "",
+                                            "started": False  # Pour tracker si on a déjà envoyé tool_use_start
+                                        }
+                                    
+                                    # Mettre à jour l'ID si fourni
+                                    if tool_call_id:
+                                        tool_calls_data[tool_index]["id"] = tool_call_id
+                                    
+                                    # Accumuler le nom de la fonction
+                                    if hasattr(tool_call_delta.function, 'name') and tool_call_delta.function.name:
+                                        tool_calls_data[tool_index]["name"] += tool_call_delta.function.name
+                                        
+                                        # Yield tool_use_start dès qu'on reçoit le nom (première fois seulement)
+                                        if not tool_calls_data[tool_index]["started"]:
+                                            tool_calls_data[tool_index]["started"] = True
+                                            yield {
+                                                "type": "tool_use_start",
+                                                "tool_name": tool_calls_data[tool_index]["name"],
+                                                "tool_id": tool_call_id
+                                            }
+                                            await asyncio.sleep(0)
+                                    
+                                    # Accumuler les arguments
+                                    if hasattr(tool_call_delta.function, 'arguments') and tool_call_delta.function.arguments:
+                                        tool_calls_data[tool_index]["arguments"] += tool_call_delta.function.arguments
+                finally:
+                    # Fermer proprement le stream si le SDK expose une méthode (close/aclose)
+                    close_coro = getattr(stream, "aclose", None)
+                    if callable(close_coro):
+                        result = close_coro()
+                        if asyncio.iscoroutine(result):
+                            await result
+                    else:
+                        close_fn = getattr(stream, "close", None)
+                        if callable(close_fn):
+                            result = close_fn()
+                            if asyncio.iscoroutine(result):
+                                await result
                 
                 print(f"🔵 Streaming terminé, {chunk_count} chunks reçus")
                 print(f"🔵 Tool calls détectés: {len(tool_calls_data)}")
@@ -6529,14 +6931,24 @@ class NEW_OpenAiAgent:
                             "model": chosen_model
                         }
                         
+                        # Permettre l'annulation entre les tool calls
+                        await asyncio.sleep(0)
+                        
                         # Exécuter la fonction si mapping fourni
                         tool_output = None
                         if tool_mapping:
                             function_or_none = None
-                            for tool_dict in tool_mapping:
-                                if tool_name in tool_dict:
-                                    function_or_none = tool_dict[tool_name]
-                                    break
+                            
+                            # Gérer les deux formats : dict ou liste de dicts
+                            if isinstance(tool_mapping, dict):
+                                # Format dict simple : {"tool_name": function}
+                                function_or_none = tool_mapping.get(tool_name)
+                            elif isinstance(tool_mapping, list):
+                                # Format liste de dicts : [{"tool_name": function}]
+                                for tool_dict in tool_mapping:
+                                    if tool_name in tool_dict:
+                                        function_or_none = tool_dict[tool_name]
+                                        break
                             
                             if callable(function_or_none):
                                 try:
@@ -6553,10 +6965,13 @@ class NEW_OpenAiAgent:
                                         "type": "tool_result",
                                         "tool_name": tool_name,
                                         "tool_id": tool_id,
-                                        "tool_output": tool_output,
+                                        "result": tool_output,  # Le workflow unifié attend "result"
                                         "is_final": False,
                                         "model": chosen_model
                                     }
+                                    
+                                    # Permettre l'annulation après l'exécution de l'outil
+                                    await asyncio.sleep(0)
                                     
                                     tool_results.append({
                                         "tool_name": tool_name,
@@ -6579,12 +6994,40 @@ class NEW_OpenAiAgent:
                     except Exception as e:
                         print(f"🔴 Erreur exécution outil {tool_name}: {e}")
                 
-                # Ajouter la réponse à l'historique
-                if accumulated_text:
-                    self.add_ai_message(accumulated_text)
-                elif tool_results:
-                    # Si uniquement des tools sans texte, ajouter une représentation
-                    self.add_ai_message(f"[Utilisation d'outils: {', '.join([r['tool_name'] for r in tool_results])}]")
+                # Ajouter la réponse à l'historique avec le format OpenAI pour les tool_calls
+                # Construire le message assistant avec tool_calls
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": accumulated_text if accumulated_text else None
+                }
+                
+                # Ajouter les tool_calls si présents (format OpenAI requis)
+                if tool_calls_data:
+                    assistant_msg["tool_calls"] = []
+                    for tool_index, tool_data in tool_calls_data.items():
+                        assistant_msg["tool_calls"].append({
+                            "id": tool_data["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tool_data["name"],
+                                "arguments": tool_data["arguments"]  # déjà en string JSON
+                            }
+                        })
+                
+                # Ajouter le message assistant à l'historique
+                self.chat_history.append(assistant_msg)
+                
+                # Ajouter les résultats d'outils (messages avec role="tool")
+                for tool_result in tool_results:
+                    tool_msg = {
+                        "role": "tool",
+                        "tool_call_id": tool_result["tool_id"],
+                        "content": json.dumps(tool_result["output"]) if isinstance(tool_result["output"], (dict, list)) else str(tool_result["output"])
+                    }
+                    self.chat_history.append(tool_msg)
+                
+                # Permettre l'annulation avant le signal final
+                await asyncio.sleep(0)
                 
                 # Signal de fin
                 yield {
@@ -6685,34 +7128,48 @@ class NEW_OpenAiAgent:
                     "status": "connecting"
                 }
                 
-                # Créer le stream OpenAI
-                stream = self.client.chat.completions.create(**api_params)
-                
-                print(f"🔵 Stream OpenAI créé, début de l'itération...")
+                # ✅ Créer le stream OpenAI avec fermeture manuelle (le SDK n'est pas un context manager async)
+                print(f"🔵 Création du stream OpenAI (texte) ...")
+                stream = await self.client_stream.chat.completions.create(**api_params)
+                print(f"🔵 Stream OpenAI (texte) créé, début de l'itération ...")
                 chunk_count = 0
                 accumulated_content = ""
                 
-                # Itérer sur les chunks du stream
-                for chunk in stream:
-                    if chunk.choices and len(chunk.choices) > 0:
-                        delta = chunk.choices[0].delta
-                        
-                        # Vérifier si le delta contient du contenu
-                        if hasattr(delta, 'content') and delta.content:
-                            chunk_count += 1
-                            content_text = delta.content
-                            accumulated_content += content_text
+                try:
+                    # Itérer sur les chunks du stream de manière asynchrone
+                    async for chunk in stream:
+                        if chunk.choices and len(chunk.choices) > 0:
+                            delta = chunk.choices[0].delta
                             
-                            print(f"🔵 Chunk #{chunk_count} reçu: '{content_text[:50] if len(content_text) > 50 else content_text}...'")
-                            
-                            yield {
-                                "content": content_text,
-                                "is_final": False,
-                                "model": chosen_model
-                            }
-                            
-                            # Petite pause pour permettre l'envoi immédiat
-                            await asyncio.sleep(0)
+                            # Vérifier si le delta contient du contenu
+                            if hasattr(delta, 'content') and delta.content:
+                                chunk_count += 1
+                                content_text = delta.content
+                                accumulated_content += content_text
+                                
+                                print(f"🔵 Chunk #{chunk_count} reçu: '{content_text[:50] if len(content_text) > 50 else content_text}...'")
+                                
+                                yield {
+                                    "content": content_text,
+                                    "is_final": False,
+                                    "model": chosen_model
+                                }
+                                
+                                # Petite pause pour permettre l'envoi immédiat
+                                await asyncio.sleep(0)
+                finally:
+                    # Fermer proprement le stream si possible
+                    close_coro = getattr(stream, "aclose", None)
+                    if callable(close_coro):
+                        result = close_coro()
+                        if asyncio.iscoroutine(result):
+                            await result
+                    else:
+                        close_fn = getattr(stream, "close", None)
+                        if callable(close_fn):
+                            result = close_fn()
+                            if asyncio.iscoroutine(result):
+                                await result
                 
                 print(f"🔵 Streaming terminé, {chunk_count} chunks reçus")
                 
@@ -6831,6 +7288,111 @@ class NEW_OpenAiAgent:
         #print(f"impression de reponses final dans basic_handle_response:{data}")
         return data
 
+    async def run_in_thread(self, func, *args, **kwargs):
+        """
+        Helper pour exécuter des fonctions synchrones dans le thread pool.
+        Permet d'utiliser des fonctions bloquantes dans un contexte async.
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self.thread_pool, partial(func, *args, **kwargs))
+
+    def openai_send_message_sync(
+        self,
+        content: str,
+        model_name: Optional[str] = None,
+        model_index: Optional[int] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_mapping: Optional[List[Dict[str, Callable]]] = None,
+        streaming: bool = False,
+        max_tokens: int = 1024
+    ) -> Union[Dict[str, Any], str]:
+        """
+        Méthode synchrone unifiée pour l'envoi de messages avec OpenAI.
+        Équivalent à anthropic_send_message pour uniformiser l'interface.
+        
+        Args:
+            content (str): Le contenu du message
+            model_name (Optional[str]): Nom du modèle à utiliser
+            model_index (Optional[int]): Index du modèle dans self.models
+            tools (Optional[List[Dict]]): Liste des outils (format OpenAI)
+            tool_mapping (Optional[List[Dict]]): Mapping des outils vers leurs fonctions
+            streaming (bool): Si True, retourne un générateur (non implémenté en sync)
+            max_tokens (int): Nombre maximum de tokens
+            
+        Returns:
+            Union[Dict[str, Any], str]: Réponse formatée ou texte brut
+        """
+        # Utiliser la méthode openai_agent si des outils sont fournis
+        if tools and tool_mapping:
+            return self.openai_agent(
+                content=content,
+                model_name=model_name,
+                model_index=model_index,
+                tools=tools,
+                tool_mapping=tool_mapping,
+                tool_choice="auto",
+                stream=False,
+                raw_output=False,
+                max_tokens=max_tokens
+            )
+        else:
+            # Utiliser openai_send_message pour un message simple
+            return self.openai_send_message(
+                content=content,
+                model_name=model_name,
+                model_index=model_index
+            )
+
+    async def openai_send_message_with_tools_streaming(
+        self,
+        content: str,
+        tools: List[Dict[str, Any]],
+        tool_mapping: Dict[str, Callable],
+        model_name: str,
+        max_tokens: int = 2048,
+        system_prompt: Optional[str] = None
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Point d'entrée unifié pour BaseAIAgent - streaming avec outils pour OpenAI.
+        Cette méthode est appelée par BaseAIAgent.process_tool_use_streaming().
+        
+        Args:
+            content (str): Le contenu du message
+            tools (List[Dict]): Liste des outils au format OpenAI
+            tool_mapping (Dict[str, Callable]): Mapping des outils vers leurs fonctions
+            model_name (str): Nom du modèle à utiliser
+            max_tokens (int): Nombre maximum de tokens
+            system_prompt (Optional[str]): Prompt système optionnel
+            
+        Yields:
+            Dict[str, Any]: Chunks de réponse au format uniforme BaseAIAgent:
+                {
+                    "type": "text" | "tool_use" | "tool_result" | "final" | "error",
+                    "content": str,
+                    "tool_name": str,
+                    "tool_input": dict,
+                    "tool_output": any,
+                    "is_final": bool,
+                    "model": str
+                }
+        """
+        # Mettre à jour le system prompt si fourni
+        if system_prompt:
+            self.system_prompt = system_prompt
+        
+        # Transformer tool_mapping en liste de dicts si c'est un dict simple
+        tool_mapping_list = tool_mapping if isinstance(tool_mapping, list) else [tool_mapping]
+        
+        # Déléguer à la méthode existante openai_send_message_tool_streaming
+        async for chunk in self.openai_send_message_tool_streaming(
+            content=content,
+            model_name=model_name,
+            tools=tools,
+            tool_mapping=tool_mapping_list,
+            tool_choice="auto",
+            max_tokens=max_tokens
+        ):
+            yield chunk
 
 
 class NEW_GeminiAgent:
@@ -7409,6 +7971,591 @@ class NEW_PERPLEX_AGENT:
         self.agent_init()
         data=self.search(question)
         return data
+
+class NEW_GROQ_AGENT:
+    def __init__(self, space_manager=None, collection_name=None, job_id=None):
+        """
+        Initialise la classe NEW_GROQ_AGENT avec la clé API nécessaire pour authentifier les requêtes.
+        
+        :param space_manager: Gestionnaire d'espace (optionnel).
+        :param collection_name: Nom de la collection (optionnel).
+        :param job_id: ID du job (optionnel).
+        """
+        self.chat_history = []
+        self.space_manager = space_manager
+        self.collection_name = collection_name
+        self.job_id = job_id
+        self.api_key = get_secret('groq_api_key')
+        self.client = OpenAI(api_key=self.api_key, base_url="https://api.groq.com/openai/v1")
+        self.token_usage = {}
+        self.current_model = None
+        self.models = [
+            # Basic Models
+            'llama-3.1-8b-instant',
+            'llama-3.3-70b-versatile',
+            'openai/gpt-oss-120b',
+            'openai/gpt-oss-20b',
+            # Vision Models
+            'meta-llama/llama-4-scout-17b-16e-instruct',
+            'meta-llama/llama-4-maverick-17b-128e-instruct',
+            # Reasoning Models (Streaming + Reasoning + Tools)
+            'moonshotai/kimi-k2-instruct-0905',
+            'qwen/qwen3-32b',
+            'qwen-qwq-32b',
+            'deepseek-r1-distill-llama-70b',
+            # Tool-Use Specialized
+            'llama3-groq-70b-tool-use',
+            'llama3-groq-8b-tool-use'
+        ]
+        self.system_prompt = None
+    
+    def get_models(self):
+        """Récupère la liste des modèles disponibles sur Groq."""
+        get_models = self.client.models.list()
+        print(f"Modèles disponibles Groq: {get_models}")
+        return get_models
+
+    def update_token_usage(self, raw_response):
+        """
+        Met à jour les compteurs de tokens pour Groq.
+        
+        Args:
+            raw_response: La réponse brute de Groq contenant les informations d'utilisation
+        """
+        if hasattr(raw_response, 'model') and hasattr(raw_response, 'usage'):
+            model = raw_response.model
+            
+            if model not in self.token_usage:
+                self.token_usage[model] = {
+                    'total_input_tokens': 0,
+                    'total_output_tokens': 0
+                }
+
+            # Mise à jour des tokens d'entrée (prompt)
+            prompt_tokens = raw_response.usage.prompt_tokens
+            self.token_usage[model]['total_input_tokens'] += prompt_tokens
+
+            # Mise à jour des tokens de sortie (completion)
+            completion_tokens = raw_response.usage.completion_tokens
+            self.token_usage[model]['total_output_tokens'] += completion_tokens
+
+            # Mise à jour du modèle courant
+            self.current_model = model
+
+            # Gérer les détails supplémentaires si disponibles
+            if hasattr(raw_response.usage, 'prompt_tokens_details'):
+                cached_tokens = getattr(raw_response.usage.prompt_tokens_details, 'cached_tokens', 0)
+                
+                if 'details' not in self.token_usage[model]:
+                    self.token_usage[model]['details'] = {}
+                
+                self.token_usage[model]['details'].update({
+                    'cached_tokens': cached_tokens
+                })
+
+    def get_total_tokens(self):
+        """
+        Retourne l'utilisation totale des tokens pour chaque modèle.
+        
+        Returns:
+            dict: Un dictionnaire contenant l'utilisation des tokens par modèle
+        """
+        token_stats = {}
+        
+        for model, usage in self.token_usage.items():
+            stats = {
+                'total_input_tokens': usage['total_input_tokens'],
+                'total_output_tokens': usage['total_output_tokens'],
+                'model': model
+            }
+            
+            # Ajouter les détails si disponibles
+            if 'details' in usage:
+                stats['details'] = usage['details']
+                
+            token_stats[model] = stats
+            
+        return token_stats
+
+    def reset_token_counters(self):
+        """
+        Réinitialise tous les compteurs de tokens pour tous les modèles.
+        """
+        self.token_usage = {}
+
+    def flush_chat_history(self):
+        """Réinitialise l'historique des chats et les compteurs de tokens."""
+        self.chat_history = []
+        self.reset_token_counters()
+    
+    def add_user_message(self, content):
+        """Ajoute un message utilisateur à l'historique."""
+        if isinstance(content, dict):
+            content = json.dumps(content)
+        self.chat_history.append({'role': 'user', 'content': content})
+    
+    def add_ai_message(self, content):
+        """Ajoute un message assistant à l'historique."""
+        if isinstance(content, dict):
+            content = json.dumps(content)
+        self.chat_history.append({'role': 'assistant', 'content': content})
+
+    def update_system_prompt(self, content):
+        """Met à jour le prompt système."""
+        if isinstance(content, dict):
+            content = json.dumps(content)
+        self.system_prompt = content
+        # Ajouter ou mettre à jour le message système au début de l'historique
+        if self.chat_history and self.chat_history[0].get('role') == 'system':
+            self.chat_history[0] = {'role': 'system', 'content': content}
+        else:
+            self.chat_history.insert(0, {'role': 'system', 'content': content})
+
+    def find_tool_by_name(self, tools_list, tool_name):
+        """
+        Recherche un outil spécifique dans la liste des outils par son nom.
+        
+        Args:
+            tools_list: Liste des outils disponibles
+            tool_name: Nom de l'outil à rechercher
+            
+        Returns:
+            L'outil trouvé ou None
+        """
+        for tool in tools_list:
+            if tool['function']['name'] == tool_name:
+                return tool
+        return None
+
+    def groq_agent(self, content, model_index=None, model_name=None, tools=None, 
+                   tool_mapping=None, verbose=True, tool_choice=None, stream=False, 
+                   raw_output=False, max_tokens=1024):
+        """
+        Agent principal Groq avec support des outils.
+        
+        Args:
+            content: Le contenu du message
+            model_index: Index du modèle dans la liste
+            model_name: Nom du modèle (prioritaire sur model_index)
+            tools: Liste des outils disponibles
+            tool_mapping: Mapping des noms d'outils vers leurs fonctions
+            verbose: Affichage détaillé
+            tool_choice: Configuration du choix d'outil
+            stream: Activer le streaming
+            raw_output: Retourner la réponse brute
+            max_tokens: Nombre maximum de tokens
+            
+        Returns:
+            La réponse de l'agent
+        """
+        # Détermination du modèle
+        if model_name:
+            chosen_model = model_name
+        elif isinstance(model_index, int):
+            chosen_model = self.models[model_index]
+        else:
+            chosen_model = self.models[0]  # Par défaut
+
+        if verbose:
+            print(f"Modèle Groq choisi : {chosen_model}")
+        
+        # Déterminer si le contenu est de type vision
+        is_vision_content = isinstance(content, list) and any(isinstance(item, dict) and 
+                        ('type' in item or 'role' in item) for item in content)
+        
+        if is_vision_content:
+            # Pour le contenu vision, nous utilisons directement le format fourni
+            messages = content
+        else:
+            # Pour le texte simple, ajouter à l'historique
+            self.add_user_message(content)
+            # Préparation des messages
+            messages = self.chat_history.copy()
+        
+        # Configuration de l'appel API
+        api_params = {
+            'model': chosen_model,
+            'messages': messages,
+            'max_tokens': max_tokens,
+            'stream': stream
+        }
+        
+        # Ajout des outils si fournis
+        if tools:
+            api_params['tools'] = tools
+            if tool_choice:
+                api_params['tool_choice'] = tool_choice
+        
+        try:
+            response = self.client.chat.completions.create(**api_params)
+            
+            # Mise à jour du suivi des tokens
+            if not stream:
+                self.update_token_usage(response)
+            
+            # Retour de la réponse brute si demandé
+            if raw_output:
+                return response
+            
+            # Traitement de la réponse
+            if not stream:
+                message = response.choices[0].message
+                
+                # Vérifier si l'assistant a demandé d'utiliser des outils
+                if hasattr(message, 'tool_calls') and message.tool_calls:
+                    tool_results = []
+                    
+                    for tool_call in message.tool_calls:
+                        tool_name = tool_call.function.name
+                        tool_args = json.loads(tool_call.function.arguments)
+                        
+                        if verbose:
+                            print(f"Appel de l'outil: {tool_name}")
+                            print(f"Arguments: {tool_args}")
+                        
+                        # Exécuter l'outil si le mapping existe
+                        if tool_mapping and tool_name in tool_mapping:
+                            tool_function = tool_mapping[tool_name]
+                            
+                            # Vérifier si la fonction est callable (pas None)
+                            if callable(tool_function):
+                                # Exécution réelle de la fonction
+                                tool_result = tool_function(**tool_args)
+                                tool_results.append({
+                                    'tool_call_id': tool_call.id,
+                                    'role': 'tool',
+                                    'name': tool_name,
+                                    'content': json.dumps(tool_result) if isinstance(tool_result, dict) else str(tool_result)
+                                })
+                            else:
+                                # Structured output : pas d'exécution, juste retourner les arguments
+                                tool_results.append({
+                                    'tool_call_id': tool_call.id,
+                                    'role': 'tool',
+                                    'name': tool_name,
+                                    'content': json.dumps(tool_args)
+                                })
+                    
+                    # Retourner les résultats des outils
+                    return {
+                        'tool_calls': message.tool_calls,
+                        'tool_results': tool_results,
+                        'message': message
+                    }
+                
+                # Réponse textuelle simple
+                self.add_ai_message(message.content)
+                return {
+                    'text_output': message.content,
+                    'raw_response': response
+                }
+            
+            else:
+                # Retourner le générateur de streaming
+                return response
+                
+        except Exception as e:
+            print(f"Erreur lors de l'appel à Groq: {e}")
+            return {'error': str(e)}
+
+    def groq_send_message(self, content, model_index=None, model_name=None, 
+                          stream=None, max_tokens=1024):
+        """
+        Envoie un message simple sans outils.
+        
+        Args:
+            content: Le contenu du message
+            model_index: Index du modèle
+            model_name: Nom du modèle
+            stream: Activer le streaming
+            max_tokens: Nombre maximum de tokens
+            
+        Returns:
+            La réponse de l'assistant
+        """
+        # Détermination du modèle
+        if model_name:
+            chosen_model = model_name
+        elif isinstance(model_index, int):
+            chosen_model = self.models[model_index]
+        else:
+            chosen_model = self.models[0]
+
+        print(f"Modèle Groq choisi : {chosen_model}")
+        
+        # Déterminer si le contenu est de type vision
+        is_vision_content = isinstance(content, list) and any(isinstance(item, dict) and 
+                        ('type' in item or 'role' in item) for item in content)
+        
+        if is_vision_content:
+            # Pour le contenu vision, nous utilisons directement le format fourni
+            messages = content
+        else:
+            # Pour le texte simple, ajouter à l'historique
+            self.add_user_message(content)
+            messages = self.chat_history
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=chosen_model,
+                messages=messages,
+                max_tokens=max_tokens,
+                stream=stream if stream is not None else False
+            )
+            
+            # Mise à jour du suivi des tokens
+            if not stream:
+                self.update_token_usage(response)
+                
+                # Ajout de la réponse à l'historique
+                assistant_message = response.choices[0].message.content
+                self.add_ai_message(assistant_message)
+                
+                return {
+                    'text_output': assistant_message,
+                    'raw_response': response
+                }
+            else:
+                return response
+                
+        except Exception as e:
+            print(f"Erreur lors de l'appel à Groq: {e}")
+            return {'error': str(e)}
+
+    async def groq_send_message_with_tools_streaming(
+        self,
+        content: str,
+        tools: List[Dict[str, Any]],
+        tool_mapping: Dict[str, Callable],
+        model_name: str,
+        max_tokens: int = 2048,
+        system_prompt: Optional[str] = None
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Envoie un message avec outils et streaming pour Groq (Kimi K2).
+        Gère le cycle complet: message → tool_use → tool_result → réponse
+        
+        Args:
+            content: Message utilisateur (peut être vide pour tours suivants)
+            tools: Liste des définitions d'outils (format OpenAI)
+            tool_mapping: Dict {tool_name: fonction} pour exécuter les outils
+            model_name: Nom du modèle à utiliser
+            max_tokens: Nombre max de tokens
+            system_prompt: Prompt système (optionnel)
+        
+        Yields:
+            Dict avec events: text_chunk, tool_use, tool_result, error
+        """
+        try:
+            import asyncio
+            
+            # ═══════════════════════════════════════════════════════
+            # ÉTAPE 1: Préparer les messages
+            # ═══════════════════════════════════════════════════════
+            messages = self.chat_history.copy()
+            
+            # N'ajouter un nouveau message utilisateur QUE si content n'est pas vide
+            if content and content.strip():
+                self.add_user_message(content)
+                messages.append({"role": "user", "content": content})
+            
+            # ═══════════════════════════════════════════════════════
+            # ÉTAPE 2: Appel API avec streaming
+            # ═══════════════════════════════════════════════════════
+            api_params = {
+                'model': model_name,
+                'messages': messages,
+                'max_tokens': max_tokens,
+                'stream': True
+            }
+            
+            # Ajouter tools si fournis
+            if tools:
+                api_params['tools'] = tools
+            
+            # Groq n'a pas de system prompt dans l'API streaming comme Anthropic
+            # Le system prompt doit être dans le premier message avec role="system"
+            if system_prompt and (not messages or messages[0].get("role") != "system"):
+                messages.insert(0, {"role": "system", "content": system_prompt})
+                api_params['messages'] = messages
+            
+            accumulated_text = ""
+            tool_uses = []
+            
+            # ═══════════════════════════════════════════════════════
+            # ÉTAPE 3: Traiter le stream
+            # ═══════════════════════════════════════════════════════
+            response = await asyncio.to_thread(
+                self.client.chat.completions.create,
+                **api_params
+            )
+            
+            # Traiter les chunks du stream
+            for chunk in response:
+                if not chunk.choices:
+                    continue
+                    
+                delta = chunk.choices[0].delta
+                
+                # ─────────────────────────────────────────────
+                # CAS 1: Contenu texte
+                # ─────────────────────────────────────────────
+                if hasattr(delta, 'content') and delta.content:
+                    accumulated_text += delta.content
+                    yield {
+                        "type": "text_chunk",
+                        "chunk": delta.content
+                    }
+                
+                # ─────────────────────────────────────────────
+                # CAS 2: Tool calls
+                # ─────────────────────────────────────────────
+                if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                    for tool_call in delta.tool_calls:
+                        # Groq envoie les tool calls en chunks, on doit les accumuler
+                        if not tool_uses or (tool_call.index >= len(tool_uses)):
+                            tool_uses.append({
+                                "id": tool_call.id if hasattr(tool_call, 'id') else f"tool_{len(tool_uses)}",
+                                "name": "",
+                                "arguments": ""
+                            })
+                        
+                        if hasattr(tool_call, 'function'):
+                            if hasattr(tool_call.function, 'name') and tool_call.function.name:
+                                tool_uses[tool_call.index]["name"] = tool_call.function.name
+                            if hasattr(tool_call.function, 'arguments') and tool_call.function.arguments:
+                                tool_uses[tool_call.index]["arguments"] += tool_call.function.arguments
+            
+            # ═══════════════════════════════════════════════════════
+            # ÉTAPE 4: Sauvegarder la réponse de l'assistant
+            # ═══════════════════════════════════════════════════════
+            assistant_content = []
+            
+            if accumulated_text:
+                assistant_content.append({
+                    "type": "text",
+                    "text": accumulated_text
+                })
+            
+            if tool_uses:
+                for tool_use in tool_uses:
+                    if tool_use["name"]:  # Seulement si le tool_call est complet
+                        assistant_content.append({
+                            "type": "tool_use",
+                            "id": tool_use["id"],
+                            "name": tool_use["name"],
+                            "input": json.loads(tool_use["arguments"]) if tool_use["arguments"] else {}
+                        })
+                        
+                        # Yield l'événement tool_use
+                        yield {
+                            "type": "tool_use",
+                            "tool_name": tool_use["name"],
+                            "tool_input": json.loads(tool_use["arguments"]) if tool_use["arguments"] else {},
+                            "tool_id": tool_use["id"]
+                        }
+            
+            # Sauvegarder dans l'historique (format Anthropic pour compatibilité)
+            self.add_ai_message(assistant_content if assistant_content else accumulated_text)
+            
+            # ═══════════════════════════════════════════════════════
+            # ÉTAPE 5: Exécuter les outils si présents
+            # ═══════════════════════════════════════════════════════
+            if tool_uses and tool_mapping:
+                tool_results_content = []
+                
+                for tool_use in tool_uses:
+                    if not tool_use["name"]:
+                        continue
+                        
+                    tool_name = tool_use["name"]
+                    tool_input = json.loads(tool_use["arguments"]) if tool_use["arguments"] else {}
+                    
+                    if tool_name in tool_mapping:
+                        tool_function = tool_mapping[tool_name]
+                        
+                        # Exécuter l'outil (async ou sync)
+                        if asyncio.iscoroutinefunction(tool_function):
+                            tool_result = await tool_function(**tool_input)
+                        else:
+                            tool_result = await asyncio.to_thread(tool_function, **tool_input)
+                        
+                        # Formater le résultat
+                        tool_result_str = json.dumps(tool_result) if isinstance(tool_result, dict) else str(tool_result)
+                        
+                        tool_results_content.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use["id"],
+                            "content": tool_result_str
+                        })
+                        
+                        # Yield l'événement tool_result
+                        yield {
+                            "type": "tool_result",
+                            "tool_name": tool_name,
+                            "result": tool_result
+                        }
+                
+                # Ajouter les résultats à l'historique
+                if tool_results_content:
+                    self.add_user_message(tool_results_content)
+                    
+                    # ═══════════════════════════════════════════════════════
+                    # ÉTAPE 6: Appel récursif pour obtenir la réponse finale
+                    # ═══════════════════════════════════════════════════════
+                    async for event in self.groq_send_message_with_tools_streaming(
+                        content="",  # Contenu vide, continuer avec l'historique
+                        tools=tools,
+                        tool_mapping=tool_mapping,
+                        model_name=model_name,
+                        max_tokens=max_tokens,
+                        system_prompt=system_prompt
+                    ):
+                        yield event
+        
+        except Exception as e:
+            logging.error(f"[GROQ_STREAMING] Erreur: {e}", exc_info=True)
+            yield {
+                "type": "error",
+                "error": str(e)
+            }
+
+    def final_handle_responses(self, input_data):
+        """
+        Traite les réponses de l'API Groq.
+        
+        Args:
+            input_data: Données de réponse à traiter
+            
+        Returns:
+            Le contenu traité
+        """
+        if isinstance(input_data, list):
+            return [self.basic_handle_response(item) for item in input_data]
+        else:
+            return self.basic_handle_response(input_data)
+
+    def basic_handle_response(self, response):
+        """
+        Traite une réponse individuelle.
+        
+        Args:
+            response: Réponse à traiter
+            
+        Returns:
+            Le contenu de la réponse
+        """
+        output = ""
+        
+        if hasattr(response, 'choices'):
+            for choice in response.choices:
+                if hasattr(choice, 'message'):
+                    message = choice.message
+                    if hasattr(message, 'content') and message.content:
+                        output += message.content
+        
+        return output
+
 class Anthropic_KDB_AGENT:
     def __init__(self,chroma_db_instance) -> None:
         

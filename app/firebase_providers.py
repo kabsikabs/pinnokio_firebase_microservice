@@ -127,6 +127,18 @@ class FirebaseManagement:
             # Ne pas lever l'exception - continuer sans Stripe
             self.stripe_api_key = None
 
+    def _normalize_mandate_path(self, mandate_path: Optional[str]) -> Optional[str]:
+        """Corrige les chemins mandat mal formés provenant du client."""
+        if not mandate_path:
+            return mandate_path
+
+        normalized = mandate_path.strip()
+        # Corriger les fautes de frappe connues
+        normalized = normalized.replace("bo_clientss", "bo_clients")
+        # Normaliser les doubles slash
+        normalized = re.sub(r"/{2,}", "/", normalized)
+        return normalized
+
     @property
     def firestore_client(self):
         return self.db
@@ -1772,6 +1784,7 @@ class FirebaseManagement:
             dict: Dictionnaire des jobs avec leur ID comme clé, ou dict vide en cas d'erreur
         """
         try:
+            mandate_path = self._normalize_mandate_path(mandate_path)
             # Chemin de la collection des dépenses
             expenses_collection = self.db.collection(f"{mandate_path}/billing/topping/expenses")
             
@@ -1804,6 +1817,7 @@ class FirebaseManagement:
             Dict: Dictionnaire des expenses avec expense_id comme clé
         """
         try:
+            mandate_path = self._normalize_mandate_path(mandate_path)
             # Chemin vers le document des expenses
             expenses_doc_path = f"{mandate_path}/working_doc/expenses_details"
             print(f"📚 [FIREBASE] Récupération des expenses depuis: {expenses_doc_path}")
@@ -1860,6 +1874,7 @@ class FirebaseManagement:
             bool: True si succès, False sinon
         """
         try:
+            mandate_path = self._normalize_mandate_path(mandate_path)
             # Chemin vers le document working_doc
             expenses_doc_path = f"{mandate_path}/working_doc/expenses_details"
             print(f"✏️ [FIREBASE] Mise à jour de l'expense {expense_id} dans: {expenses_doc_path}")
@@ -2725,6 +2740,7 @@ class FirebaseManagement:
                 ou valeurs par défaut si non trouvées
         """
         try:
+            mandate_path = self._normalize_mandate_path(mandate_path)
             # Extraire l'ID utilisateur du chemin du mandat
             if mandate_path:
                 path_parts = mandate_path.split('/')
@@ -7152,6 +7168,67 @@ class FirebaseManagement:
 
         return None  # Aucun document correspondant trouvé
 
+    def resolve_client_by_contact_space(self, user_id: Optional[str], contact_space_id: str) -> Optional[dict]:
+        """
+        Résout le client (client_uuid + parent_doc_id) en fonction d'un contact_space_id.
+
+        Args:
+            user_id: ID Firebase de l'utilisateur (None pour comptes partagés)
+            contact_space_id: Identifiant de la société / mandate (collection_name côté Reflex)
+
+        Returns:
+            dict contenant au minimum client_uuid si trouvé, sinon None.
+        """
+        if not contact_space_id:
+            return None
+
+        try:
+            prefix = f"clients/{user_id}/bo_clients/" if user_id else "bo_clients/"
+            mandates_query = (
+                self.db.collection_group("mandates")
+                .where("contact_space_id", "==", contact_space_id)
+                .get()
+            )
+
+            for mandate_doc in mandates_query:
+                path = mandate_doc.reference.path  # ex: clients/{uid}/bo_clients/{client_doc}/mandates/{mandate_id}
+
+                if user_id and not path.startswith(prefix):
+                    continue  # Ignorer les résultats appartenant à un autre utilisateur
+
+                parts = path.split("/")
+                try:
+                    bo_clients_idx = parts.index("bo_clients")
+                except ValueError:
+                    continue
+
+                client_doc_id = parts[bo_clients_idx + 1] if len(parts) > bo_clients_idx + 1 else None
+                mandate_id = parts[bo_clients_idx + 3] if len(parts) > bo_clients_idx + 3 else None
+
+                if not client_doc_id:
+                    continue
+
+                parent_doc_path = (
+                    f"{prefix}{client_doc_id}"
+                    if user_id
+                    else f"bo_clients/{client_doc_id}"
+                )
+
+                parent_doc = self.db.document(parent_doc_path).get()
+                client_uuid = parent_doc.to_dict().get("client_uuid") if parent_doc.exists else None
+
+                return {
+                    "client_uuid": client_uuid,
+                    "client_doc_id": client_doc_id,
+                    "mandate_id": mandate_id,
+                    "mandate_path": path,
+                }
+
+        except Exception as e:
+            print(f"⚠️ Erreur lors de la résolution client_uuid pour {contact_space_id}: {e}")
+
+        return None
+
     def get_customer_list(self,user_id, shared_account=False):
         """
         Récupère la liste des noms de clients.
@@ -7290,6 +7367,7 @@ class FirebaseManagement:
         en utilisant directement le chemin du mandat.
         """
         try:
+            mandate_path = self._normalize_mandate_path(mandate_path)
             # Construction du chemin complet pour working_doc
             working_doc_path = f'{mandate_path}/working_doc'
             print(f"Base path pour working_doc: {working_doc_path}")
@@ -7726,6 +7804,7 @@ class FirebaseManagement:
             Liste des tâches
         """
         try:
+            mandate_path = self._normalize_mandate_path(mandate_path)
             tasks_ref = self.db.collection(f"{mandate_path}/tasks")
 
             if status:

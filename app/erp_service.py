@@ -81,28 +81,39 @@ class ERPConnectionManager:
             firebase_service = FirebaseManagement()
 
             resolved_client_uuid = client_uuid
+            lookup_source = "caller"
+
             if not resolved_client_uuid:
-                # 1. Récupérer client_uuid depuis bo_clients (comportement historique)
+                # 1. Essayer de déduire client_uuid via contact_space_id (company_id)
+                lookup = firebase_service.resolve_client_by_contact_space(user_id, company_id)
+                if lookup and lookup.get("client_uuid"):
+                    resolved_client_uuid = lookup["client_uuid"]
+                    lookup_source = "contact_space"
+                    logger.info(
+                        "✅ [ERP] client_uuid résolu via contact_space_id=%s → %s",
+                        company_id,
+                        resolved_client_uuid,
+                    )
+
+            if not resolved_client_uuid:
+                # 2. Fallback historique: document bo_clients/{user_id}
                 doc_ref = db.collection(f'clients/{user_id}/bo_clients').document(user_id)
                 doc = doc_ref.get()
 
-                if not doc.exists:
-                    logger.error(f"❌ [ERP] User bo_clients document not found: {user_id}")
-                    return None
-
-                client_data = doc.to_dict()
-                resolved_client_uuid = client_data.get('client_uuid')
+                if doc.exists:
+                    client_data = doc.to_dict()
+                    resolved_client_uuid = client_data.get('client_uuid')
 
                 if not resolved_client_uuid:
-                    logger.error(f"❌ [ERP] client_uuid not found for user: {user_id}")
+                    logger.error(f"❌ [ERP] client_uuid not found for user={user_id} company={company_id}")
                     return None
 
-                logger.info(f"✅ [ERP] client_uuid found: {resolved_client_uuid}")
+                lookup_source = "user_root"
+                logger.info(f"✅ [ERP] client_uuid found via fallback document: {resolved_client_uuid}")
             else:
-                logger.info(f"✅ [ERP] client_uuid provided by caller: {resolved_client_uuid}")
+                logger.info(f"✅ [ERP] client_uuid provided by {lookup_source}: {resolved_client_uuid}")
 
-            # 2. Récupérer le profil complet via reconstruct_full_client_profile
-            # Cette méthode charge TOUTES les données du mandate (comme LLM Manager)
+            # 2. Récupérer le mandate_path via reconstruct_full_client_profile
             full_profile = firebase_service.reconstruct_full_client_profile(
                 user_id,
                 resolved_client_uuid,
@@ -113,27 +124,57 @@ class ERPConnectionManager:
                 logger.error(f"❌ [ERP] Full profile not found for user={user_id}, company={company_id}")
                 return None
 
-            # 3. Extraire les credentials ERP depuis le full_profile
-            # (même extraction que dans LLMSession.user_context)
-            odoo_url = full_profile.get("erp_odoo_url")
-            odoo_db_name = full_profile.get("erp_odoo_db")
-            odoo_username = full_profile.get("erp_odoo_username")
-            odoo_company_name = full_profile.get("erp_odoo_company_name")
-            secret_manager_name = full_profile.get("erp_secret_manager")
+            # 3. Construire le chemin vers le document ERP
+            # Structure : mandate_path/erp/{bank_erp}
+            # Ex: clients/{uid}/bo_clients/{client_id}/mandates/{mandate_id}/erp/odoo
+            mandate_id = full_profile.get("_mandate_id")
+            client_id = full_profile.get("_client_id")
+            bank_erp = full_profile.get("mandate_bank_erp", "").lower()  # Type d'ERP (odoo, sage, etc.)
+            
+            if not mandate_id or not client_id:
+                logger.error(f"❌ [ERP] Missing mandate_id or client_id in full_profile")
+                return None
+            
+            if not bank_erp:
+                logger.error(f"❌ [ERP] Missing mandate_bank_erp in full_profile")
+                return None
+            
+            # Construire le chemin complet du document ERP
+            if user_id:
+                erp_doc_path = f"clients/{user_id}/bo_clients/{client_id}/mandates/{mandate_id}/erp/{bank_erp}"
+            else:
+                erp_doc_path = f"bo_clients/{client_id}/mandates/{mandate_id}/erp/{bank_erp}"
+            
+            # 4. Lire le document ERP directement
+            erp_doc = db.document(erp_doc_path).get()
+            
+            if not erp_doc.exists:
+                logger.error(f"❌ [ERP] Document ERP not found at path: {erp_doc_path}")
+                return None
+            
+            erp_data = erp_doc.to_dict()
+            
+            # 5. Extraire les credentials depuis le document ERP
+            # Les champs sont SANS préfixe "erp_" dans le document
+            odoo_url = erp_data.get("odoo_url")
+            odoo_db_name = erp_data.get("odoo_db")
+            odoo_username = erp_data.get("odoo_username")
+            odoo_company_name = erp_data.get("odoo_company_name")
+            secret_manager_name = erp_data.get("secret_manager")
 
-            # 4. Vérifier que tous les paramètres sont présents
+            # 6. Vérifier que tous les paramètres sont présents
             if not all([odoo_url, odoo_db_name, odoo_username, odoo_company_name, secret_manager_name]):
                 missing = []
-                if not odoo_url: missing.append("erp_odoo_url")
-                if not odoo_db_name: missing.append("erp_odoo_db")
-                if not odoo_username: missing.append("erp_odoo_username")
-                if not odoo_company_name: missing.append("erp_odoo_company_name")
-                if not secret_manager_name: missing.append("erp_secret_manager")
+                if not odoo_url: missing.append("odoo_url")
+                if not odoo_db_name: missing.append("odoo_db")
+                if not odoo_username: missing.append("odoo_username")
+                if not odoo_company_name: missing.append("odoo_company_name")
+                if not secret_manager_name: missing.append("secret_manager")
 
-                logger.error(f"❌ [ERP] Missing credentials in full_profile: {', '.join(missing)}")
+                logger.error(f"❌ [ERP] Missing credentials in document {erp_doc_path}: {', '.join(missing)}")
                 return None
 
-            # 5. Récupérer le mot de passe depuis Secret Manager
+            # 7. Récupérer le mot de passe depuis Secret Manager
             try:
                 erp_api_key = get_secret(secret_manager_name)
             except Exception as e:
@@ -142,7 +183,9 @@ class ERPConnectionManager:
 
             logger.info(
                 f"✅ [ERP] Credentials loaded from mandate - "
-                f"company={odoo_company_name}, url={odoo_url}"
+                f"company={odoo_company_name}, url={odoo_url}, "
+                f"db={odoo_db_name}, username={odoo_username}, "
+                f"secret_name={secret_manager_name}"
             )
 
             return {
