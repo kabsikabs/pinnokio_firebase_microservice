@@ -1101,6 +1101,120 @@ class LLMManager:
             
             return session
     
+    async def _initialize_session_background(
+        self,
+        user_id: str,
+        collection_name: str,
+        client_uuid: str,
+        dms_system: str = "google_drive",
+        dms_mode: str = "prod",
+        chat_mode: str = "general_chat"
+    ):
+        """
+        Fonction de background pour l'initialisation réelle de la session LLM.
+        Appelée en arrière-plan par initialize_session().
+        """
+        from ..ws_hub import hub
+        from ..redis_client import get_redis
+
+        base_session_key = f"{user_id}:{collection_name}"
+        redis_init_key = f"llm_init:{base_session_key}"
+
+        try:
+            logger.info(f"[LLM_INIT_BG] 🔄 Début initialisation background pour {base_session_key}")
+
+            with self._lock:
+                # Créer nouvelle session
+                context = LLMContext(
+                    user_id=user_id,
+                    collection_name=collection_name,
+                    dms_system=dms_system,
+                    dms_mode=dms_mode,
+                    chat_mode=chat_mode
+                )
+
+                session = LLMSession(
+                    session_key=base_session_key,
+                    context=context
+                )
+
+                # Initialiser les données permanentes
+                logger.info(f"[LLM_INIT_BG] 📥 Chargement données session...")
+                await session.initialize_session_data(client_uuid)
+                logger.info(f"[LLM_INIT_BG] ✅ Données session initialisées")
+
+                # Mettre à jour le dms_system depuis le user_context chargé
+                if session.user_context and session.user_context.get("dms_system"):
+                    actual_dms_system = session.user_context.get("dms_system", "google_drive")
+                    if session.context.dms_system != actual_dms_system:
+                        session.update_context(dms_system=actual_dms_system)
+                        logger.info(f"[LLM_INIT_BG] 🔄 DMS mis à jour: {actual_dms_system}")
+
+                # Stocker en cache mémoire
+                self.sessions[base_session_key] = session
+                logger.info(f"[LLM_INIT_BG] 💾 Session stockée en cache mémoire")
+
+            # Marquer comme terminé dans Redis
+            redis_client = get_redis()
+            redis_client.setex(
+                redis_init_key,
+                3600,  # TTL 1 heure
+                json.dumps({
+                    "status": "ready",
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "session_id": base_session_key
+                })
+            )
+            logger.info(f"[LLM_INIT_BG] ✅ Redis marqué comme 'ready'")
+
+            # Publier événement de succès via WebSocket
+            await hub.broadcast(user_id, {
+                "type": "llm.initialization_complete",
+                "payload": {
+                    "session_id": base_session_key,
+                    "collection_name": collection_name,
+                    "status": "ready",
+                    "context_loaded": True,
+                    "jobs_data_loaded": bool(session.jobs_data),
+                    "completed_at": datetime.now(timezone.utc).isoformat()
+                }
+            })
+            logger.info(f"[LLM_INIT_BG] 📡 Événement 'llm.initialization_complete' publié")
+
+        except Exception as e:
+            logger.error(f"[LLM_INIT_BG] ❌ Erreur initialisation: {e}", exc_info=True)
+
+            # Marquer comme erreur dans Redis
+            try:
+                redis_client = get_redis()
+                redis_client.setex(
+                    redis_init_key,
+                    300,  # TTL 5 minutes pour erreurs
+                    json.dumps({
+                        "status": "error",
+                        "error": str(e),
+                        "failed_at": datetime.now(timezone.utc).isoformat()
+                    })
+                )
+            except Exception:
+                pass
+
+            # Publier événement d'erreur
+            try:
+                await hub.broadcast(user_id, {
+                    "type": "llm.initialization_error",
+                    "payload": {
+                        "session_id": base_session_key,
+                        "collection_name": collection_name,
+                        "status": "error",
+                        "error": str(e),
+                        "failed_at": datetime.now(timezone.utc).isoformat()
+                    }
+                })
+                logger.info(f"[LLM_INIT_BG] 📡 Événement 'llm.initialization_error' publié")
+            except Exception as broadcast_error:
+                logger.error(f"[LLM_INIT_BG] Erreur broadcast: {broadcast_error}")
+
     async def initialize_session(
         self,
         user_id: str,
@@ -1110,183 +1224,168 @@ class LLMManager:
         dms_mode: str = "prod",
         chat_mode: str = "general_chat"
         ) -> dict:
-        """Initialise une session LLM pour un utilisateur/société."""
+        """
+        Initialise une session LLM pour un utilisateur/société.
+
+        ⭐ NOUVELLE ARCHITECTURE ASYNCHRONE :
+        - Vérification cache Redis immédiate
+        - Retour instantané (< 100ms) si session existe ou en cours d'initialisation
+        - Initialisation réelle en arrière-plan
+        - Notification via WebSocket quand terminé
+
+        Cette approche évite les blocages de 19 secondes lors du changement de société.
+        """
+        from ..redis_client import get_redis
+
         try:
-            logger.info(f"=== DÉBUT initialize_session ===")
-            logger.info(f"Paramètres: user_id={user_id}, collection_name={collection_name}, client_uuid={client_uuid}")
-            logger.info(f"Chat mode: {chat_mode}")
-            
+            logger.info(f"[LLM_INIT] 📥 Requête initialize_session")
+            logger.info(f"[LLM_INIT] Paramètres: user_id={user_id}, collection_name={collection_name}, client_uuid={client_uuid}")
+
+            base_session_key = f"{user_id}:{collection_name}"
+            redis_init_key = f"llm_init:{base_session_key}"
+
+            # ═══════════════════════════════════════════════════════════
+            # ÉTAPE 1 : Vérifier cache Redis (état d'initialisation)
+            # ═══════════════════════════════════════════════════════════
+            redis_client = get_redis()
+
+            try:
+                cached_status = redis_client.get(redis_init_key)
+                if cached_status:
+                    status_data = json.loads(cached_status.decode('utf-8'))
+                    current_status = status_data.get("status")
+
+                    if current_status == "ready":
+                        logger.info(f"[LLM_INIT] ✅ Session déjà initialisée (Redis): {base_session_key}")
+                        return {
+                            "success": True,
+                            "session_id": base_session_key,
+                            "status": "already_initialized",
+                            "message": "Session LLM déjà active",
+                            "completed_at": status_data.get("completed_at")
+                        }
+
+                    elif current_status == "initializing":
+                        logger.info(f"[LLM_INIT] ⏳ Initialisation déjà en cours (Redis): {base_session_key}")
+                        return {
+                            "success": True,
+                            "session_id": base_session_key,
+                            "status": "initializing",
+                            "message": "Initialisation en cours...",
+                            "started_at": status_data.get("started_at")
+                        }
+            except Exception as redis_error:
+                logger.warning(f"[LLM_INIT] ⚠️ Erreur lecture Redis: {redis_error}")
+
+            # ═══════════════════════════════════════════════════════════
+            # ÉTAPE 2 : Vérifier cache mémoire local
+            # ═══════════════════════════════════════════════════════════
             with self._lock:
-                base_session_key = f"{user_id}:{collection_name}"
-                
-                logger.info(f"Initialisation session LLM: {base_session_key}")
-                
-                # Vérifier si session existe déjà
+                # Vérifier si session existe déjà en mémoire
                 if base_session_key in self.sessions:
                     session = self.sessions[base_session_key]
-                    
-                    logger.info(f"Session existante trouvée: {base_session_key}")
-                    
-                    # ⭐ NOUVEAU : Vérifier si client_uuid OU collection_name a changé
-                    # (Normalement collection_name ne change pas car session_key = user_id:collection_name,
-                    #  mais on vérifie quand même pour robustesse)
+                    logger.info(f"[LLM_INIT] ✅ Session existante en mémoire: {base_session_key}")
+
+                    # Vérifier si contexte doit être rafraîchi
                     current_client_uuid = (session.user_context or {}).get("client_uuid") if session.user_context else None
-                    current_collection_name = session.context.collection_name if session.context else None
-                    
-                    # 🔍 DIAGNOSTIC
-                    logger.info(
-                        f"[SESSION] 🔍 DIAGNOSTIC user_context - "
-                        f"user_context existe: {session.user_context is not None}, "
-                        f"current_client_uuid: {current_client_uuid}, "
-                        f"nouveau client_uuid: {client_uuid}, "
-                        f"current_collection_name: {current_collection_name}, "
-                        f"nouveau collection_name: {collection_name}"
-                    )
-                    
-                    # Décider si on doit recharger user_context
-                    should_reload = False
-                    reload_reason = None
-                    
-                    # ⚠️ Vérifier que client_uuid n'est pas vide avant de recharger
-                    if not client_uuid or client_uuid.strip() == '':
-                        logger.warning(
-                            f"[SESSION] ⚠️ client_uuid vide reçu, conservation du client_uuid existant: {current_client_uuid}"
-                        )
-                        # Utiliser le client_uuid existant si disponible
-                        if current_client_uuid:
-                            client_uuid = current_client_uuid
-                        else:
-                            raise ValueError(
-                                f"Impossible d'initialiser la session: client_uuid vide et aucun client_uuid existant"
-                            )
-                    
+
+                    # Si client_uuid a changé → invalider et relancer
                     if current_client_uuid and current_client_uuid != client_uuid:
-                        should_reload = True
-                        reload_reason = f"client_uuid a changé: {current_client_uuid} → {client_uuid}"
-                    elif current_collection_name and current_collection_name != collection_name:
-                        should_reload = True
-                        reload_reason = f"collection_name a changé: {current_collection_name} → {collection_name}"
-                    elif not current_client_uuid:
-                        should_reload = True
-                        reload_reason = "user_context manquant"
-                    
-                    if should_reload:
-                        logger.info(
-                            f"[SESSION] 🔄 {reload_reason} pour session_key={base_session_key}"
-                        )
-                        logger.info(f"[SESSION] 🔄 Rechargement user_context...")
-                        
-                        # Recharger user_context avec le nouveau client_uuid et collection_name
-                        await session.initialize_session_data(client_uuid)
-                        logger.info(f"[SESSION] ✅ user_context rechargé avec nouveau contexte")
-                    
-                    # ⭐ UTILISER le dms_system depuis user_context (priorité sur le paramètre)
-                    actual_dms_system = session.user_context.get("dms_system", "google_drive") if session.user_context else dms_system
-                    
-                    # Mettre à jour le contexte si nécessaire
-                    if (session.context.dms_system != actual_dms_system or 
-                        session.context.chat_mode != chat_mode):
-                        session.update_context(
-                            dms_system=actual_dms_system,  # ⭐ Utiliser la valeur du user_context
-                            dms_mode=dms_mode,
-                            chat_mode=chat_mode
-                        )
-                        logger.info(f"[SESSION] 🔄 DMS mis à jour depuis user_context: {actual_dms_system}")
-                    
-                    # ✅ RAFRAÎCHIR les jobs et métriques (même si session existe)
-                    # ⭐ Maintenant avec le BON user_context (rechargé ci-dessus si nécessaire)
-                    try:
-                        logger.info(f"[SESSION] 🔄 Rafraîchissement des jobs et métriques...")
-                        
-                        # Détecter le mode (UI/BACKEND)
-                        mode = await session._detect_connection_mode()
-                        logger.info(f"[SESSION] Mode détecté: {mode}")
-                        
-                        # Recharger les jobs depuis Redis (UI) ou sources (BACKEND)
-                        jobs_data, jobs_metrics = await session._load_jobs_with_metrics(mode)
-                        
-                        # Mettre à jour les données de la session
-                        session.jobs_data = jobs_data
-                        session.jobs_metrics = jobs_metrics
-                        
-                        logger.info(f"[SESSION] ✅ Jobs rafraîchis - APBookkeeper: {jobs_metrics.get('APBOOKEEPER', {}).get('to_do', 0)}, "
-                                   f"Router: {jobs_metrics.get('ROUTER', {}).get('to_process', 0)}, "
-                                   f"Bank: {jobs_metrics.get('BANK', {}).get('to_reconcile', 0)}")
-                        
-                        # ⭐ Mettre à jour tous les brains actifs avec les nouvelles métriques
-                        for thread_key, brain in session.active_brains.items():
-                            brain.jobs_data = jobs_data
-                            brain.jobs_metrics = jobs_metrics
-                            # Charger les données selon le mode
-                            if chat_mode == "onboarding_chat":
-                                await brain.load_onboarding_data()
-                            elif chat_mode in ("router_chat", "banker_chat", "apbookeeper_chat"):
-                                # Pour ces modes, le job_id est le thread_key
-                                job_id = thread_key
-                                await brain.load_job_data(job_id)
-                            brain.initialize_system_prompt(chat_mode=chat_mode, jobs_metrics=jobs_metrics)
-                            logger.info(f"[SESSION] ✅ Brain thread={thread_key} mis à jour avec métriques fraîches")
-                        
-                    except Exception as e:
-                        logger.warning(f"[SESSION] ⚠️ Erreur rafraîchissement jobs: {e}")
-                        # Ne pas bloquer la session si le rafraîchissement échoue
-                    
-                    logger.info(f"Session réutilisée avec données rafraîchies: {base_session_key}")
+                        logger.info(f"[LLM_INIT] 🔄 client_uuid changé: {current_client_uuid} → {client_uuid}")
+                        # Supprimer session existante
+                        del self.sessions[base_session_key]
+                        # Marquer pour réinitialisation
+                        pass
+                    else:
+                        # Mettre à jour cache Redis
+                        try:
+                            redis_client.setex(
+                                redis_init_key,
+                                3600,
+                                json.dumps({
+                                    "status": "ready",
+                                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                                    "session_id": base_session_key
+                                })
+                            )
+                        except Exception:
+                            pass
+
+                        logger.info(f"[LLM_INIT] ✅ Session réutilisée: {base_session_key}")
+                        return {
+                            "success": True,
+                            "session_id": base_session_key,
+                            "status": "already_initialized",
+                            "message": "Session LLM déjà active (cache mémoire)"
+                        }
+
+            # ═══════════════════════════════════════════════════════════
+            # ÉTAPE 3 : Marquer comme "initializing" dans Redis (atomique)
+            # ═══════════════════════════════════════════════════════════
+            try:
+                # Utiliser SETNX pour atomicité (évite race conditions)
+                was_set = redis_client.setnx(
+                    redis_init_key,
+                    json.dumps({
+                        "status": "initializing",
+                        "started_at": datetime.now(timezone.utc).isoformat(),
+                        "session_id": base_session_key
+                    })
+                )
+
+                if not was_set:
+                    # Une autre instance a déjà commencé l'initialisation
+                    logger.info(f"[LLM_INIT] ⏳ Initialisation déjà lancée par une autre instance: {base_session_key}")
                     return {
                         "success": True,
                         "session_id": base_session_key,
-                        "status": "refreshed",
-                        "message": "Session LLM réutilisée avec données rafraîchies"
+                        "status": "initializing",
+                        "message": "Initialisation en cours (autre instance)..."
                     }
-                
-                # ⚠️ Vérifier que client_uuid n'est pas vide avant de créer une nouvelle session
-                if not client_uuid or client_uuid.strip() == '':
-                    raise ValueError(
-                        f"Impossible de créer une nouvelle session: client_uuid vide requis pour user_id={user_id}, collection_name={collection_name}"
-                    )
-                
-                # Créer nouvelle session
-                context = LLMContext(
+
+                # Définir TTL après le SETNX réussi
+                redis_client.expire(redis_init_key, 300)  # TTL 5 minutes pour "initializing"
+                logger.info(f"[LLM_INIT] ✅ Marqué comme 'initializing' dans Redis")
+
+            except Exception as redis_error:
+                logger.warning(f"[LLM_INIT] ⚠️ Erreur Redis SETNX: {redis_error}")
+                # Continuer quand même (fallback si Redis indisponible)
+
+            # ═══════════════════════════════════════════════════════════
+            # ÉTAPE 4 : Lancer initialisation en arrière-plan
+            # ═══════════════════════════════════════════════════════════
+            logger.info(f"[LLM_INIT] 🚀 Lancement initialisation background pour {base_session_key}")
+
+            asyncio.create_task(
+                self._initialize_session_background(
                     user_id=user_id,
                     collection_name=collection_name,
+                    client_uuid=client_uuid,
                     dms_system=dms_system,
                     dms_mode=dms_mode,
                     chat_mode=chat_mode
                 )
-                
-                session = LLMSession(
-                    session_key=base_session_key,
-                    context=context
-                )
-                
-                # Initialiser les données permanentes
-                logger.info(f"Initialisation données session...")
-                await session.initialize_session_data(client_uuid)
-                logger.info(f"Données session initialisées avec succès")
-                
-                # ⭐ METTRE À JOUR le dms_system depuis le user_context chargé
-                if session.user_context and session.user_context.get("dms_system"):
-                    actual_dms_system = session.user_context.get("dms_system", "google_drive")
-                    if session.context.dms_system != actual_dms_system:
-                        session.update_context(dms_system=actual_dms_system)
-                        logger.info(f"[SESSION] 🔄 DMS mis à jour depuis user_context lors de la création: {actual_dms_system}")
-                
-                # Stocker en cache
-                logger.info(f"Stockage de la session en cache...")
-                self.sessions[base_session_key] = session
-                logger.info(f"Session stockée en cache")
-                
-                logger.info(f"Nouvelle session créée: {base_session_key}")
-                logger.info(f"=== FIN initialize_session ===")
-                return {
-                    "success": True,
-                    "session_id": base_session_key,
-                    "status": "created",
-                    "message": "Session LLM initialisée avec succès"
-                }
-                
+            )
+
+            logger.info(f"[LLM_INIT] ⚡ Retour immédiat - initialisation en cours en background")
+            return {
+                "success": True,
+                "session_id": base_session_key,
+                "status": "initializing",
+                "message": "Initialisation LLM lancée en arrière-plan",
+                "started_at": datetime.now(timezone.utc).isoformat()
+            }
+
         except Exception as e:
-            logger.error(f"Erreur initialisation session LLM: {e}", exc_info=True)
+            logger.error(f"[LLM_INIT] ❌ Erreur: {e}", exc_info=True)
+
+            # Nettoyer Redis en cas d'erreur
+            try:
+                redis_client = get_redis()
+                redis_client.delete(redis_init_key)
+            except Exception:
+                pass
+
             return {
                 "success": False,
                 "error": str(e),

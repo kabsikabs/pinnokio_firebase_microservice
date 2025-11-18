@@ -297,6 +297,33 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
                 return target, "REGISTRY"
     if method.startswith("CHROMA_VECTOR."):
         name = method.split(".", 1)[1]
+        
+        # ⭐ OPTIMISATION: register_collection_user en mode fire-and-forget (gain 13s)
+        if name == "register_collection_user":
+            async def _async_wrapper(user_id, collection_name, session_id):
+                # Lancer le traitement réel dans un thread pour ne pas bloquer la boucle
+                import asyncio
+                import time
+                
+                loop = asyncio.get_event_loop()
+                # On utilise run_in_executor pour ne pas bloquer l'event loop avec des appels sync
+                loop.run_in_executor(
+                    None, 
+                    lambda: getattr(get_chroma_vector_service(), "register_collection_user")(user_id, collection_name, session_id)
+                )
+                
+                # Retourner immédiatement une réponse simulée pour débloquer le client
+                timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                return {
+                    "user_id": user_id,
+                    "collection_name": collection_name,
+                    "session_id": session_id,
+                    "registered_at": timestamp,
+                    "last_heartbeat": timestamp,
+                    "status": "initializing_background"
+                }
+            return _async_wrapper, "CHROMA_VECTOR"
+
         target = getattr(get_chroma_vector_service(), name, None)
         if callable(target):
             return target, "CHROMA_VECTOR"
@@ -334,23 +361,11 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
         # ═══════════════════════════════════════════════════════════════
         
         if name == "initialize_session":
-            def _sync_wrapper(**kwargs):
-                # Exécuter la coroutine dans l'event loop
-                import asyncio
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # Si on est déjà dans un event loop, créer une nouvelle tâche
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            future = executor.submit(asyncio.run, get_llm_manager().initialize_session(**kwargs))
-                            return future.result()
-                    else:
-                        return asyncio.run(get_llm_manager().initialize_session(**kwargs))
-                except RuntimeError:
-                    # Fallback si pas d'event loop
-                    return asyncio.run(get_llm_manager().initialize_session(**kwargs))
-            return _sync_wrapper, "LLM"
+            # ⭐ FIX: Utiliser un wrapper ASYNCHRONE pour permettre à create_task de fonctionner sur l'event loop principal
+            # L'ancien wrapper synchrone + ThreadPoolExecutor tuait les tâches d'arrière-plan
+            async def _async_wrapper(**kwargs):
+                return await get_llm_manager().initialize_session(**kwargs)
+            return _async_wrapper, "LLM"
         if name == "start_onboarding_chat":
             async def _async_wrapper(**kwargs):
                 return await get_llm_manager().start_onboarding_chat(**kwargs)
@@ -474,6 +489,20 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
     if method.startswith("ERP."):
         name = method.split(".", 1)[1]
         from .erp_service import get_erp_service
+        
+        # ⭐ OPTIMISATION: invalidate_connection en mode fire-and-forget (gain 11s)
+        if name == "invalidate_connection":
+            async def _async_wrapper(user_id, company_id, **kwargs):
+                # Lancer le traitement réel dans un thread pour ne pas bloquer la boucle
+                import asyncio
+                loop = asyncio.get_event_loop()
+                loop.run_in_executor(
+                    None, 
+                    lambda: get_erp_service().invalidate_connection(user_id, company_id)
+                )
+                return {"success": True, "message": "Invalidation launched in background"}
+            return _async_wrapper, "ERP"
+
         target = getattr(get_erp_service(), name, None)
         if callable(target):
             return target, "ERP"
