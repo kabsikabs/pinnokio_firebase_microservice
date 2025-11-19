@@ -14,7 +14,7 @@ from functools import partial
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from openai import OpenAI, AsyncOpenAI
-from ..driveClientService import DriveClientService
+from ..driveClientService import DriveClientService, get_drive_client_service
 from ..firebase_providers import FirebaseManagement
 from enum import Enum
 from typing import Optional, Dict, Any, List, Tuple, Union,Callable,AsyncGenerator
@@ -530,10 +530,9 @@ class BaseAIAgent:
             if dms_system == 'google_drive':
                 self.dms_name='google_drive'
                 
-                # TEMPORAIRE: Désactiver Google Drive pour éviter l'erreur de token
-                print(f"Initialisation du système DMS Google Drive en mode {dms_mode} - DÉSACTIVÉ TEMPORAIREMENT")
-                # self.dms_system = DriveClientService(mode=dms_mode,user_id=firebase_user_id)
-                self.dms_system = None  # Désactiver temporairement
+                # Initialisation du système DMS Google Drive via Singleton
+                print(f"Initialisation du système DMS Google Drive en mode {dms_mode}")
+                self.dms_system = get_drive_client_service(mode=dms_mode)
 
             elif dms_system == 'one_drive':
                 pass
@@ -814,17 +813,18 @@ class BaseAIAgent:
                 print(f"Tentative de téléchargement du fichier Drive: {drive_files_ids}")
                 for file_id in drive_files_ids:
                     try:
-                        print(f"Récupération des métadonnées pour le fichier {file_id}")
-                        file_metadata = self.dms_system.drive_service.files().get(
-                            fileId=file_id, 
-                            fields='mimeType'
-                        ).execute()
-                        print(f"Type MIME du fichier: {file_metadata['mimeType']}")
-                        if not self.dms_system.is_acceptable_file_type(file_metadata['mimeType']):
-                            print(f"Type MIME non supporté: {file_metadata['mimeType']}")
+                        if not self.firebase_user_id:
+                             print(f"Erreur: firebase_user_id manquant pour le fichier {file_id}")
+                             continue
+
+                        print(f"Traitement du fichier {file_id} via convert_pdf_to_png...")    
+                        # convert_pdf_to_png gère la récupération des métadonnées et la vérification du type MIME
+                        images = self.dms_system.convert_pdf_to_png(self.firebase_user_id, file_id, conversion_index=1)
+                        
+                        if not images:
+                            print(f"Aucune image obtenue pour le fichier {file_id} (Type non supporté ou erreur)")
                             continue
-                        print("Conversion du fichier en PNG...")    
-                        images = self.dms_system.convert_pdf_to_png(file_id, conversion_index=1)
+
                         print(f"Nombre d'images obtenues après conversion: {len(images)}")
                         for img in images:
                             img_size = get_image_size(img)

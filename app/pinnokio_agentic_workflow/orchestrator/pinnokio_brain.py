@@ -357,7 +357,7 @@ class PinnokioBrain:
                     text=question,
                     provider=self.default_provider,  # GROQ
                     size=ModelSize.MEDIUM,  # Llama Scout 17B (vision)
-                    drive_file_ids=[file_id],
+                    file_ids=[file_id],  # 🔥 CORRECTION: paramètre renommé drive_file_ids -> file_ids
                     method='batch',
                     max_tokens=2000,
                     final_resume=True
