@@ -242,49 +242,59 @@ class ListenersManager:
             # Nettoyer le cache workflow pour cet utilisateur
             self._workflow_cache.pop(uid, None)
 
-        if unsubs or workflow_unsubs:
-            self.logger.info("user_detach uid=%s reason=%s listeners=%s workflow=%s", uid, reason, len(unsubs), len(workflow_unsubs))
+        if not unsubs and not workflow_unsubs:
+            return
 
-        # Détacher les listeners standards
-        for u in unsubs:
-            try:
-                # Certains listeners renvoient un objet avec .close(), d'autres une fonction
-                if callable(u):
-                    u()  # type: ignore[misc]
-                elif hasattr(u, "close"):
-                    try:
-                        u.close()  # type: ignore[attr-defined]
-                    except Exception:
-                        pass
-            except Exception as e:
-                self.logger.error("user_unsub_error uid=%s error=%s", uid, repr(e))
+        self.logger.info("user_detach_scheduled uid=%s reason=%s listeners=%s workflow=%s", 
+                        uid, reason, len(unsubs), len(workflow_unsubs))
 
-        # Détacher les workflow listeners
-        for u in workflow_unsubs:
+        def _do_detach():
             try:
-                if callable(u):
-                    u()  # type: ignore[misc]
-                elif hasattr(u, "close"):
+                # Détacher les listeners standards
+                for u in unsubs:
                     try:
-                        u.close()  # type: ignore[attr-defined]
-                    except Exception:
-                        pass
+                        # Certains listeners renvoient un objet avec .close(), d'autres une fonction
+                        if callable(u):
+                            u()  # type: ignore[misc]
+                        elif hasattr(u, "close"):
+                            try:
+                                u.close()  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        self.logger.error("user_unsub_error uid=%s error=%s", uid, repr(e))
+
+                # Détacher les workflow listeners
+                for u in workflow_unsubs:
+                    try:
+                        if callable(u):
+                            u()  # type: ignore[misc]
+                        elif hasattr(u, "close"):
+                            try:
+                                u.close()  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        self.logger.error("workflow_unsub_error uid=%s error=%s", uid, repr(e))
+                
+                # 🆕 NOUVEAU : Nettoyer le registre centralisé
+                self.logger.info("🔵 REGISTRY_CLEANUP_START nettoyage pour uid=%s reason=%s", uid, reason)
+                try:
+                    registry = get_registry_listeners()
+                    cleanup_result = registry.cleanup_user_listeners(uid)
+                    if cleanup_result.get("success"):
+                        cleaned_count = cleanup_result.get("cleaned_count", 0)
+                        self.logger.info("🟢 REGISTRY_CLEANUP_SUCCESS uid=%s cleaned=%s", uid, cleaned_count)
+                    else:
+                        self.logger.error("🔴 REGISTRY_CLEANUP_FAILED uid=%s error=%s", uid, cleanup_result.get("error"))
+                except Exception as e:
+                    # Ne pas bloquer si le nettoyage échoue
+                    self.logger.error("🔴 REGISTRY_CLEANUP_ERROR uid=%s error=%s", uid, repr(e), exc_info=True)
             except Exception as e:
-                self.logger.error("workflow_unsub_error uid=%s error=%s", uid, repr(e))
-        
-        # 🆕 NOUVEAU : Nettoyer le registre centralisé
-        self.logger.info("🔵 REGISTRY_CLEANUP_START nettoyage pour uid=%s reason=%s", uid, reason)
-        try:
-            registry = get_registry_listeners()
-            cleanup_result = registry.cleanup_user_listeners(uid)
-            if cleanup_result.get("success"):
-                cleaned_count = cleanup_result.get("cleaned_count", 0)
-                self.logger.info("🟢 REGISTRY_CLEANUP_SUCCESS uid=%s cleaned=%s", uid, cleaned_count)
-            else:
-                self.logger.error("🔴 REGISTRY_CLEANUP_FAILED uid=%s error=%s", uid, cleanup_result.get("error"))
-        except Exception as e:
-            # Ne pas bloquer si le nettoyage échoue
-            self.logger.error("🔴 REGISTRY_CLEANUP_ERROR uid=%s error=%s", uid, repr(e), exc_info=True)
+                self.logger.error("detach_thread_error uid=%s error=%s", uid, repr(e), exc_info=True)
+
+        # Exécuter le nettoyage dans un thread séparé pour ne pas bloquer la boucle principale (Health Check)
+        threading.Thread(target=_do_detach, name=f"detach-{uid}", daemon=True).start()
 
     def publish(self, uid: str, payload: dict) -> None:
         """Méthode publique pour publier des messages via Redis/WS"""
