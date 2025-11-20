@@ -250,6 +250,30 @@ class ListenersManager:
 
         def _do_detach():
             try:
+                # ⏰ DÉLAI DE 5 SECONDES pour permettre la reconnexion rapide
+                # Ce délai évite les race conditions entre déconnexion et reconnexion immédiate
+                delay_seconds = 5
+                self.logger.info(
+                    "⏰ user_detach_delay_start uid=%s reason=%s delay=%ss", 
+                    uid, reason, delay_seconds
+                )
+                time.sleep(delay_seconds)
+                
+                # 🔍 VÉRIFICATION : L'utilisateur s'est-il reconnecté pendant le délai ?
+                with self._lock:
+                    if uid in self._user_unsubs:
+                        # ✅ Reconnexion détectée : annuler le nettoyage
+                        self.logger.info(
+                            "✅ user_detach_cancelled uid=%s reason=reconnected_during_delay",
+                            uid
+                        )
+                        return
+                
+                self.logger.info(
+                    "🧹 user_detach_executing uid=%s reason=%s (no reconnection detected)",
+                    uid, reason
+                )
+                
                 # Détacher les listeners standards
                 for u in unsubs:
                     try:

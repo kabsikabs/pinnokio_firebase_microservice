@@ -193,6 +193,24 @@ def debug():
     return report
 
 
+@app.get("/ws-metrics")
+def ws_metrics():
+    """Endpoint pour consulter les métriques de déconnexion WebSocket."""
+    try:
+        from .ws_metrics import get_ws_metrics
+        metrics = get_ws_metrics()
+        return {
+            "status": "ok",
+            "metrics": metrics.get_summary()
+        }
+    except Exception as e:
+        logger.error("ws_metrics_error error=%s", repr(e))
+        return {
+            "status": "error",
+            "error": repr(e)
+        }
+
+
 # ===================== RPC (contrat applicatif) =====================
 
 class RpcRequest(BaseModel):
@@ -1269,18 +1287,42 @@ async def websocket_endpoint(ws: WebSocket):
             # Lectures éventuellement inutilisées (backend peut ne rien envoyer)
             await ws.receive_text()
     except WebSocketDisconnect as e:
+        disconnect_reason = "unknown"
         try:
             code = getattr(e, "code", None)
             reason = getattr(e, "reason", None)
-            logger.info("ws_disconnect uid=%s code=%s reason=%s", ws.query_params.get("uid"), code, reason)
+            
+            # 🔍 Identifier le type de déconnexion
+            if code == 1000:
+                disconnect_reason = "normal_closure"
+            elif code == 1001:
+                disconnect_reason = "going_away"
+            elif code == 1006:
+                disconnect_reason = "abnormal_closure"
+            elif code == 1011:
+                disconnect_reason = "server_error"
+            else:
+                disconnect_reason = f"code_{code}"
+            
+            logger.warning(
+                "🔴 ws_disconnect uid=%s code=%s reason=%s type=%s", 
+                ws.query_params.get("uid"), code, reason, disconnect_reason
+            )
         except Exception:
-            logger.info("ws_disconnect uid=%s", ws.query_params.get("uid"))
+            logger.warning("🔴 ws_disconnect uid=%s type=exception", ws.query_params.get("uid"))
     except Exception as e:
-        logger.error("ws_error error=%s", repr(e))
+        logger.error("🔴 ws_error uid=%s error=%s", ws.query_params.get("uid"), repr(e), exc_info=True)
     finally:
         try:
             uid = ws.query_params.get("uid")
             if uid:
+                # 📊 Enregistrer la métrique de déconnexion
+                try:
+                    from .ws_metrics import record_ws_disconnect
+                    record_ws_disconnect(uid, disconnect_reason if 'disconnect_reason' in locals() else "unknown")
+                except Exception:
+                    pass
+                
                 await hub.unregister(uid, ws)
                 # Arrête le heartbeat et marque l'utilisateur offline
                 try:
@@ -1292,8 +1334,10 @@ async def websocket_endpoint(ws: WebSocket):
                 except Exception:
                     pass
                 await _set_presence(uid, status="offline")
-        except Exception:
-            pass
+                
+                logger.info("🟡 ws_cleanup_complete uid=%s", uid)
+        except Exception as e:
+            logger.error("🔴 ws_cleanup_error error=%s", repr(e), exc_info=True)
 
 
 # ===== Présence / Heartbeat Firestore =====
