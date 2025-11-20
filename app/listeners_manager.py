@@ -6,6 +6,7 @@ from typing import Callable, Dict, List, Optional
 
 from google.cloud import firestore
 from google.cloud.firestore_v1 import DocumentSnapshot
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 from .config import get_settings
 from .firebase_client import get_firestore
@@ -97,7 +98,14 @@ class ListenersManager:
         self.logger.info("registry_watch stop")
         try:
             if self._registry_unsub:
-                self._registry_unsub()
+                # Le retour de on_snapshot est un objet Watch qui a une méthode unsubscribe()
+                # ou close() selon les versions, mais n'est pas callable directement
+                if hasattr(self._registry_unsub, "unsubscribe"):
+                    self._registry_unsub.unsubscribe()
+                elif hasattr(self._registry_unsub, "close"):
+                    self._registry_unsub.close()
+                elif callable(self._registry_unsub):
+                    self._registry_unsub()
         except Exception as e:
             self.logger.error("registry_unsub error=%s", repr(e))
         with self._lock:
@@ -158,7 +166,7 @@ class ListenersManager:
             q = (
                 self.db.collection("clients").document(uid)
                 .collection("notifications")
-                .where("read", "==", False)
+                .where(filter=FieldFilter("read", "==", False))
             )
             self.logger.info("user_attach_firebase_listener uid=%s", uid)
             unsub_notif = q.on_snapshot(lambda docs, changes, rt: self._on_notifications(uid, docs, changes, rt))  # type: ignore[arg-type]
@@ -338,7 +346,7 @@ class ListenersManager:
             q = (
                 self.db.collection("clients").document(uid)
                 .collection("notifications")
-                .where("read", "==", False)
+                .where(filter=FieldFilter("read", "==", False))
             )
             docs = list(q.stream())
             raw_items = []
@@ -948,8 +956,18 @@ class ListenersManager:
             # Extraire les données d'étapes
             step_status = doc_data.get("APBookeeper_step_status", {})
 
+            # Gestion de la compatibilité: si c'est une string (ex: status final legacy), on l'encapsule
+            if isinstance(step_status, str):
+                self.logger.debug("step_changes_legacy_string_detected uid=%s job_id=%s val=%s", uid, job_id, step_status)
+                step_status = {"status_label": step_status}
+
             # Vérifier que step_status est bien un dictionnaire
             if not isinstance(step_status, dict):
+                # Si c'est une string (ex: statut de fin de job legacy), on l'ignore proprement
+                if isinstance(step_status, str):
+                    self.logger.debug("step_changes_legacy_string_status uid=%s job_id=%s value=%s", uid, job_id, step_status)
+                    return
+
                 self.logger.warning("step_changes_invalid_type uid=%s job_id=%s type=%s value=%s",
                                    uid, job_id, type(step_status).__name__, step_status)
                 return

@@ -219,7 +219,7 @@ class FirebaseManagement:
         try:
             # Référence à la collection telegram_users
             users_ref = self.db.collection('telegram_users')
-            query = users_ref.where('is_active', '==', True)
+            query = users_ref.where(filter=FieldFilter('is_active', '==', True))
             
             docs = query.get()
             
@@ -451,7 +451,7 @@ class FirebaseManagement:
     def get_beta_request_by_email(self, email: str) -> Optional[dict]:
         """Retourne l'entrée beta_request pour un email donné s'il existe."""
         try:
-            query = self.db.collection("beta_request").where("email", "==", email).limit(1)
+            query = self.db.collection("beta_request").where(filter=FieldFilter("email", "==", email)).limit(1)
             docs = query.get()
             for doc in docs:
                 data = doc.to_dict()
@@ -2433,7 +2433,7 @@ class FirebaseManagement:
             try:
                 query = ref.where(filter=firestore.FieldFilter("invited_by", "==", invited_by)).limit(limit)
             except Exception:
-                query = ref.where("invited_by", "==", invited_by).limit(limit)
+                query = ref.where(filter=FieldFilter("invited_by", "==", invited_by)).limit(limit)
             docs = query.stream()
             results: List[Dict[str, Any]] = []
             for doc in docs:
@@ -2497,7 +2497,7 @@ class FirebaseManagement:
                 query = ref.where(filter=firestore.FieldFilter("read", "==", False)).order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit)
             except Exception:
                 # Fallback: certains environnements ne supportent pas FieldFilter/order_by combiné
-                query = ref.where("read", "==", False).limit(limit)
+                query = ref.where(filter=FieldFilter("read", "==", False)).limit(limit)
 
             docs = query.stream()
             results: List[Dict[str, Any]] = []
@@ -2531,7 +2531,7 @@ class FirebaseManagement:
                 try:
                     query = ref.where(filter=firestore.FieldFilter("read", "==", bool(read))).limit(limit)
                 except Exception:
-                    query = ref.where("read", "==", bool(read)).limit(limit)
+                    query = ref.where(filter=FieldFilter("read", "==", bool(read))).limit(limit)
             docs = query.stream()
             out: List[Dict[str, Any]] = []
             for doc in docs:
@@ -2899,7 +2899,7 @@ class FirebaseManagement:
         print(f"🔍 Controle de l'existance du mail du client : {email_adresse}")
 
         # Vérification si un e-mail identique existe déjà dans la collection clients
-        existing_docs = self.db.collection("clients").where("client_email", "==", email_adresse).get()
+        existing_docs = self.db.collection("clients").where(filter=FieldFilter("client_email", "==", email_adresse)).get()
         if existing_docs:
             print(f"⚠️ L'adresse e-mail {email_adresse} existe déjà dans la collection clients.")
             return True  # Arrête l'exécution si un utilisateur avec le même e-mail existe
@@ -3036,7 +3036,7 @@ class FirebaseManagement:
 
             # Rechercher les fichiers dans la base de données pour chaque file_name
             for file_name in file_names:
-                query = journal_ref.where('file_name', '==', file_name).where('mandat_id', '==', mandat_id).get()
+                query = journal_ref.where(filter=FieldFilter('file_name', '==', file_name)).where(filter=FieldFilter('mandat_id', '==', mandat_id)).get()
                 
                 if query:
                     for doc in query:
@@ -3060,7 +3060,7 @@ class FirebaseManagement:
             base_path = 'bo_clients'
         
         clients_ref = self.db.collection(base_path)
-        query = clients_ref.where('client_name', '==', client_name)
+        query = clients_ref.where(filter=FieldFilter('client_name', '==', client_name))
         results = query.stream()
 
         for doc in results:
@@ -3089,7 +3089,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients'
         else:
             base_path = 'bo_clients'
-        client_query = self.db.collection(base_path).where('client_uuid', '==', client_uuid).limit(1).get()
+        client_query = self.db.collection(base_path).where(filter=FieldFilter('client_uuid', '==', client_uuid)).limit(1).get()
 
         # Si un client correspondant est trouvé
         if client_query:
@@ -3104,7 +3104,7 @@ class FirebaseManagement:
             #mandates_collection_path = f'bo_clients/{client_doc_id}/mandates'
 
             # Requête dans la sous-collection 'mandates' pour trouver un document avec le business_name donné
-            mandates_query = self.db.collection(base_path).where('contact_space_name', '==', business_name).limit(1).get()
+            mandates_query = self.db.collection(base_path).where(filter=FieldFilter('contact_space_name', '==', business_name)).limit(1).get()
 
             # Vérification si un document correspondant existe
             return len(mandates_query) > 0
@@ -3138,7 +3138,7 @@ class FirebaseManagement:
 
 
     def check_if_users_exist(self,mail_to_invite):
-        user_query=self.db.collection('users').where('email','==',mail_to_invite).limit(1).get()
+        user_query=self.db.collection('users').where(filter=FieldFilter('email','==',mail_to_invite)).limit(1).get()
         for user_doc in user_query:
             existing_user = {
                 "uid": user_doc.id,
@@ -3165,7 +3165,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/klk_vision'
         else:
             base_path = 'klk_vision'
-        doc_ref = self.db.collection(base_path).where('departement', '==', department).limit(1).get()
+        doc_ref = self.db.collection(base_path).where(filter=FieldFilter('departement', '==', department)).limit(1).get()
 
         if not doc_ref:
             raise ValueError(f"No document found for department {department}")
@@ -3817,7 +3817,7 @@ class FirebaseManagement:
     def fetch_documents_from_firestore(self,collection_path, mandat_id_value, max_docs=None):
        
         collection_ref = self.db.collection(collection_path)
-        query = collection_ref.where('mandat_id', '==', mandat_id_value)
+        query = collection_ref.where(filter=FieldFilter('mandat_id', '==', mandat_id_value))
 
         documents = query.stream()
         documents_list = [doc.to_dict() for doc in documents]
@@ -4391,7 +4391,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/klk_vision'
         else:
             base_path = 'klk_vision'
-        router_query = self.db.collection(base_path).where('departement', '==', departement).limit(1).get()
+        router_query = self.db.collection(base_path).where(filter=FieldFilter('departement', '==', departement)).limit(1).get()
         entries_with_paths = []  # Liste principale pour stocker les sous-listes des entrées
 
         for doc in router_query:
@@ -4403,7 +4403,7 @@ class FirebaseManagement:
 
 
             # Appliquer les filtres sur la sous-collection 'journal'
-            journal_query = journal_query.where('mandat_id', '==', mandat_id).where('source', '==', source)
+            journal_query = journal_query.where(filter=FieldFilter('mandat_id', '==', mandat_id)).where(filter=FieldFilter('source', '==', source))
 
             # Exécuter la requête et itérer sur les résultats
             journal_entries = journal_query.stream()
@@ -4519,7 +4519,7 @@ class FirebaseManagement:
                 base_path = f'clients/{user_id}/klk_vision'
             else:
                 base_path = 'klk_vision'
-            router_query = self.db.collection(base_path).where('departement', '==', departement).limit(1).get()
+            router_query = self.db.collection(base_path).where(filter=FieldFilter('departement', '==', departement)).limit(1).get()
             entries_with_paths = []  # Liste pour stocker les données des entrées et leurs chemins
 
             for doc in router_query:
@@ -4535,7 +4535,7 @@ class FirebaseManagement:
                 journal_query = self.db.collection(base_path).document(router_doc_id).collection('journal')
 
                 # Appliquer les filtres sur la sous-collection 'journal'
-                journal_query = journal_query.where('mandat_id', '==', mandat_id)
+                journal_query = journal_query.where(filter=FieldFilter('mandat_id', '==', mandat_id))
 
                 # Exécuter la requête et itérer sur les résultats
                 journal_entries = journal_query.stream()
@@ -4577,7 +4577,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/klk_vision'
         else:
             base_path = 'klk_vision'
-        router_query = self.db.collection(base_path).where('departement', '==', departement).limit(1).get()
+        router_query = self.db.collection(base_path).where(filter=FieldFilter('departement', '==', departement)).limit(1).get()
         entries_with_paths = []  # Liste pour stocker les données des entrées et leurs chemins
 
         for doc in router_query:
@@ -4589,7 +4589,7 @@ class FirebaseManagement:
             journal_query = self.db.collection(base_path).document(router_doc_id).collection('journal')
 
             # Appliquer les filtres sur la sous-collection 'journal'
-            journal_query = journal_query.where('mandat_id', '==', mandat_id).where('source', '==', source)
+            journal_query = journal_query.where(filter=FieldFilter('mandat_id', '==', mandat_id)).where(filter=FieldFilter('source', '==', source))
 
             # Exécuter la requête et itérer sur les résultats
             journal_entries = journal_query.stream()
@@ -4624,7 +4624,7 @@ class FirebaseManagement:
         else:
             base_path = 'klk_vision'
         
-        router_query = self.db.collection(base_path).where('departement', '==', departement).limit(1).get()
+        router_query = self.db.collection(base_path).where(filter=FieldFilter('departement', '==', departement)).limit(1).get()
         entries_with_paths = []  # Liste pour stocker les données des entrées et leurs chemins
 
         for doc in router_query:
@@ -4637,9 +4637,9 @@ class FirebaseManagement:
 
             # Appliquer les filtres sur la sous-collection 'journal'
             # Filtrer par mandat_id, source ET status 'pending'
-            journal_query = journal_query.where('mandat_id', '==', mandat_id)\
-                                    .where('source', '==', source)\
-                                    .where('status', '==', 'pending')
+            journal_query = journal_query.where(filter=FieldFilter('mandat_id', '==', mandat_id))\
+                                    .where(filter=FieldFilter('source', '==', source))\
+                                    .where(filter=FieldFilter('status', '==', 'pending'))
 
             # Exécuter la requête et itérer sur les résultats
             journal_entries = journal_query.stream()
@@ -4747,7 +4747,7 @@ class FirebaseManagement:
             
             for doc in docs:
                 journal_ref = doc.reference.collection('journal')
-                journal_docs = journal_ref.where('job_id', '==', job_id).stream()
+                journal_docs = journal_ref.where(filter=FieldFilter('job_id', '==', job_id)).stream()
                 
                 for jdoc in journal_docs:
                     print(f"Suppression du document avec job_id: {job_id} dans klk_vision/{doc.id}/journal")
@@ -4830,12 +4830,12 @@ class FirebaseManagement:
             else:
                 base_path = 'bo_clients'
             print(f"impression de base_path: {base_path} et client_name: {client_name} et business_name: {business_name}")
-            clients = self.db.collection(base_path).where('client_name', '==', client_name).limit(1).get()
+            clients = self.db.collection(base_path).where(filter=FieldFilter('client_name', '==', client_name)).limit(1).get()
             if clients:
                 client_doc_ref = clients[0].reference  # Référence au document du client trouvé
                 
                 # Recherche du document mandat par business_name dans la sous-collection 'mandates'
-                mandates = client_doc_ref.collection('mandates').where('contact_space_name', '==', business_name).limit(1).get()
+                mandates = client_doc_ref.collection('mandates').where(filter=FieldFilter('contact_space_name', '==', business_name)).limit(1).get()
                 if mandates:
                     mandate_doc_ref = mandates[0].reference  # Référence au document du mandat trouvé
                     
@@ -4885,7 +4885,7 @@ class FirebaseManagement:
             else:
                 base_path = "bo_clients"
 
-            query = self.db.collection(base_path).where('client_name', '==', client_name).limit(1).get()
+            query = self.db.collection(base_path).where(filter=FieldFilter('client_name', '==', client_name)).limit(1).get()
             if not query:
                 return False, "Client not found."
 
@@ -6130,7 +6130,7 @@ class FirebaseManagement:
                 document_path = f'clients/{user_id}/bo_clients'
         else:
             document_path = f"bo_clients"
-        clients_query = self.db.collection(document_path).where('client_uuid', '==', client_uuid).limit(1).get()
+        clients_query = self.db.collection(document_path).where(filter=FieldFilter('client_uuid', '==', client_uuid)).limit(1).get()
         client_id = None
         for client_doc in clients_query:
             client_id = client_doc.id  # Obtenir l'ID du client
@@ -6144,7 +6144,7 @@ class FirebaseManagement:
         else:
             document_path = f'bo_clients/{client_id}/mandates'
         
-        mandates_query = self.db.collection(document_path).where('contact_space_id', '==', contact_space_id).get()
+        mandates_query = self.db.collection(document_path).where(filter=FieldFilter('contact_space_id', '==', contact_space_id)).get()
         mandate_id = None
         for mandate_doc in mandates_query:
             mandate_id = mandate_doc.id  # Obtenir l'ID du mandat
@@ -6176,7 +6176,7 @@ class FirebaseManagement:
         else:
             base_path = 'bo_clients'
         
-        clients_query = self.db.collection(base_path).where('client_uuid', '==', client_uuid).limit(1).get()
+        clients_query = self.db.collection(base_path).where(filter=FieldFilter('client_uuid', '==', client_uuid)).limit(1).get()
         client_id = None
         for client_doc in clients_query:
             client_id = client_doc.id  # Obtenir l'ID du client
@@ -6189,7 +6189,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients/{client_id}/mandates'
         else:
             base_path = f'bo_clients/{client_id}/mandates'
-        mandates_query = self.db.collection(base_path).where('contact_space_id', '==', contact_space_id).get()
+        mandates_query = self.db.collection(base_path).where(filter=FieldFilter('contact_space_id', '==', contact_space_id)).get()
         mandate_id = None
         for mandate_doc in mandates_query:
             mandate_id = mandate_doc.id  # Obtenir l'ID du mandat
@@ -6217,7 +6217,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients'
         else:
             base_path = 'bo_clients'
-        clients_query = self.db.collection(base_path).where('client_uuid', '==', client_uuid).limit(1).get()
+        clients_query = self.db.collection(base_path).where(filter=FieldFilter('client_uuid', '==', client_uuid)).limit(1).get()
         client_id = None
         for client_doc in clients_query:
             client_id = client_doc.id  # Obtenir l'ID du client
@@ -6230,7 +6230,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients/{client_id}/mandates'
         else:
             base_path = f'bo_clients/{client_id}/mandates'
-        mandates_query = self.db.collection(base_path).where('contact_space_id', '==', contact_space_id).get()
+        mandates_query = self.db.collection(base_path).where(filter=FieldFilter('contact_space_id', '==', contact_space_id)).get()
         mandate_id = None
         for mandate_doc in mandates_query:
             mandate_id = mandate_doc.id  # Obtenir l'ID du mandat
@@ -6323,7 +6323,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients'
         else:
             base_path = 'bo_clients'
-        clients_query = self.db.collection(base_path).where('client_uuid', '==', client_uuid).limit(1).get()
+        clients_query = self.db.collection(base_path).where(filter=FieldFilter('client_uuid', '==', client_uuid)).limit(1).get()
         client_id = None
         for client_doc in clients_query:
             client_id = client_doc.id  # Obtenir l'ID du client
@@ -6336,7 +6336,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients/{client_id}/mandates'
         else:
             base_path = f'bo_clients/{client_id}/mandates'
-        mandates_query = self.db.collection(base_path).where('contact_space_id', '==', contact_space_id).get()
+        mandates_query = self.db.collection(base_path).where(filter=FieldFilter('contact_space_id', '==', contact_space_id)).get()
         
         mandate_id = None
         for mandate_doc in mandates_query:
@@ -6368,7 +6368,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients'
         else:
             base_path = 'bo_clients'
-        clients_query = self.db.collection(base_path).where('client_uuid', '==', client_uuid).limit(1).get()
+        clients_query = self.db.collection(base_path).where(filter=FieldFilter('client_uuid', '==', client_uuid)).limit(1).get()
         client_id = None
         for client_doc in clients_query:
             client_id = client_doc.id  # Obtenir l'ID du client
@@ -6381,7 +6381,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients/{client_id}/mandates'
         else:
             base_path = f'bo_clients/{client_id}/mandates'
-        mandates_query = self.db.collection(base_path).where('contact_space_id', '==', contact_space_id).get()
+        mandates_query = self.db.collection(base_path).where(filter=FieldFilter('contact_space_id', '==', contact_space_id)).get()
         mandate_id = None
         for mandate_doc in mandates_query:
             mandate_id = mandate_doc.id  # Obtenir l'ID du mandat
@@ -6436,7 +6436,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients'
         else:
             base_path = 'bo_clients'
-        clients_query = self.db.collection(base_path).where('client_uuid', '==', client_uuid).limit(1).get()
+        clients_query = self.db.collection(base_path).where(filter=FieldFilter('client_uuid', '==', client_uuid)).limit(1).get()
         client_id = None
         for client_doc in clients_query:
             client_id = client_doc.id  # Obtenir l'ID du client
@@ -6449,7 +6449,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients/{client_id}/mandates'
         else:
             base_path = f'bo_clients/{client_id}/mandates'
-        mandates_query = self.db.collection(base_path).where('contact_space_id', '==', contact_space_id).get()
+        mandates_query = self.db.collection(base_path).where(filter=FieldFilter('contact_space_id', '==', contact_space_id)).get()
         mandate_id = None
         for mandate_doc in mandates_query:
             mandate_id = mandate_doc.id  # Obtenir l'ID du mandat
@@ -6501,7 +6501,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients'
         else:
             base_path = 'bo_clients'
-        clients_query = self.db.collection(base_path).where('client_uuid', '==', client_uuid).limit(1).get()
+        clients_query = self.db.collection(base_path).where(filter=FieldFilter('client_uuid', '==', client_uuid)).limit(1).get()
         client_id = None
         for client_doc in clients_query:
             client_id = client_doc.id  # Obtenir l'ID du client
@@ -6514,7 +6514,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients/{client_id}/mandates'
         else:
             base_path = f'bo_clients/{client_id}/mandates'
-        mandates_query = self.db.collection(base_path).where('contact_space_id', '==', contact_space_id).get()
+        mandates_query = self.db.collection(base_path).where(filter=FieldFilter('contact_space_id', '==', contact_space_id)).get()
         mandate_id = None
         for mandate_doc in mandates_query:
             mandate_id = mandate_doc.id  # Obtenir l'ID du mandat
@@ -6545,7 +6545,7 @@ class FirebaseManagement:
         else:
             base_path = 'bo_clients'
         # Étape 1: Récupérer les données générales du client pour obtenir l'ID
-        clients_query = self.db.collection(base_path).where('client_uuid', '==', client_uuid).limit(1).get()
+        clients_query = self.db.collection(base_path).where(filter=FieldFilter('client_uuid', '==', client_uuid)).limit(1).get()
         client_id = next((client_doc.id for client_doc in clients_query), None)
 
         if not client_id:
@@ -6556,7 +6556,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients/{client_id}/mandates'
         else:
             base_path = f'bo_clients/{client_id}/mandates'
-        mandates_query = self.db.collection(base_path).where('contact_space_id', '==', contact_space_id).get()
+        mandates_query = self.db.collection(base_path).where(filter=FieldFilter('contact_space_id', '==', contact_space_id)).get()
         mandate_id = next((mandate_doc.id for mandate_doc in mandates_query), None)
 
         if not mandate_id:
@@ -6603,7 +6603,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients'
         else:
             base_path = 'bo_clients'
-        clients_query = self.db.collection(base_path).where('client_uuid', '==', client_uuid).limit(1).get()
+        clients_query = self.db.collection(base_path).where(filter=FieldFilter('client_uuid', '==', client_uuid)).limit(1).get()
         client_id = next((client_doc.id for client_doc in clients_query), None)
         
         if not client_id:
@@ -6614,7 +6614,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients/{client_id}/mandates'
         else:
             base_path = f'bo_clients/{client_id}/mandates'
-        mandates_query = self.db.collection(base_path).where('contact_space_id', '==', contact_space_id).get()
+        mandates_query = self.db.collection(base_path).where(filter=FieldFilter('contact_space_id', '==', contact_space_id)).get()
         mandate_id = next((mandate_doc.id for mandate_doc in mandates_query), None)
         print(f"impression de mandat_id:{mandate_id}")
         if not mandate_id:
@@ -6652,7 +6652,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients'
         else:
             base_path = 'bo_clients'
-        clients_query = self.db.collection(base_path).where('client_uuid', '==', client_uuid).limit(1).get()
+        clients_query = self.db.collection(base_path).where(filter=FieldFilter('client_uuid', '==', client_uuid)).limit(1).get()
         client_id = next((client_doc.id for client_doc in clients_query), None)
 
         if not client_id:
@@ -6663,7 +6663,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients/{client_id}/mandates'
         else:
             base_path = f'bo_clients/{client_id}/mandates'
-        mandates_query = self.db.collection(base_path).where('contact_space_id', '==', contact_space_id).get()
+        mandates_query = self.db.collection(base_path).where(filter=FieldFilter('contact_space_id', '==', contact_space_id)).get()
         mandate_id = next((mandate_doc.id for mandate_doc in mandates_query), None)
 
         if not mandate_id:
@@ -6704,7 +6704,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients'
         else:
             base_path = 'bo_clients'
-        clients_query = self.db.collection(base_path).where('client_uuid', '==', client_uuid).limit(1).get()
+        clients_query = self.db.collection(base_path).where(filter=FieldFilter('client_uuid', '==', client_uuid)).limit(1).get()
         client_id = None
         for client_doc in clients_query:
             client_id = client_doc.id  # Obtenir l'ID du client
@@ -6717,7 +6717,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients/{client_id}/mandates'
         else:
             base_path =f'bo_clients/{client_id}/mandates'
-        mandates_query = self.db.collection(base_path).where('contact_space_id', '==', contact_space_id).get()
+        mandates_query = self.db.collection(base_path).where(filter=FieldFilter('contact_space_id', '==', contact_space_id)).get()
         mandate_id = None
         for mandate_doc in mandates_query:
             mandate_id = mandate_doc.id  # Obtenir l'ID du mandat
@@ -6771,7 +6771,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients'
         else:
             base_path = 'bo_clients'
-        clients_query = self.db.collection(base_path).where('client_uuid', '==', client_uuid).limit(1).get()
+        clients_query = self.db.collection(base_path).where(filter=FieldFilter('client_uuid', '==', client_uuid)).limit(1).get()
         client_id = None
         for client_doc in clients_query:
             client_id = client_doc.id  # Obtenir l'ID du client
@@ -6784,7 +6784,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients/{client_id}/mandates'
         else:
             base_path = f'bo_clients/{client_id}/mandates'
-        mandates_query = self.db.collection(base_path).where('contact_space_id', '==', mandat_space_id).get()
+        mandates_query = self.db.collection(base_path).where(filter=FieldFilter('contact_space_id', '==', mandat_space_id)).get()
         mandate_id = None
         for mandate_doc in mandates_query:
             mandate_id = mandate_doc.id  # Obtenir l'ID du mandat
@@ -6819,7 +6819,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients'
         else:
             base_path = 'bo_clients'
-        clients_query = self.db.collection(base_path).where('client_uuid', '==', client_uuid).limit(1).get()
+        clients_query = self.db.collection(base_path).where(filter=FieldFilter('client_uuid', '==', client_uuid)).limit(1).get()
         client_id = None
         for client_doc in clients_query:
             client_id = client_doc.id  # Obtenir l'ID du client
@@ -6832,7 +6832,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients/{client_id}/mandates'
         else:
             base_path = f'bo_clients/{client_id}/mandates'
-        mandates_query = self.db.collection(f'bo_clients/{client_id}/mandates').where('contact_space_id', '==', contact_space_id).get()
+        mandates_query = self.db.collection(f'bo_clients/{client_id}/mandates').where(filter=FieldFilter('contact_space_id', '==', contact_space_id)).get()
         mandate_id = None
         for mandate_doc in mandates_query:
             mandate_id = mandate_doc.id  # Obtenir l'ID du mandat
@@ -6889,7 +6889,7 @@ class FirebaseManagement:
         else:
             base_path = 'bo_clients'
         # Étape 1: Récupérer les données générales du client pour obtenir l'ID
-        clients_query = self.db.collection(base_path).where('client_uuid', '==', client_uuid).limit(1).get()
+        clients_query = self.db.collection(base_path).where(filter=FieldFilter('client_uuid', '==', client_uuid)).limit(1).get()
         client_id = None
         for client_doc in clients_query:
             client_id = client_doc.id  # Obtenir l'ID du client
@@ -6902,7 +6902,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients/{client_id}/mandates'
         else:
             base_path = f'bo_clients/{client_id}/mandates'
-        mandates_query = self.db.collection(base_path).where('contact_space_id', '==', contact_space_id).get()
+        mandates_query = self.db.collection(base_path).where(filter=FieldFilter('contact_space_id', '==', contact_space_id)).get()
         mandate_id = None
         for mandate_doc in mandates_query:
             mandate_id = mandate_doc.id  # Obtenir l'ID du mandat
@@ -6934,7 +6934,7 @@ class FirebaseManagement:
         else:
             base_path = 'bo_clients'
         # Étape 1: Récupérer les données générales du client
-        clients_query = self.db.collection(base_path).where('client_uuid', '==', client_uuid).limit(1).get()
+        clients_query = self.db.collection(base_path).where(filter=FieldFilter('client_uuid', '==', client_uuid)).limit(1).get()
         client_id = None
         for client_doc in clients_query:
             client_data = client_doc.to_dict()
@@ -6955,7 +6955,7 @@ class FirebaseManagement:
             base_path = f'clients/{user_id}/bo_clients/{client_id}/mandates'
         else:
             base_path =f'bo_clients/{client_id}/mandates'
-        mandates_query = self.db.collection(base_path).where('contact_space_id', '==', contact_space_id).get()
+        mandates_query = self.db.collection(base_path).where(filter=FieldFilter('contact_space_id', '==', contact_space_id)).get()
         for mandate_doc in mandates_query:
             mandate_data = mandate_doc.to_dict()
             mandate_id = mandate_doc.id
@@ -7117,7 +7117,7 @@ class FirebaseManagement:
         departments = main_collection.list_documents()  # Cela liste les références de documents dans 'klk_vision'
         for department_ref in departments:
             # Accéder à la sous-collection 'journal' de chaque 'departement'
-            journals = department_ref.collection('journal').where('mandat_id', '==', mandat_id).stream()
+            journals = department_ref.collection('journal').where(filter=FieldFilter('mandat_id', '==', mandat_id)).stream()
 
             # Itérer sur les documents filtrés et les ajouter à la liste des résultats
             for journal in journals:
@@ -7186,7 +7186,7 @@ class FirebaseManagement:
             prefix = f"clients/{user_id}/bo_clients/" if user_id else "bo_clients/"
             mandates_query = (
                 self.db.collection_group("mandates")
-                .where("contact_space_id", "==", contact_space_id)
+                .where(filter=FieldFilter("contact_space_id", "==", contact_space_id))
                 .get()
             )
 
@@ -7808,7 +7808,7 @@ class FirebaseManagement:
             tasks_ref = self.db.collection(f"{mandate_path}/tasks")
 
             if status:
-                query = tasks_ref.where("status", "==", status)
+                query = tasks_ref.where(filter=FieldFilter("status", "==", status))
             else:
                 query = tasks_ref
 
@@ -8033,7 +8033,7 @@ class FirebaseManagement:
         """
         try:
             executions_ref = self.db.collection(f"{mandate_path}/tasks/{task_id}/executions")
-            executions = executions_ref.where("status", "in", ["completed", "failed"]).stream()
+            executions = executions_ref.where(filter=FieldFilter("status", "in", ["completed", "failed"])).stream()
 
             count = 0
             for exec_doc in executions:
@@ -8194,7 +8194,7 @@ class FirebaseManagement:
         try:
             # Query /scheduled_tasks avec enabled=True
             scheduler_ref = self.db.collection("scheduled_tasks")
-            query = scheduler_ref.where("enabled", "==", True)
+            query = scheduler_ref.where(filter=FieldFilter("enabled", "==", True))
 
             tasks_ready = []
 

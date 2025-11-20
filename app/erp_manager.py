@@ -1383,17 +1383,19 @@ class ODOO_KLK_VISION:
         # Conversion en DataFrame pour une manipulation facile
         df = pd.DataFrame(bank_statement_moves)
 
-        # Application des filtres optionnels
-        if journal_id is not None:
-            df = df[df['journal_id'].apply(lambda x: x[0] == journal_id)]  # Filtre sur journal_id
-
-        if reconciled is not None:
-            if 'is_reconciled' in df.columns:
-                df = df[df['is_reconciled'] == reconciled]  # Filtre sur reconciled
-            else:
-                # Colonne absente: ignorer le filtre et informer (société sans module bancaire configuré)
-                print("ℹ️ [ERP] Colonne 'is_reconciled' absente; filtre 'reconciled' ignoré (banking module non configuré).")
-
+        if not df.empty:
+            # Application des filtres optionnels uniquement si des données existent
+            if journal_id is not None:
+                if 'journal_id' in df.columns:
+                    df = df[df['journal_id'].apply(lambda x: x[0] == journal_id if isinstance(x, (list, tuple)) and x else False)]
+            
+            if reconciled is not None:
+                if 'is_reconciled' in df.columns:
+                    df = df[df['is_reconciled'] == reconciled]  # Filtre sur reconciled
+                else:
+                    # Colonne absente: ignorer le filtre et informer (société sans module bancaire configuré)
+                    print("ℹ️ [ERP] Colonne 'is_reconciled' absente; filtre 'reconciled' ignoré (banking module non configuré).")
+        
         # Conversion du DataFrame filtré en liste de dictionnaires
         df=self.expand_list_columns(df)
         filtered_data = df.to_dict('records')
