@@ -1282,14 +1282,23 @@ class LLMManager:
                     current_status = status_data.get("status")
 
                     if current_status == "ready":
-                        logger.info(f"[LLM_INIT] ✅ Session déjà initialisée (Redis): {base_session_key}")
-                        return {
-                            "success": True,
-                            "session_id": base_session_key,
-                            "status": "already_initialized",
-                            "message": "Session LLM déjà active",
-                            "completed_at": status_data.get("completed_at")
-                        }
+                        # ⭐ CRITIQUE : Vérifier que la session existe AUSSI en mémoire
+                        # (En cas de redémarrage après crash, Redis peut dire "ready" mais mémoire vide)
+                        with self._lock:
+                            if base_session_key not in self.sessions:
+                                logger.warning(f"[LLM_INIT] ⚠️ Redis dit 'ready' mais session absente de la mémoire → Réinitialisation")
+                                # Invalider cache Redis pour forcer réinitialisation
+                                redis_client.delete(redis_init_key)
+                                # Continuer vers ÉTAPE 2 pour réinitialiser
+                            else:
+                                logger.info(f"[LLM_INIT] ✅ Session déjà initialisée (Redis + Mémoire): {base_session_key}")
+                                return {
+                                    "success": True,
+                                    "session_id": base_session_key,
+                                    "status": "already_initialized",
+                                    "message": "Session LLM déjà active",
+                                    "completed_at": status_data.get("completed_at")
+                                }
 
                     elif current_status == "initializing":
                         logger.info(f"[LLM_INIT] ⏳ Initialisation déjà en cours (Redis): {base_session_key}")
