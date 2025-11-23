@@ -184,18 +184,10 @@ class ListenersManager:
                 self.logger.info("user_attach_message_listener_attached uid=%s", uid)
             self._publish_messages_sync(uid)
 
-            # ⭐ Workflow listener (surveille task_manager pour APBookeeper_step_status)
-            if self._workflow_enabled:
-                self.logger.info("user_attach_workflow_listener uid=%s", uid)
-                workflow_unsubs = self._start_workflow_listener(uid)
-                if workflow_unsubs:
-                    with self._lock:
-                        self._workflow_unsubs[uid] = workflow_unsubs
-                    self.logger.info("user_attach_workflow_listener_attached uid=%s count=%s", uid, len(workflow_unsubs))
-                else:
-                    self.logger.warning("user_attach_workflow_listener_failed uid=%s", uid)
-            else:
-                self.logger.debug("user_attach_workflow_listener_skipped uid=%s reason=disabled", uid)
+            # ❌ WORKFLOW LISTENER RETIRÉ : Désormais démarré à la demande par job_id
+            # Le listener workflow n'est plus global mais activé uniquement quand un utilisateur
+            # ouvre une page EditForm pour un job spécifique (via start_workflow_listener_for_job)
+            self.logger.debug("user_attach_workflow_listener_skipped uid=%s reason=on_demand_only", uid)
             
             with self._lock:
                 self._user_unsubs[uid] = unsubs
@@ -1236,6 +1228,137 @@ class ListenersManager:
                             listener_state.get('batch_id', 'unknown'), repr(e))
             import traceback
             traceback.print_exc()
+
+    # ==================== WORKFLOW LISTENER PAR JOB (ON-DEMAND) ====================
+    
+    def start_workflow_listener_for_job(self, uid: str, job_id: str) -> bool:
+        """
+        Démarre un listener workflow pour un job spécifique (à la demande).
+        
+        Cette méthode permet d'activer la surveillance d'un seul document task_manager
+        uniquement lorsque l'utilisateur ouvre la page EditForm pour ce job.
+        
+        Args:
+            uid (str): User ID
+            job_id (str): Job ID à surveiller
+            
+        Returns:
+            bool: True si succès, False sinon
+        """
+        try:
+            key = f"{uid}_{job_id}"
+            
+            # Vérifier si déjà actif
+            with self._lock:
+                if key in self._workflow_unsubs:
+                    self.logger.info("workflow_listener_already_active uid=%s job_id=%s", uid, job_id)
+                    return True
+            
+            self.logger.info("workflow_listener_start_for_job uid=%s job_id=%s", uid, job_id)
+            
+            # Surveiller UN SEUL document dans task_manager
+            doc_ref = (
+                self.db.collection("clients")
+                .document(uid)
+                .collection("task_manager")
+                .document(job_id)
+            )
+            
+            # Initialiser le cache pour ce job
+            cache_key_invoice = f"{uid}_invoice_{job_id}"
+            cache_key_steps = f"{uid}_steps_{job_id}"
+            with self._lock:
+                if cache_key_invoice not in self._workflow_cache:
+                    self._workflow_cache[cache_key_invoice] = {}
+                if cache_key_steps not in self._workflow_cache:
+                    self._workflow_cache[cache_key_steps] = {}
+            
+            def on_job_snapshot(doc_snapshot, changes, read_time):
+                """Callback pour un job spécifique"""
+                try:
+                    if not doc_snapshot or not doc_snapshot.exists:
+                        self.logger.debug("workflow_job_snapshot_empty uid=%s job_id=%s", uid, job_id)
+                        return
+                    
+                    doc_data = doc_snapshot.to_dict() or {}
+                    space_code = doc_data.get("collection_id") or doc_data.get("space_code")
+                    
+                    self.logger.debug(
+                        "workflow_job_change uid=%s job_id=%s has_apbookeeper=%s has_document=%s",
+                        uid, job_id,
+                        "APBookeeper_step_status" in doc_data,
+                        "document" in doc_data
+                    )
+                    
+                    # Traiter les changements
+                    self._process_invoice_changes(uid, job_id, doc_data, space_code)
+                    self._process_step_changes(uid, job_id, doc_data, space_code)
+                    
+                except Exception as e:
+                    self.logger.error("workflow_job_snapshot_error uid=%s job_id=%s error=%s", 
+                                    uid, job_id, repr(e), exc_info=True)
+            
+            # Attacher le listener sur le document spécifique
+            unsub = doc_ref.on_snapshot(on_job_snapshot)
+            
+            # Sauvegarder le callback de désinscription
+            with self._lock:
+                self._workflow_unsubs[key] = [unsub]
+            
+            self.logger.info("workflow_listener_attached_for_job uid=%s job_id=%s", uid, job_id)
+            return True
+            
+        except Exception as e:
+            self.logger.error("workflow_listener_start_error uid=%s job_id=%s error=%s", 
+                            uid, job_id, repr(e), exc_info=True)
+            return False
+
+    def stop_workflow_listener_for_job(self, uid: str, job_id: str) -> bool:
+        """
+        Arrête le listener workflow pour un job spécifique.
+        
+        Args:
+            uid (str): User ID
+            job_id (str): Job ID à arrêter
+            
+        Returns:
+            bool: True si succès, False sinon
+        """
+        try:
+            key = f"{uid}_{job_id}"
+            
+            with self._lock:
+                unsubs = self._workflow_unsubs.get(key)
+                if not unsubs:
+                    self.logger.info("workflow_listener_not_active uid=%s job_id=%s", uid, job_id)
+                    return False
+                
+                # Détacher le listener
+                for unsub in unsubs:
+                    try:
+                        unsub()
+                    except Exception as e:
+                        self.logger.error("workflow_listener_detach_error uid=%s job_id=%s error=%s",
+                                        uid, job_id, repr(e))
+                
+                # Supprimer de la registry
+                del self._workflow_unsubs[key]
+                
+                # Nettoyer le cache
+                cache_key_invoice = f"{uid}_invoice_{job_id}"
+                cache_key_steps = f"{uid}_steps_{job_id}"
+                self._workflow_cache.pop(cache_key_invoice, None)
+                self._workflow_cache.pop(cache_key_steps, None)
+            
+            self.logger.info("workflow_listener_stopped_for_job uid=%s job_id=%s", uid, job_id)
+            return True
+            
+        except Exception as e:
+            self.logger.error("workflow_listener_stop_error uid=%s job_id=%s error=%s",
+                            uid, job_id, repr(e), exc_info=True)
+            return False
+
+    # ==================== TRANSACTION STATUS LISTENER ====================
 
     def _publish_transaction_status_changes(self, user_id: str, batch_id: str, transaction_changes: dict):
         """Publie les changements de statuts sur Redis.

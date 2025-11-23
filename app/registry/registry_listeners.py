@@ -254,6 +254,25 @@ class RegistryListeners:
                 f"space={space_code} thread={thread_key} mode={mode}"
             )
             
+            # ⭐ NOUVEAU: Si c'est un workflow listener, démarrer le listener Firestore pour ce job
+            if listener_type == "workflow" and thread_key:
+                try:
+                    from ..listeners_manager import listeners_manager
+                    success = listeners_manager.start_workflow_listener_for_job(user_id, thread_key)
+                    if success:
+                        self.logger.info(
+                            f"✅ workflow_listener_firestore_started uid={user_id} job_id={thread_key}"
+                        )
+                    else:
+                        self.logger.warning(
+                            f"⚠️ workflow_listener_firestore_failed uid={user_id} job_id={thread_key}"
+                        )
+                except Exception as e:
+                    self.logger.error(
+                        f"❌ workflow_listener_firestore_error uid={user_id} job_id={thread_key} error={e}",
+                        exc_info=True
+                    )
+            
             return {
                 "success": True,
                 "listener_id": listener_id,
@@ -323,6 +342,25 @@ class RegistryListeners:
                 f"listener_unregister uid={user_id} type={listener_type} "
                 f"listener_id={listener_id} space={space_code} thread={thread_key}"
             )
+            
+            # ⭐ NOUVEAU: Si c'est un workflow listener, arrêter le listener Firestore pour ce job
+            if listener_type == "workflow" and thread_key:
+                try:
+                    from ..listeners_manager import listeners_manager
+                    success = listeners_manager.stop_workflow_listener_for_job(user_id, thread_key)
+                    if success:
+                        self.logger.info(
+                            f"✅ workflow_listener_firestore_stopped uid={user_id} job_id={thread_key}"
+                        )
+                    else:
+                        self.logger.info(
+                            f"ℹ️ workflow_listener_firestore_not_active uid={user_id} job_id={thread_key}"
+                        )
+                except Exception as e:
+                    self.logger.error(
+                        f"❌ workflow_listener_firestore_stop_error uid={user_id} job_id={thread_key} error={e}",
+                        exc_info=True
+                    )
             
             return {
                 "success": True,
@@ -509,6 +547,21 @@ class RegistryListeners:
                 # Filtrer par type si spécifié
                 if listener_types and listener_type not in listener_types:
                     continue
+                
+                # ⭐ NOUVEAU: Si c'est un workflow listener, arrêter le listener Firestore
+                if listener_type == "workflow":
+                    thread_key = data.get("thread_key")
+                    if thread_key:
+                        try:
+                            from ..listeners_manager import listeners_manager
+                            listeners_manager.stop_workflow_listener_for_job(user_id, thread_key)
+                            self.logger.info(
+                                f"✅ workflow_listener_firestore_stopped_on_cleanup uid={user_id} job_id={thread_key}"
+                            )
+                        except Exception as e:
+                            self.logger.error(
+                                f"❌ workflow_listener_stop_error_on_cleanup uid={user_id} job_id={thread_key} error={e}"
+                            )
                 
                 # Supprimer
                 doc.reference.delete()

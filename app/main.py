@@ -1,8 +1,11 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi import Header, HTTPException, status
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional, Tuple, Callable, List
 import json as _json
+import base64
+import requests
 import os
 import time
 import logging
@@ -211,6 +214,251 @@ def ws_metrics():
         }
 
 
+# ═══════════════════════════════════════════════════════════════
+# GOOGLE AUTH CALLBACK (BACKEND)
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/google_auth_callback/", response_class=HTMLResponse)
+async def google_auth_callback(request: Request):
+    """
+    Callback pour l'authentification Google OAuth2 initiée par le backend/agents.
+    
+    Ce endpoint :
+    1. Reçoit le code d'autorisation et le state
+    2. Décode le state pour identifier l'utilisateur et le contexte
+    3. Échange le code contre des tokens (Access + Refresh)
+    4. Met à jour les credentials dans Firebase
+    5. Notifie l'agent en attente via le système de chat
+    """
+    try:
+        params = request.query_params
+        code = params.get('code')
+        state_str = params.get('state')
+        error = params.get('error')
+        
+        if error:
+            logger.error(f"google_auth_callback_error error={error}")
+            return HTMLResponse(content=f"<h1>Erreur d'authentification</h1><p>{error}</p>", status_code=400)
+            
+        if not code or not state_str:
+            return HTMLResponse(content="<h1>Paramètres manquants</h1><p>Code ou State manquant.</p>", status_code=400)
+            
+        # 1. Décoder le state
+        try:
+            try:
+                decoded_state = base64.b64decode(state_str).decode('utf-8')
+                state = _json.loads(decoded_state)
+            except:
+                state = _json.loads(state_str)
+                
+            logger.info(f"google_auth_callback state={state}")
+            
+            user_id = state.get('user_id')
+            job_id = state.get('job_id')
+            source = state.get('source')
+            communication_mode = state.get('communication_mode', 'google_chat')
+            redirect_uri = state.get('redirect_uri')
+            chat_id = state.get('chat_id')  # ✅ RÉCUPÉRATION DU CHAT_ID du state OAuth
+            
+            if not user_id:
+                raise ValueError("user_id manquant dans le state")
+                
+        except Exception as e:
+            logger.error(f"google_auth_callback_state_error error={e}")
+            return HTMLResponse(content=f"<h1>Erreur de contexte</h1><p>State invalide: {e}</p>", status_code=400)
+            
+        # 2. Récupérer la configuration client depuis Firebase
+        # On récupère le token actuel pour extraire client_id/secret
+        fb_user = get_firebase_management()
+        fb_user.user_id = user_id
+        
+        try:
+            creds_info = fb_user.user_app_permission_token()
+        except:
+            creds_info = {}
+        
+        client_id = creds_info.get('client_id')
+        client_secret = creds_info.get('client_secret')
+        token_uri = creds_info.get('token_uri', 'https://oauth2.googleapis.com/token')
+        
+        if not client_id or not client_secret:
+             # Fallback: Essayer de récupérer depuis les secrets globaux
+             try:
+                app_creds = _json.loads(get_secret("pinnokio_google_client_secret"))
+                client_id = app_creds.get('web', {}).get('client_id')
+                client_secret = app_creds.get('web', {}).get('client_secret')
+             except:
+                pass
+                
+        if not client_id or not client_secret:
+            return HTMLResponse(content="<h1>Erreur Configuration</h1><p>Client ID ou Secret introuvable.</p>", status_code=500)
+
+        # 3. Échanger le code contre les tokens
+        token_data = {
+            'code': code,
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'redirect_uri': redirect_uri,
+            'grant_type': 'authorization_code'
+        }
+        
+        logger.info(f"google_auth_exchange uri={redirect_uri}")
+        
+        response = requests.post(token_uri, data=token_data)
+        
+        if response.status_code != 200:
+            logger.error(f"google_auth_exchange_failed status={response.status_code} body={response.text}")
+            return HTMLResponse(content=f"<h1>Erreur Échange Token</h1><p>{response.text}</p>", status_code=400)
+            
+        tokens = response.json()
+        
+        # 4. Mettre à jour Firebase
+        from datetime import datetime, timedelta
+        
+        update_payload = {
+            'token': tokens.get('access_token'),
+            'expiry': (datetime.now() + timedelta(seconds=tokens.get('expires_in', 3600))).isoformat(),
+        }
+        
+        if 'refresh_token' in tokens:
+            update_payload['refresh_token'] = tokens['refresh_token']
+            
+        # Sauvegarder via Firestore
+        db = get_firestore()
+        try:
+            # Essayer d'abord de mettre à jour via user_param (structure probable)
+            user_param_ref = db.collection('users_param').document(user_id)
+            user_param_ref.set({'token_data': update_payload}, merge=True)
+            logger.info(f"google_auth_firebase_update success user={user_id}")
+        except Exception as e:
+            logger.error(f"google_auth_firebase_update_error {e}")
+            return HTMLResponse(content=f"<h1>Erreur Sauvegarde</h1><p>{e}</p>", status_code=500)
+            
+        # 5. Notifier l'agent en attente via le canal approprié
+        if communication_mode:
+            try:
+                context_params = state.get('context_params', {})
+                message_text = "✅ Authentification Google Drive réussie ! Les accès sont à jour. TERMINATE"
+                
+                logger.info(f"google_auth_notify mode={communication_mode} params={context_params.keys()}")
+                
+                # --- TELEGRAM (ROUTAGE INTERNE) ---
+                if communication_mode == 'telegram':
+                    # 1. Déterminer l'environnement (LOCAL vs PROD)
+                    env = os.getenv('ENVIRONMENT', 'LOCAL')
+                    
+                    # 2. Définir Base URL
+                    if env == 'LOCAL':
+                        base_url = 'http://127.0.0.1'
+                    else:
+                        base_url = os.getenv('PINNOKIO_AWS_URL', 'http://klk-load-balancer-http-https-435479360.us-east-1.elb.amazonaws.com')
+                    
+                    # 3. Définir Target URL en fonction de la source
+                    target_url = ""
+                    
+                    if source in ['filemanager', 'router', 'onboarding', 'filemanager_agent']:
+                        port = ":8080" if env == 'LOCAL' else ""
+                        target_url = f"{base_url}{port}/router_webhook/telegram-response"
+                        
+                    elif source == 'apbookeeper':
+                        port = ":8081" if env == 'LOCAL' else ""
+                        target_url = f"{base_url}{port}/apbookeeper_webhook/telegram-response"
+                        
+                    elif source == 'banker':
+                        port = ":8082" if env == 'LOCAL' else ""
+                        target_url = f"{base_url}{port}/banker_webhook/telegram-response"
+                    
+                    else:
+                        # Fallback sur Router par défaut
+                        port = ":8080" if env == 'LOCAL' else ""
+                        target_url = f"{base_url}{port}/router_webhook/telegram-response"
+
+                    logger.info(f"google_auth_routing_telegram source={source} target={target_url}")
+
+                    # 4. Construire le payload attendu par le webhook
+                    # ✅ UTILISATION DU CHAT_ID du state en priorité
+                    effective_chat_id = chat_id or context_params.get('chat_id') or context_params.get('subscription_id')
+                    
+                    webhook_payload = {
+                        "mandate_path": context_params.get('mandate_path'),
+                        "response": {
+                            "type": "message",
+                            "chat_id": effective_chat_id,
+                            "text": message_text
+                        }
+                    }
+                    
+                    logger.info(f"google_auth_webhook_payload mandate={webhook_payload.get('mandate_path')} chat_id={effective_chat_id}")
+                    
+                    # 5. Envoyer la requête au service interne
+                    if target_url and webhook_payload.get("mandate_path"):
+                        try:
+                            resp = requests.post(target_url, json=webhook_payload, timeout=5)
+                            logger.info(f"google_auth_notify_telegram_routed status={resp.status_code}")
+                        except Exception as e:
+                            logger.error(f"google_auth_notify_telegram_routed_error {e}")
+                    else:
+                        logger.warning(f"google_auth_notify_telegram_skip missing_url_or_mandate path={webhook_payload.get('mandate_path')}")
+
+                # --- PINNOKIO (WEB) ---
+                elif communication_mode == 'pinnokio':
+                    # Notification via WebSocket Hub si l'utilisateur est connecté
+                    if user_id:
+                        # Message système simulé
+                        payload = {
+                            "type": "chat_message",
+                            "content": message_text,
+                            "role": "system",
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        await hub.broadcast(user_id, payload)
+                        logger.info(f"google_auth_notify_pinnokio broadcast to {user_id}")
+
+                # --- GOOGLE CHAT ---
+                elif communication_mode == 'google_chat':
+                    # Nécessite un webhook ou thread_key + API
+                    # Si on a un webhook stocké dans le state
+                    webhook_url = context_params.get('webhook_url')
+                    if webhook_url:
+                        requests.post(webhook_url, json={"text": message_text})
+                        logger.info("google_auth_notify_gchat webhook sent")
+                    else:
+                        # TODO: Implémenter envoi via API si nécessaire
+                        pass
+
+            except Exception as notify_err:
+                logger.error(f"google_auth_notify_global_error {notify_err}")
+
+        # 6. Réponse UI (HTML)
+        return HTMLResponse(content="""
+        <html>
+            <head>
+                <title>Authentification Réussie</title>
+                <style>
+                    body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #f0f2f5; }
+                    .card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; }
+                    .success { color: #10b981; font-size: 4rem; margin-bottom: 1rem; }
+                    h1 { color: #1f2937; }
+                    p { color: #4b5563; }
+                </style>
+            </head>
+            <body>
+                <div class="card">
+                    <div class="success">✅</div>
+                    <h1>Connexion Réussie !</h1>
+                    <p>Les accès Google Drive ont été mis à jour.</p>
+                    <p>Vous pouvez fermer cette fenêtre.</p>
+                    <script>setTimeout(function() { window.close(); }, 3000);</script>
+                </div>
+            </body>
+        </html>
+        """, status_code=200)
+        
+    except Exception as e:
+        logger.error(f"google_auth_callback_fatal_error {e}", exc_info=True)
+        return HTMLResponse(content=f"<h1>Erreur Serveur</h1><p>{str(e)}</p>", status_code=500)
+
+
 # ===================== RPC (contrat applicatif) =====================
 
 class RpcRequest(BaseModel):
@@ -313,6 +561,16 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
             target = getattr(get_registry_listeners(), name, None)
             if callable(target):
                 return target, "REGISTRY"
+    
+    # === LISTENERS MANAGER (Workflow Listener à la demande) ===
+    if method.startswith("LISTENERS."):
+        name = method.split(".", 1)[1]
+        # ⭐ Workflow listener par job (on-demand)
+        if name in ["start_workflow_listener_for_job", "stop_workflow_listener_for_job"]:
+            target = getattr(listeners_manager, name, None)
+            if callable(target):
+                return target, "LISTENERS"
+    
     if method.startswith("CHROMA_VECTOR."):
         name = method.split(".", 1)[1]
         
