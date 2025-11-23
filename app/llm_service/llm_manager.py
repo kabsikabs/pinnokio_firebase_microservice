@@ -1075,9 +1075,35 @@ class LLMManager:
             f"[ENSURE_SESSION] Initialisation session (nouvelle ou données manquantes): {session_key}"
         )
         
+        # ⭐ CRITIQUE : Récupérer client_uuid depuis contact_space_id AVANT d'initialiser
+        client_uuid = None
+        try:
+            from ..firebase_providers import FirebaseManagement
+            firebase_service = FirebaseManagement()
+            lookup = firebase_service.resolve_client_by_contact_space(user_id, collection_name)
+            if lookup and lookup.get("client_uuid"):
+                client_uuid = lookup["client_uuid"]
+                logger.info(
+                    f"[ENSURE_SESSION] ✅ client_uuid résolu: {client_uuid} "
+                    f"(contact_space={collection_name})"
+                )
+            else:
+                logger.error(
+                    f"[ENSURE_SESSION] ❌ Impossible de résoudre client_uuid pour "
+                    f"user_id={user_id}, collection_name={collection_name}"
+                )
+                raise Exception(
+                    f"client_uuid introuvable pour contact_space={collection_name}. "
+                    "Session corrompue dans Redis?"
+                )
+        except Exception as e:
+            logger.error(f"[ENSURE_SESSION] ❌ Erreur résolution client_uuid: {e}")
+            raise Exception(f"Impossible de résoudre client_uuid: {e}")
+        
         result = await self.initialize_session(
             user_id=user_id,
             collection_name=collection_name,
+            client_uuid=client_uuid,
             chat_mode=chat_mode
         )
         

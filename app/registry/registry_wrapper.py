@@ -142,24 +142,82 @@ class RegistryWrapper:
         """Implémentation exacte de l'ancienne fonction _registry_unregister_session."""
         try:
             from ..redis_client import get_redis
+            import logging
             
+            logger = logging.getLogger("registry.wrapper")
             r = get_redis()
             cursor = 0
             removed = False
             pattern = "registry:user:*"
+            user_id = None
             
+            # ÉTAPE 1 : Trouver user_id et supprimer registry:user:*
             while True:
                 cursor, keys = r.scan(cursor=cursor, match=pattern, count=200)
                 for k in keys:
                     try:
                         sid = r.hget(k, "session_id")
                         if sid and sid.decode() == session_id:
+                            # Récupérer user_id AVANT de supprimer
+                            user_id = r.hget(k, "user_id")
+                            if user_id:
+                                user_id = user_id.decode()
                             r.delete(k)
                             removed = True
+                            logger.info(f"🗑️ [SIGNOUT] Supprimé registry:user pour session={session_id}")
                     except Exception:
                         continue
                 if cursor == 0:
                     break
+            
+            # ⭐ ÉTAPE 2 : Nettoyer TOUTES les sessions LLM de cet utilisateur
+            if user_id:
+                try:
+                    # Supprimer toutes les clés llm_init:user_id:*
+                    llm_pattern = f"llm_init:{user_id}:*"
+                    cursor = 0
+                    llm_cleaned = 0
+                    
+                    while True:
+                        cursor, keys = r.scan(cursor=cursor, match=llm_pattern, count=200)
+                        for k in keys:
+                            try:
+                                r.delete(k)
+                                llm_cleaned += 1
+                            except Exception as e:
+                                logger.error(f"Erreur suppression {k}: {e}")
+                        if cursor == 0:
+                            break
+                    
+                    if llm_cleaned > 0:
+                        logger.info(
+                            f"✅ [SIGNOUT] Nettoyé {llm_cleaned} session(s) LLM pour user_id={user_id}"
+                        )
+                    
+                    # Supprimer aussi les clés session:user_id:* (sessions LLM en mémoire)
+                    session_pattern = f"session:{user_id}:*"
+                    cursor = 0
+                    session_cleaned = 0
+                    
+                    while True:
+                        cursor, keys = r.scan(cursor=cursor, match=session_pattern, count=200)
+                        for k in keys:
+                            try:
+                                r.delete(k)
+                                session_cleaned += 1
+                            except Exception as e:
+                                logger.error(f"Erreur suppression {k}: {e}")
+                        if cursor == 0:
+                            break
+                    
+                    if session_cleaned > 0:
+                        logger.info(
+                            f"✅ [SIGNOUT] Nettoyé {session_cleaned} session(s) mémoire pour user_id={user_id}"
+                        )
+                        
+                except Exception as e:
+                    logger.error(f"❌ [SIGNOUT] Erreur nettoyage sessions LLM: {e}")
+            
             return removed
         except Exception as e:
             print(f"❌ Erreur _legacy_unregister_session: {e}")
