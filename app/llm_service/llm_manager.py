@@ -1110,10 +1110,42 @@ class LLMManager:
         if not result.get("success"):
             raise Exception(f"Échec initialisation session: {result.get('error')}")
         
-        # Récupérer la session nouvellement créée/rafraîchie
+        # ⭐ CRITIQUE : Si initialisation en background, ATTENDRE qu'elle se termine
+        status = result.get("status")
+        if status in ["initializing", "started"]:
+            logger.info(
+                f"[ENSURE_SESSION] ⏳ Attente fin initialisation background: {session_key} (status={status})"
+            )
+            
+            # Attendre max 30 secondes que la session apparaisse en mémoire
+            max_wait = 30
+            waited = 0
+            while waited < max_wait:
+                await asyncio.sleep(0.5)  # Vérifier toutes les 500ms
+                waited += 0.5
+                
+                with self._lock:
+                    if session_key in self.sessions:
+                        session = self.sessions[session_key]
+                        if session.user_context is not None:
+                            logger.info(
+                                f"[ENSURE_SESSION] ✅ Session prête après {waited}s: {session_key}"
+                            )
+                            return session
+            
+            # Timeout
+            raise Exception(
+                f"Timeout ({max_wait}s) en attendant l'initialisation de la session. "
+                "Le background thread est peut-être bloqué."
+            )
+        
+        # Si status = "already_initialized", la session devrait être immédiatement disponible
         with self._lock:
             if session_key not in self.sessions:
-                raise Exception("Session non trouvée après initialisation")
+                raise Exception(
+                    f"Session non trouvée après initialisation (status={status}). "
+                    "Désynchronisation Redis ↔ Mémoire détectée."
+                )
             
             session = self.sessions[session_key]
             
