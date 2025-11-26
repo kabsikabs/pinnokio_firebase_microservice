@@ -14,7 +14,8 @@ tiktoken>=0.12.0
 tenacity==9.1.2
 pydantic>=2.11.0
 python-dotenv==1.1.1
-# ChromaDB dependencies (version compatible avec serveur existant)
+# ChromaDB dependencies (version 0.4.24 - compatible avec serveur actuel)
+# Note: AsyncHttpClient nécessite version >= 0.4.0 (supporté par 0.4.24)
 chromadb==0.4.14
 
 # Additional dependencies for ChromaDB

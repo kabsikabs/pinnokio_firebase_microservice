@@ -1540,75 +1540,116 @@ Le payload respecte le format notifications Banker (transactions regroupées par
             except Exception as e:
                 logger.warning(f"[LPT_Onboarding] ⚠️ Impossible d'écrire le verrou d'onboarding: {e}")
             
-            # Envoyer la requête HTTP
+            # ═══════════════════════════════════════════════════════════
+            # ⚡ OPTIMISATION : MODE FIRE-AND-FORGET (comme general_chat)
+            # ═══════════════════════════════════════════════════════════
+            # Au lieu d'attendre la réponse HTTP (bloquant 5-20s), on :
+            # 1. Lance le POST HTTP en arrière-plan (non-bloquant)
+            # 2. Retourne immédiatement "queued"
+            # 3. L'agent notifie via /lpt/callback quand terminé
+            # ✅ Identique au flux de send_message (homogénéité totale)
+            # ═══════════════════════════════════════════════════════════
+            
             url = self.onboarding_url
             
             # ⭐ LOG: Afficher l'URL et le payload avant l'envoi
             logger.info(f"[LPT_Onboarding] 📤 Envoi HTTP POST vers: {url}")
             logger.info(f"[LPT_Onboarding] 📦 Payload complet: {payload}")
             
-            try:
-                async with aiohttp.ClientSession() as session_http:
-                    logger.info(f"[LPT_Onboarding] 🔄 Connexion en cours vers {url}...")
-                    async with session_http.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as response:
-                        status = response.status
-                        logger.info(f"[LPT_Onboarding] ✅ Réponse HTTP reçue: status={status}")
-                        
-                        if status in (200, 202):
-                            logger.info(f"[LPT_Onboarding] ✓ Lancé avec succès - job_id={job_id}")
+            # Sauvegarder la tâche AVANT d'envoyer (pour avoir le contexte si callback arrive vite)
+            task_id = pub_sub_id
+            await self._save_task_to_firebase(
+                user_id=user_id,
+                thread_key=thread_key,
+                task_id=task_id,
+                task_type="Onboarding",
+                payload=payload,
+                status="queued"
+            )
+            
+            # ⚡ Lancer le POST HTTP en arrière-plan (fire-and-forget)
+            async def _fire_and_forget_post():
+                """Envoie le POST HTTP sans bloquer, notifie via logs."""
+                try:
+                    # ⚡ OPTIMISATION: Créer la notification en arrière-plan (ne bloque pas le retour)
+                    await self._create_onboarding_notification(
+                        user_id=user_id,
+                        company_id=company_id,
+                        company_name=context.get("company_name"),
+                        thread_key=thread_key,
+                        job_id=job_id,
+                        execution_id=execution_id
+                    )
+                    
+                    async with aiohttp.ClientSession() as session_http:
+                        logger.info(f"[LPT_Onboarding] 🔄 [BG] Connexion en cours vers {url}...")
+                        async with session_http.post(
+                            url, 
+                            json=payload, 
+                            timeout=aiohttp.ClientTimeout(total=60)  # Timeout généreux pour agent externe
+                        ) as response:
+                            status = response.status
+                            logger.info(f"[LPT_Onboarding] ✅ [BG] Réponse HTTP reçue: status={status}")
                             
-                            # Sauvegarder la tâche
-                            task_id = pub_sub_id
-                            await self._save_task_to_firebase(
-                                user_id=user_id,
-                                thread_key=thread_key,
-                                task_id=task_id,
-                                task_type="Onboarding",
-                                payload=payload,
-                                status="queued"
-                            )
-
-                            await self._create_onboarding_notification(
-                                user_id=user_id,
-                                company_id=company_id,
-                                company_name=context.get("company_name"),
-                                thread_key=thread_key,
-                                job_id=job_id,
-                                execution_id=execution_id
-                            )
-
-                            return {
-                                "status": "queued",
-                                "task_id": task_id,
-                                "job_id": job_id,
-                                "batch_id": batch_id,
-                                "execution_id": execution_id,
-                                "thread_key": thread_key,
-                                "message": "✓ Onboarding lancé"
-                            }
-
-                        error_text = await response.text()
-                        logger.error(f"[LPT_Onboarding] ❌ Erreur HTTP {status}: {error_text}")
-                        return {
-                            "status": "error",
-                            "error": f"HTTP {status}: {error_text}"
-                        }
-
-            except aiohttp.ClientError as ce:
-                logger.error(f"[LPT_Onboarding] ❌ Erreur de connexion HTTP: {ce}", exc_info=True)
-                return {
-                    "status": "error",
-                    "error": f"Erreur de connexion: {str(ce)}",
-                    "error_type": "connection_error"
-                }
-
-            except asyncio.TimeoutError:
-                logger.error(f"[LPT_Onboarding] ⏱️ Timeout après 30s vers {self.onboarding_url}")
-                return {
-                    "status": "error",
-                    "error": "Timeout de connexion (30s)",
-                    "error_type": "timeout"
-                }
+                            if status in (200, 202):
+                                logger.info(f"[LPT_Onboarding] ✓ [BG] Job envoyé avec succès - job_id={job_id}")
+                            else:
+                                error_text = await response.text()
+                                logger.error(f"[LPT_Onboarding] ❌ [BG] Erreur HTTP {status}: {error_text}")
+                                
+                                # Mettre à jour le statut de la tâche en erreur
+                                await self._update_task_status(
+                                    user_id=user_id,
+                                    task_id=task_id,
+                                    status="error",
+                                    error=f"HTTP {status}: {error_text}"
+                                )
+                
+                except aiohttp.ClientError as ce:
+                    logger.error(f"[LPT_Onboarding] ❌ [BG] Erreur de connexion HTTP: {ce}", exc_info=True)
+                    await self._update_task_status(
+                        user_id=user_id,
+                        task_id=task_id,
+                        status="error",
+                        error=f"Erreur de connexion: {str(ce)}"
+                    )
+                
+                except asyncio.TimeoutError:
+                    logger.error(f"[LPT_Onboarding] ⏱️ [BG] Timeout après 60s vers {url}")
+                    await self._update_task_status(
+                        user_id=user_id,
+                        task_id=task_id,
+                        status="error",
+                        error="Timeout de connexion (60s)"
+                    )
+                
+                except Exception as e:
+                    logger.error(f"[LPT_Onboarding] ❌ [BG] Erreur inattendue: {e}", exc_info=True)
+                    await self._update_task_status(
+                        user_id=user_id,
+                        task_id=task_id,
+                        status="error",
+                        error=str(e)
+                    )
+            
+            # Lancer en arrière-plan (non-bloquant)
+            asyncio.create_task(_fire_and_forget_post())
+            
+            logger.info(
+                f"[LPT_Onboarding] ⚡ Retour immédiat (fire-and-forget) - "
+                f"job_id={job_id}, task_id={task_id}"
+            )
+            
+            # ✅ RETOUR IMMÉDIAT (comme send_message)
+            return {
+                "status": "queued",
+                "task_id": task_id,
+                "job_id": job_id,
+                "batch_id": batch_id,
+                "execution_id": execution_id,
+                "thread_key": thread_key,
+                "message": "✓ Onboarding lancé (mode asynchrone)"
+            }
 
         except Exception as e:
             logger.error(f"[LPT_Onboarding] ❌ Erreur lancement onboarding: {e}", exc_info=True)
@@ -2413,6 +2454,52 @@ Le payload respecte le format notifications Banker (transactions regroupées par
         
         except Exception as e:
             logger.error(f"Erreur sauvegarde tâche Firebase: {e}", exc_info=True)
+    
+    async def _update_task_status(
+        self,
+        user_id: str,
+        task_id: str,
+        status: str,
+        error: str = None
+    ):
+        """
+        Met à jour le statut d'une tâche LPT dans Firebase.
+        Utilisé en mode fire-and-forget pour notifier les erreurs HTTP.
+        """
+        try:
+            from ...firebase_providers import FirebaseManagement
+            
+            firebase_service = FirebaseManagement()
+            
+            # Trouver le document contenant cette tâche
+            # Format : clients/{user_id}/workflow_pinnokio/{thread_key}
+            workflow_path = f"clients/{user_id}/workflow_pinnokio"
+            
+            # Requête pour trouver le document contenant cette task_id
+            query = firebase_service.db.collection(workflow_path).where(f"tasks.{task_id}.task_id", "==", task_id).limit(1)
+            docs = query.get()
+            
+            if not docs:
+                logger.warning(f"Aucun document trouvé pour task_id={task_id}")
+                return
+            
+            doc = docs[0]
+            
+            # Mettre à jour le statut
+            update_data = {
+                f"tasks.{task_id}.status": status,
+                f"tasks.{task_id}.updated_at": datetime.now(timezone.utc).isoformat()
+            }
+            
+            if error:
+                update_data[f"tasks.{task_id}.error"] = error
+            
+            doc.reference.update(update_data)
+            
+            logger.info(f"Statut de tâche mis à jour: task_id={task_id}, status={status}")
+        
+        except Exception as e:
+            logger.error(f"Erreur mise à jour statut tâche Firebase: {e}", exc_info=True)
     
     async def _create_apbookeeper_notifications(
         self,
