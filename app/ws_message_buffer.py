@@ -25,7 +25,9 @@ class WebSocketMessageBuffer:
             redis_client: Client Redis (si None, sera initialisé à la demande)
         """
         self._redis_client = redis_client
-        self.ttl_seconds = 30  # TTL pour les messages bufferisés
+        # ⭐ AUGMENTÉ: TTL passé de 30s à 300s (5 minutes)
+        # Permet de gérer les traitements longs comme l'onboarding
+        self.ttl_seconds = 300  # TTL pour les messages bufferisés
     
     def _get_redis_client(self):
         """Récupère le client Redis (lazy loading)."""

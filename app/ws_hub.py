@@ -42,9 +42,36 @@ class WebSocketHub:
             conns = list(self._uid_to_conns.get(uid, set()))
         
         if not conns:
-            # DEBUG au lieu de WARNING : c'est normal si le client n'est pas connecté
-            # (ex: page fermée, déconnexion, ou pas encore connecté)
-            self._logger.debug("ws_broadcast_no_connections uid=%s type=%s channel=%s", uid, msg_type, channel)
+            # ⭐ NOUVEAU: Buffer automatique si pas de connexion active
+            # Extraction du thread_key depuis le channel (format: "chat:{thread_key}")
+            thread_key = None
+            if channel and ":" in channel:
+                try:
+                    thread_key = channel.split(":", 1)[1]
+                except Exception:
+                    pass
+            
+            if thread_key:
+                # Buffering du message dans Redis pour replay après reconnexion
+                try:
+                    from .ws_message_buffer import get_message_buffer
+                    buffer = get_message_buffer()
+                    buffer.store_pending_message(uid, thread_key, message)
+                    self._logger.info(
+                        "ws_broadcast_buffered uid=%s thread=%s type=%s (no_active_connection)", 
+                        uid, thread_key, msg_type
+                    )
+                except Exception as buffer_error:
+                    self._logger.error(
+                        "ws_broadcast_buffer_failed uid=%s thread=%s error=%s",
+                        uid, thread_key, repr(buffer_error)
+                    )
+            else:
+                # Pas de thread_key identifiable → log debug uniquement
+                self._logger.debug(
+                    "ws_broadcast_no_connections uid=%s type=%s channel=%s (no_thread_key)", 
+                    uid, msg_type, channel
+                )
             return
         
         sent_count = 0

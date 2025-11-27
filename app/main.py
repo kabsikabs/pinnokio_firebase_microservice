@@ -1483,6 +1483,8 @@ async def websocket_endpoint(ws: WebSocket):
         logger.info("ws_register_complete uid=%s", uid)
         # Démarre une tâche de heartbeat Firestore liée à cette connexion
         heartbeat_task = asyncio.create_task(_presence_heartbeat(uid))
+        # ⭐ NOUVEAU: Démarre une tâche de keepalive WebSocket (ping/pong)
+        keepalive_task = asyncio.create_task(_websocket_keepalive(ws, uid))
         # Log uniquement en mode debug
         if _debug_enabled():
             logger.info("heartbeat_task_started uid=%s", uid)
@@ -1582,11 +1584,19 @@ async def websocket_endpoint(ws: WebSocket):
                     pass
                 
                 await hub.unregister(uid, ws)
-                # Arrête le heartbeat et marque l'utilisateur offline
+                # Arrête le heartbeat et le keepalive, puis marque l'utilisateur offline
                 try:
                     heartbeat_task.cancel()
                     try:
                         await heartbeat_task
+                    except asyncio.CancelledError:
+                        pass
+                except Exception:
+                    pass
+                try:
+                    keepalive_task.cancel()
+                    try:
+                        await keepalive_task
                     except asyncio.CancelledError:
                         pass
                 except Exception:
@@ -1641,6 +1651,50 @@ async def _set_presence(uid: str, status: str = "online", ttl_seconds: int | Non
             logger.info("presence_update uid=%s status=%s ttl=%s", uid, status, ttl_seconds)
     except Exception as e:
         logger.error("presence_update_error uid=%s error=%s", uid, repr(e))
+
+
+async def _websocket_keepalive(ws: WebSocket, uid: str) -> None:
+    """
+    ⭐ NOUVEAU: Envoie des pings périodiques pour maintenir la connexion active.
+    
+    Prévient le timeout ALB en envoyant un message toutes les 30 secondes.
+    Particulièrement important pour les traitements longs (onboarding, LLM).
+    """
+    try:
+        try:
+            interval = int(os.getenv("WEBSOCKET_KEEPALIVE_INTERVAL", "30"))
+        except Exception:
+            interval = 30
+        
+        # Log activation keepalive
+        if _debug_enabled():
+            logger.info("ws_keepalive_started uid=%s interval=%ss", uid, interval)
+        
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                # Envoyer ping au client
+                await ws.send_json({
+                    "type": "ping",
+                    "timestamp": time.time()
+                })
+                
+                # Log uniquement en mode debug pour éviter spam
+                if _debug_enabled():
+                    logger.debug("ws_keepalive_ping uid=%s", uid)
+                    
+            except Exception as send_error:
+                # Si l'envoi échoue, la connexion est probablement morte
+                logger.warning("ws_keepalive_send_failed uid=%s error=%s", uid, repr(send_error))
+                break
+                
+    except asyncio.CancelledError:
+        # Sortie silencieuse sur annulation
+        if _debug_enabled():
+            logger.info("ws_keepalive_stopped uid=%s", uid)
+        pass
+    except Exception as e:
+        logger.error("ws_keepalive_error uid=%s error=%s", uid, repr(e))
 
 
 async def _presence_heartbeat(uid: str) -> None:
