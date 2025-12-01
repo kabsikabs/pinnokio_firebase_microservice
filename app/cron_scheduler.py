@@ -143,8 +143,10 @@ class CronScheduler:
 
             # 1. Générer IDs
             execution_id = f"exec_{uuid.uuid4().hex[:12]}"
-            timestamp = int(triggered_at.timestamp())
-            thread_key = f"task_{task_id}_{timestamp}"
+            
+            # ⭐ UTILISER task_id DIRECTEMENT comme thread_key (chat persistant)
+            thread_key = task_id
+            logger.info(f"[CRON] 📝 Utilisation du thread_key persistant: {thread_key}")
 
             # 2. Créer document d'exécution
             from .firebase_providers import get_firebase_management
@@ -162,23 +164,40 @@ class CronScheduler:
 
             fbm.create_task_execution(mandate_path, task_id, execution_data)
 
-            # 3. Créer chat RTDB
+            # 3. Vérifier et créer chat RTDB SEULEMENT s'il n'existe pas
             from .firebase_providers import get_firebase_realtime
             rtdb = get_firebase_realtime()
 
-            mission_title = task_data.get("mission", {}).get("title", "Tâche planifiée")
+            # Vérifier si le chat existe déjà
+            chat_path = f"{company_id}/chats/{thread_key}"
+            existing_chat = rtdb.db.child(chat_path).get()
+            
+            if existing_chat:
+                logger.info(f"[CRON] ✅ Chat existant trouvé: {thread_key} - Réutilisation avec historique")
+                # Chat existe déjà, pas besoin de le créer
+                chat_result = {
+                    "success": True,
+                    "thread_key": thread_key,
+                    "mode": "chats",
+                    "chat_mode": "task_execution",
+                    "existing": True
+                }
+            else:
+                # Créer un nouveau chat
+                logger.info(f"[CRON] 🆕 Création nouveau chat: {thread_key}")
+                mission_title = task_data.get("mission", {}).get("title", "Tâche planifiée")
+                
+                chat_result = rtdb.create_chat(
+                    user_id=user_id,
+                    space_code=company_id,
+                    thread_name=mission_title,
+                    mode="chats",
+                    chat_mode="task_execution",
+                    thread_key=thread_key
+                )
 
-            chat_result = rtdb.create_chat(
-                user_id=user_id,
-                space_code=company_id,
-                thread_name=mission_title,
-                mode="chats",
-                chat_mode="task_execution",
-                thread_key=thread_key
-            )
-
-            if not chat_result.get("success"):
-                raise ValueError(f"Échec création chat: {chat_result}")
+                if not chat_result.get("success"):
+                    raise ValueError(f"Échec création chat: {chat_result}")
 
             # 4. Lancer l'exécution (async task)
             from .llm_service.llm_manager import get_llm_manager

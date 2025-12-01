@@ -1181,34 +1181,47 @@ class LLMManager:
         try:
             logger.info(f"[LLM_INIT_BG] 🔄 Début initialisation background pour {base_session_key}")
 
+            # Créer nouvelle session SANS lock (opération rapide)
+            context = LLMContext(
+                user_id=user_id,
+                collection_name=collection_name,
+                dms_system=dms_system,
+                dms_mode=dms_mode,
+                chat_mode=chat_mode
+            )
+
+            session = LLMSession(
+                session_key=base_session_key,
+                context=context
+            )
+
+            # ⚠️ CRITIQUE: Charger les données HORS du lock (opération longue ~plusieurs secondes)
+            # Sinon, le lock bloque tous les autres threads pendant le chargement Firebase
+            logger.info(f"[LLM_INIT_BG] 📥 Chargement données session...")
+            await session.initialize_session_data(client_uuid)
+            logger.info(f"[LLM_INIT_BG] ✅ Données session initialisées")
+
+            # Mettre à jour le dms_system depuis le user_context chargé
+            if session.user_context and session.user_context.get("dms_system"):
+                actual_dms_system = session.user_context.get("dms_system", "google_drive")
+                if session.context.dms_system != actual_dms_system:
+                    session.update_context(dms_system=actual_dms_system)
+                    logger.info(f"[LLM_INIT_BG] 🔄 DMS mis à jour: {actual_dms_system}")
+
+            # Stocker en cache mémoire (avec lock pour thread-safety)
             with self._lock:
-                # Créer nouvelle session
-                context = LLMContext(
-                    user_id=user_id,
-                    collection_name=collection_name,
-                    dms_system=dms_system,
-                    dms_mode=dms_mode,
-                    chat_mode=chat_mode
-                )
-
-                session = LLMSession(
-                    session_key=base_session_key,
-                    context=context
-                )
-
-                # Initialiser les données permanentes
-                logger.info(f"[LLM_INIT_BG] 📥 Chargement données session...")
-                await session.initialize_session_data(client_uuid)
-                logger.info(f"[LLM_INIT_BG] ✅ Données session initialisées")
-
-                # Mettre à jour le dms_system depuis le user_context chargé
-                if session.user_context and session.user_context.get("dms_system"):
-                    actual_dms_system = session.user_context.get("dms_system", "google_drive")
-                    if session.context.dms_system != actual_dms_system:
-                        session.update_context(dms_system=actual_dms_system)
-                        logger.info(f"[LLM_INIT_BG] 🔄 DMS mis à jour: {actual_dms_system}")
-
-                # Stocker en cache mémoire
+                # ⚠️ Double vérification : si une session existe déjà, ne pas écraser
+                # (Protection contre race condition si Redis est DOWN)
+                if base_session_key in self.sessions:
+                    existing_session = self.sessions[base_session_key]
+                    # Si la session existante a déjà des données, la garder
+                    if existing_session.user_context is not None:
+                        logger.warning(
+                            f"[LLM_INIT_BG] ⚠️ Session déjà présente en mémoire avec données - "
+                            f"Abandon stockage pour éviter écrasement"
+                        )
+                        return
+                
                 self.sessions[base_session_key] = session
                 logger.info(f"[LLM_INIT_BG] 💾 Session stockée en cache mémoire")
 
@@ -3042,61 +3055,37 @@ class LLMManager:
                 chat_mode="task_execution"
             )
 
-            # 2. Récupérer ou créer le brain pour ce thread
+            # 2. Récupérer ou créer le brain pour ce thread (avec historique)
             if thread_key not in session.active_brains:
                 logger.info(
                     f"[TASK_EXEC] Création brain pour thread de tâche: {thread_key}"
                 )
 
-                # Créer le brain directement (pas de chat history pour tâches automatiques)
-                from ..pinnokio_agentic_workflow.orchestrator.pinnokio_brain import PinnokioBrain
+                # ⭐ CHARGER L'HISTORIQUE du chat (continuité entre exécutions)
+                logger.info(f"[TASK_EXEC] 📚 Chargement historique du chat...")
+                history = await self._load_history_from_rtdb(
+                    collection_name=company_id, 
+                    thread_key=thread_key, 
+                    chat_mode="task_execution"
+                )
+                
+                logger.info(
+                    f"[TASK_EXEC] 📚 Historique chargé: {len(history)} message(s) - "
+                    f"L'agent aura le contexte des exécutions précédentes"
+                )
 
-                # Créer lock pour ce thread
-                if thread_key not in session._brain_locks:
-                    session._brain_locks[thread_key] = asyncio.Lock()
+                # Créer brain avec historique (comme pour enter_chat)
+                load_result = await self.load_chat_history(
+                    user_id=user_id,
+                    collection_name=company_id,
+                    thread_key=thread_key,
+                    history=history
+                )
 
-                async with session._brain_locks[thread_key]:
-                    # Double-check après le lock
-                    if thread_key in session.active_brains:
-                        logger.info(f"[TASK_EXEC] Brain créé par autre tâche, réutilisation")
-                    else:
-                        # Créer le brain
-                        brain = PinnokioBrain(
-                            collection_name=company_id,
-                            firebase_user_id=user_id,
-                            dms_system=session.context.dms_system,
-                            dms_mode=session.context.dms_mode
-                        )
+                if not load_result.get("success"):
+                    raise Exception(f"Échec création brain avec historique: {load_result}")
 
-                        logger.info(f"[TASK_EXEC] 🤖 Création agents du brain...")
-
-                        # Créer les agents du brain
-                        await brain.initialize_agents()
-
-                        logger.info(f"[TASK_EXEC] ✅ Agents créés")
-
-                        # Injecter données permanentes (depuis session)
-                        brain.user_context = session.user_context
-                        brain.jobs_data = session.jobs_data
-                        brain.jobs_metrics = session.jobs_metrics
-
-                        logger.info(f"[TASK_EXEC] 📊 Données permanentes injectées")
-
-                        # Initialiser system prompt
-                        brain.initialize_system_prompt(
-                            chat_mode="task_execution",
-                            jobs_metrics=session.jobs_metrics
-                        )
-
-                        logger.info(f"[TASK_EXEC] 📝 System prompt initialisé")
-
-                        # ⚠️ PAS de load_chat_history - Les tâches automatiques n'ont pas d'historique
-
-                        # Enregistrer le brain
-                        session.active_brains[thread_key] = brain
-                        session.last_activity[thread_key] = datetime.now(timezone.utc)
-
-                        logger.info(f"[TASK_EXEC] 🎉 Brain créé et prêt (sans historique)")
+                logger.info(f"[TASK_EXEC] 🎉 Brain créé et historique chargé - Mémoire des exécutions précédentes disponible")
 
             brain = session.active_brains.get(thread_key)
 
