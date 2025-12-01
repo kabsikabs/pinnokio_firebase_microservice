@@ -1,0 +1,196 @@
+=== Logs de la tâche 46e2329eaa0c4352affa79f697746163 ===
+=== Nombre d'événements: 193 ===
+
+[2025-11-27 23:31:21.215000] 🚀 Démarrage du microservice Firebase...
+[2025-11-27 23:31:21.216000] Mode: api
+[2025-11-27 23:31:21.216000] Registre unifié: false
+[2025-11-27 23:31:21.216000] 🌐 Démarrage FastAPI Server...
+[2025-11-27 23:31:21.216000] Port: 8090
+[2025-11-27 23:31:21.216000] Workers: 1
+[2025-11-27 23:31:21.216000] 📝 Mode legacy (registre unifié désactivé)
+[2025-11-27 23:31:26.424000] time=2025-11-27 22:31:26,424 level=INFO logger=listeners.app message=service_start version=0.1.0 region=us-east-1
+[2025-11-27 23:31:26.424000] time=2025-11-27 22:31:26,424 level=INFO logger=listeners.app message=redis_mode mode=cloud host=pinnokio-cache-7uum2j.serverless.use1.cache.amazonaws.com port=6379 tls=True
+[2025-11-27 23:31:26.494000] time=2025-11-27 22:31:26,494 level=INFO logger=listeners.app message=redis_connect status=ok host=pinnokio-cache-7uum2j.serverless.use1.cache.amazonaws.com port=6379 tls=True
+[2025-11-27 23:31:26.506000] INFO:     Started server process [1]
+[2025-11-27 23:31:26.506000] INFO:     Waiting for application startup.
+[2025-11-27 23:31:26.741000] time=2025-11-27 22:31:26,740 level=INFO logger=listeners.manager message=registry_watch start collection=listeners_registry
+[2025-11-27 23:31:26.743000] time=2025-11-27 22:31:26,742 level=INFO logger=listeners.app message=listeners_manager status=started
+[2025-11-27 23:31:26.745000] time=2025-11-27 22:31:26,745 level=INFO logger=cron_scheduler message=[CRON] Scheduler initialisé (intervalle: 60s)
+[2025-11-27 23:31:26.745000] time=2025-11-27 22:31:26,745 level=INFO logger=cron_scheduler message=[CRON] Scheduler démarré
+[2025-11-27 23:31:26.745000] time=2025-11-27 22:31:26,745 level=INFO logger=listeners.app message=cron_scheduler status=started
+[2025-11-27 23:31:26.745000] time=2025-11-27 22:31:26,745 level=INFO logger=cron_scheduler message=[CRON] Boucle principale démarrée
+[2025-11-27 23:31:26.891000] ✅ Stripe configuré avec succès
+[2025-11-27 23:31:27.495000] time=2025-11-27 22:31:27,495 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[2025-11-27 23:31:27.496000] INFO:     Application startup complete.
+[2025-11-27 23:31:27.497000] INFO:     Uvicorn running on http://0.0.0.0:8090 (Press CTRL+C to quit)
+[2025-11-27 23:31:27.498000] time=2025-11-27 22:31:27,498 level=INFO logger=listeners.manager message=registry_snapshot triggered changes_count=4
+[2025-11-27 23:31:27.498000] time=2025-11-27 22:31:27,498 level=INFO logger=listeners.manager message=registry_detach_trigger uid=2AqjLVOp1UcA9m1NvE3znuvnmW73 reason=offline_or_expired
+[2025-11-27 23:31:27.499000] time=2025-11-27 22:31:27,498 level=INFO logger=listeners.manager message=user_attach_start uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:27.499000] time=2025-11-27 22:31:27,498 level=INFO logger=listeners.manager message=user_attach_firebase_query uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:27.499000] time=2025-11-27 22:31:27,499 level=INFO logger=listeners.manager message=user_attach_firebase_listener uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:27.500000] time=2025-11-27 22:31:27,500 level=INFO logger=listeners.manager message=user_attach_notification_listener_attached uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:27.500000] time=2025-11-27 22:31:27,500 level=INFO logger=listeners.manager message=user_attach_publish_sync_notifications uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:28.102000] time=2025-11-27 22:31:28,101 level=INFO logger=listeners.manager message=notifications_change_triggered uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 changes_count=4
+[2025-11-27 23:31:28.102000] time=2025-11-27 22:31:28,102 level=INFO logger=listeners.manager message=notification_change uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 doc_id=onboarding_45c9bc87cd7143e598 type=ADDED
+[2025-11-27 23:31:28.102000] time=2025-11-27 22:31:28,102 level=INFO logger=listeners.manager message=notification_change uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 doc_id=onboarding_5224fb7ef2764ffaa3 type=ADDED
+[2025-11-27 23:31:28.102000] time=2025-11-27 22:31:28,102 level=INFO logger=listeners.manager message=notification_change uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 doc_id=onboarding_e3153c0e43474e4aaf type=ADDED
+[2025-11-27 23:31:28.102000] time=2025-11-27 22:31:28,102 level=INFO logger=listeners.manager message=notification_change uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 doc_id=onboarding_e9d0821f8d5340a5ae type=ADDED
+[2025-11-27 23:31:28.102000] time=2025-11-27 22:31:28,102 level=INFO logger=listeners.manager message=notifications_resync_start uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:28.125000] time=2025-11-27 22:31:28,124 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:28.125000] time=2025-11-27 22:31:28,125 level=INFO logger=listeners.manager message=publish type=notif.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:28.125000] time=2025-11-27 22:31:28,125 level=INFO logger=listeners.manager message=notif_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=4 sample_ids=['onboarding_e3153c0e43474e4aaf', 'onboarding_e9d0821f8d5340a5ae', 'onboarding_5224fb7ef2764ffaa3', 'onboarding_45c9bc87cd7143e598']
+[2025-11-27 23:31:28.125000] time=2025-11-27 22:31:28,125 level=INFO logger=listeners.manager message=user_attach_rtdb_messages uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:28.562000] time=2025-11-27 22:31:28,561 level=INFO logger=listeners.manager message=user_attach_message_listener_attached uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:28.570000] time=2025-11-27 22:31:28,570 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:28.570000] time=2025-11-27 22:31:28,570 level=INFO logger=listeners.manager message=publish type=notif.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:28.570000] time=2025-11-27 22:31:28,570 level=INFO logger=listeners.manager message=notif_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=4 sample_ids=['onboarding_e3153c0e43474e4aaf', 'onboarding_e9d0821f8d5340a5ae', 'onboarding_5224fb7ef2764ffaa3', 'onboarding_45c9bc87cd7143e598']
+[2025-11-27 23:31:28.570000] time=2025-11-27 22:31:28,570 level=INFO logger=listeners.manager message=notifications_resync_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:28.884000] time=2025-11-27 22:31:28,884 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:28.884000] time=2025-11-27 22:31:28,884 level=INFO logger=listeners.manager message=publish type=msg.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:28.885000] time=2025-11-27 22:31:28,884 level=INFO logger=listeners.manager message=msg_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=0 sample_ids=[]
+[2025-11-27 23:31:28.963000] time=2025-11-27 22:31:28,963 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:28.963000] time=2025-11-27 22:31:28,963 level=INFO logger=listeners.manager message=publish type=msg.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:28.963000] time=2025-11-27 22:31:28,963 level=INFO logger=listeners.manager message=msg_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=0 sample_ids=[]
+[2025-11-27 23:31:28.964000] time=2025-11-27 22:31:28,963 level=INFO logger=listeners.manager message=user_attach_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 listeners_count=2
+[2025-11-27 23:31:28.964000] time=2025-11-27 22:31:28,964 level=INFO logger=listeners.manager message=🔵 REGISTRY_START enregistrement des listeners pour uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:28.964000] time=2025-11-27 22:31:28,964 level=INFO logger=listeners.manager message=🔵 REGISTRY_INSTANCE récupérée pour uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:31:29.180000] time=2025-11-27 22:31:29,180 level=INFO logger=registry.listeners message=listener_register uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=notif listener_id=notif_4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2 space=None thread=None mode=None
+[2025-11-27 23:31:29.180000] time=2025-11-27 22:31:29,180 level=INFO logger=listeners.manager message=🔵 REGISTRY_NOTIF uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 success=True
+[2025-11-27 23:31:29.391000] time=2025-11-27 22:31:29,391 level=INFO logger=registry.listeners message=listener_register uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=msg listener_id=msg_4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2 space=None thread=None mode=None
+[2025-11-27 23:31:29.392000] time=2025-11-27 22:31:29,391 level=INFO logger=listeners.manager message=🔵 REGISTRY_MSG uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 success=True
+[2025-11-27 23:31:29.392000] time=2025-11-27 22:31:29,391 level=INFO logger=listeners.manager message=🟢 REGISTRY_COMPLETE uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 enregistrement terminé
+[2025-11-27 23:31:29.392000] time=2025-11-27 22:31:29,392 level=INFO logger=listeners.manager message=registry_detach_trigger uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired
+[2025-11-27 23:31:29.392000] time=2025-11-27 22:31:29,392 level=INFO logger=listeners.manager message=registry_detach_trigger uid=WdCdwNS2ElghGiAGlwS9ha72hrs1 reason=offline_or_expired
+[2025-11-27 23:31:30.599000] INFO:     172.31.41.136:54054 - "GET /healthz HTTP/1.1" 200 OK
+[2025-11-27 23:31:30.641000] INFO:     172.31.11.113:55394 - "GET /healthz HTTP/1.1" 200 OK
+[2025-11-27 23:31:55.751000] time=2025-11-27 22:31:55,750 level=INFO logger=listeners.manager message=user_attach_start uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:55.751000] time=2025-11-27 22:31:55,751 level=INFO logger=listeners.manager message=user_attach_firebase_query uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:55.751000] time=2025-11-27 22:31:55,751 level=INFO logger=listeners.manager message=user_attach_firebase_listener uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:55.753000] time=2025-11-27 22:31:55,752 level=INFO logger=listeners.manager message=user_attach_notification_listener_attached uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:55.753000] time=2025-11-27 22:31:55,753 level=INFO logger=listeners.manager message=user_attach_publish_sync_notifications uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:55.960000] time=2025-11-27 22:31:55,960 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:55.960000] time=2025-11-27 22:31:55,960 level=INFO logger=listeners.manager message=publish type=notif.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:55.960000] time=2025-11-27 22:31:55,960 level=INFO logger=listeners.manager message=notif_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=1 sample_ids=['1oAEkBHTVZ-p4cGMlTSIQg9TncwqC-QS9']
+[2025-11-27 23:31:55.960000] time=2025-11-27 22:31:55,960 level=INFO logger=listeners.manager message=user_attach_rtdb_messages uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:56.169000] time=2025-11-27 22:31:56,169 level=INFO logger=listeners.manager message=user_attach_message_listener_attached uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:56.357000] time=2025-11-27 22:31:56,357 level=INFO logger=listeners.manager message=notifications_change_triggered uid=7hQs0jluP5YUWcREqdi22NRFnU32 changes_count=1
+[2025-11-27 23:31:56.357000] time=2025-11-27 22:31:56,357 level=INFO logger=listeners.manager message=notification_change uid=7hQs0jluP5YUWcREqdi22NRFnU32 doc_id=1oAEkBHTVZ-p4cGMlTSIQg9TncwqC-QS9 type=ADDED
+[2025-11-27 23:31:56.357000] time=2025-11-27 22:31:56,357 level=INFO logger=listeners.manager message=notifications_resync_start uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:56.379000] time=2025-11-27 22:31:56,378 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:56.379000] time=2025-11-27 22:31:56,379 level=INFO logger=listeners.manager message=publish type=msg.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:56.379000] time=2025-11-27 22:31:56,379 level=INFO logger=listeners.manager message=msg_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=0 sample_ids=[]
+[2025-11-27 23:31:56.383000] time=2025-11-27 22:31:56,383 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:56.383000] time=2025-11-27 22:31:56,383 level=INFO logger=listeners.manager message=publish type=msg.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:56.383000] time=2025-11-27 22:31:56,383 level=INFO logger=listeners.manager message=msg_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=0 sample_ids=[]
+[2025-11-27 23:31:56.384000] time=2025-11-27 22:31:56,383 level=INFO logger=listeners.manager message=user_attach_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32 listeners_count=2
+[2025-11-27 23:31:56.384000] time=2025-11-27 22:31:56,383 level=INFO logger=listeners.manager message=🔵 REGISTRY_START enregistrement des listeners pour uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:56.384000] time=2025-11-27 22:31:56,384 level=INFO logger=listeners.manager message=🔵 REGISTRY_INSTANCE récupérée pour uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:56.484000] time=2025-11-27 22:31:56,484 level=WARNING logger=registry.listeners message=listener_already_exists uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=notif space=None thread=None
+[2025-11-27 23:31:56.484000] time=2025-11-27 22:31:56,484 level=INFO logger=listeners.manager message=🔵 REGISTRY_NOTIF uid=7hQs0jluP5YUWcREqdi22NRFnU32 success=False
+[2025-11-27 23:31:56.564000] time=2025-11-27 22:31:56,564 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:56.564000] time=2025-11-27 22:31:56,564 level=INFO logger=listeners.manager message=publish type=notif.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:56.564000] time=2025-11-27 22:31:56,564 level=INFO logger=listeners.manager message=notif_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=1 sample_ids=['1oAEkBHTVZ-p4cGMlTSIQg9TncwqC-QS9']
+[2025-11-27 23:31:56.564000] time=2025-11-27 22:31:56,564 level=INFO logger=listeners.manager message=notifications_resync_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:31:56.584000] time=2025-11-27 22:31:56,584 level=WARNING logger=registry.listeners message=listener_already_exists uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=msg space=None thread=None
+[2025-11-27 23:31:56.584000] time=2025-11-27 22:31:56,584 level=INFO logger=listeners.manager message=🔵 REGISTRY_MSG uid=7hQs0jluP5YUWcREqdi22NRFnU32 success=False
+[2025-11-27 23:31:56.584000] time=2025-11-27 22:31:56,584 level=INFO logger=listeners.manager message=🟢 REGISTRY_COMPLETE uid=7hQs0jluP5YUWcREqdi22NRFnU32 enregistrement terminé
+[2025-11-27 23:32:00.597000] INFO:     172.31.41.136:25776 - "GET /healthz HTTP/1.1" 200 OK
+[2025-11-27 23:32:00.597000] INFO:     172.31.11.113:42960 - "GET /healthz HTTP/1.1" 200 OK
+[2025-11-27 23:32:02.380000] INFO:     172.31.11.113:42968 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:32:02.490000] INFO:     172.31.41.136:60858 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:32:02.898000] INFO:     172.31.11.113:42980 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:32:03.022000] INFO:     172.31.41.136:60860 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:32:04.685000] L'ID de l'instance AWS 'job_instance_klk_ccc56189-cb08-4308-94d8-24981538f34f' a été enregistré avec succès pour le job_id 'klk_ccc56189-cb08-4308-94d8-24981538f34f'.
+[2025-11-27 23:32:04.688000] INFO:     172.31.11.113:42968 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:32:06.989000] time=2025-11-27 22:32:06,989 level=INFO logger=llm_service.manager message=[ENTER_CHAT] 📥 Signal reçu - session=7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro, thread_key=klk_ccc56189-cb08-4308-94d8-24981538f34f
+[2025-11-27 23:32:06.989000] time=2025-11-27 22:32:06,989 level=INFO logger=llm_service.manager message=[ENSURE_SESSION] Initialisation session (nouvelle ou données manquantes): 7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro
+[2025-11-27 23:32:07.195000] time=2025-11-27 22:32:07,194 level=INFO logger=llm_service.manager message=[ENSURE_SESSION] ✅ client_uuid résolu: cccd0781-26d7-47a0-97c8-e192ac9ec256 (contact_space=AAAABzwjXro)
+[2025-11-27 23:32:07.195000] time=2025-11-27 22:32:07,194 level=INFO logger=llm_service.manager message=[LLM_INIT] 📥 Requête initialize_session
+[2025-11-27 23:32:07.195000] time=2025-11-27 22:32:07,195 level=INFO logger=llm_service.manager message=[LLM_INIT] Paramètres: user_id=7hQs0jluP5YUWcREqdi22NRFnU32, collection_name=AAAABzwjXro, client_uuid=cccd0781-26d7-47a0-97c8-e192ac9ec256
+[2025-11-27 23:32:07.197000] time=2025-11-27 22:32:07,197 level=WARNING logger=llm_service.manager message=[LLM_INIT] ⚠️ Redis dit 'ready' mais session absente de la mémoire → Réinitialisation
+[2025-11-27 23:32:07.203000] time=2025-11-27 22:32:07,203 level=INFO logger=llm_service.manager message=[LLM_INIT] ✅ Marqué comme 'initializing' dans Redis
+[2025-11-27 23:32:07.203000] time=2025-11-27 22:32:07,203 level=INFO logger=llm_service.manager message=[LLM_INIT] 🚀 Lancement initialisation background pour 7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro
+[2025-11-27 23:32:07.203000] time=2025-11-27 22:32:07,203 level=INFO logger=llm_service.manager message=[LLM_INIT] ⚡ Retour immédiat - initialisation en cours en background
+[2025-11-27 23:32:07.203000] time=2025-11-27 22:32:07,203 level=INFO logger=llm_service.manager message=[ENSURE_SESSION] ⏳ Attente fin initialisation background: 7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro (status=initializing)
+[2025-11-27 23:32:07.204000] time=2025-11-27 22:32:07,203 level=INFO logger=llm_service.manager message=[LLM_INIT_BG] 🔄 Début initialisation background pour 7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro
+[2025-11-27 23:32:07.204000] time=2025-11-27 22:32:07,204 level=INFO logger=llm_service.manager message=[SESSION_INIT] 📦 LLMSession créée: 7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro
+[2025-11-27 23:32:07.204000] time=2025-11-27 22:32:07,204 level=INFO logger=llm_service.manager message=[LLM_INIT_BG] 📥 Chargement données session...
+[2025-11-27 23:32:07.204000] time=2025-11-27 22:32:07,204 level=INFO logger=llm_service.manager message=[SESSION_DATA] 🔄 Chargement données permanentes pour session 7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro
+[2025-11-27 23:32:07.206000] time=2025-11-27 22:32:07,205 level=INFO logger=llm_service.manager message=[SESSION_DATA] 🔍 Mode détecté: BACKEND
+[2025-11-27 23:32:07.206000] time=2025-11-27 22:32:07,206 level=INFO logger=llm_service.manager message=[SESSION_DATA] ✅ client_uuid fourni: cccd0781-26d7-47a0-97c8-e192ac9ec256
+[2025-11-27 23:32:07.208000] time=2025-11-27 22:32:07,207 level=INFO logger=listeners.app message=rpc_job_notification_call trace_id=48fef029-5f0e-449c-b4a0-d0f22f527a11 uid=clients/7hQs0jluP5YUWcREqdi22NRFnU32/notifications args_count=2
+[2025-11-27 23:32:07.208000] [DEBUG] add_or_update_job_by_job_id called - path: clients/7hQs0jluP5YUWcREqdi22NRFnU32/notifications
+[2025-11-27 23:32:07.208000] [DEBUG] job_data keys: ['function_name', 'aws_instance_id', 'collection_id', 'file_id', 'file_name', 'collection_name', 'job_id', 'journal_entries', 'pub_sub_id', 'status', 'timestamp', 'read']
+[2025-11-27 23:32:07.208000] [DEBUG] Processing job_id: klk_ccc56189-cb08-4308-94d8-24981538f34f
+[2025-11-27 23:32:07.309000] [DEBUG] Updating existing document with job_id: klk_ccc56189-cb08-4308-94d8-24981538f34f
+[2025-11-27 23:32:07.417000] [DEBUG] Successfully processed job_id: klk_ccc56189-cb08-4308-94d8-24981538f34f in path: clients/7hQs0jluP5YUWcREqdi22NRFnU32/notifications
+[2025-11-27 23:32:07.417000] [DEBUG] Publishing notification for job_id: klk_ccc56189-cb08-4308-94d8-24981538f34f
+[2025-11-27 23:32:07.417000] [DEBUG] Publishing notification for user 7hQs0jluP5YUWcREqdi22NRFnU32: notif.job_updated
+[2025-11-27 23:32:07.419000] time=2025-11-27 22:32:07,419 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:32:07.420000] time=2025-11-27 22:32:07,420 level=INFO logger=listeners.manager message=publish type=notif.job_updated uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:32:07.421000] [DEBUG] Notification published successfully for user 7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:32:07.421000] time=2025-11-27 22:32:07,421 level=INFO logger=listeners.app message=rpc_job_notification_result trace_id=48fef029-5f0e-449c-b4a0-d0f22f527a11 uid=clients/7hQs0jluP5YUWcREqdi22NRFnU32/notifications result=klk_ccc56189-cb08-4308-94d8-24981538f34f
+[2025-11-27 23:32:07.422000] time=2025-11-27 22:32:07,422 level=INFO logger=listeners.manager message=notifications_change_triggered uid=7hQs0jluP5YUWcREqdi22NRFnU32 changes_count=1
+[2025-11-27 23:32:07.423000] time=2025-11-27 22:32:07,422 level=INFO logger=listeners.manager message=notification_change uid=7hQs0jluP5YUWcREqdi22NRFnU32 doc_id=klk_ccc56189-cb08-4308-94d8-24981538f34f type=ADDED
+[2025-11-27 23:32:07.423000] time=2025-11-27 22:32:07,423 level=INFO logger=listeners.manager message=notifications_resync_start uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:32:07.424000] INFO:     172.31.11.113:42980 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:32:07.540000] INFO:     172.31.41.136:60864 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:32:07.635000] time=2025-11-27 22:32:07,634 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:32:07.635000] time=2025-11-27 22:32:07,635 level=INFO logger=listeners.manager message=publish type=notif.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:32:07.635000] time=2025-11-27 22:32:07,635 level=INFO logger=listeners.manager message=notif_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=2 sample_ids=['klk_ccc56189-cb08-4308-94d8-24981538f34f', '1oAEkBHTVZ-p4cGMlTSIQg9TncwqC-QS9']
+[2025-11-27 23:32:07.635000] time=2025-11-27 22:32:07,635 level=INFO logger=listeners.manager message=notifications_resync_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:32:07.829000] time=2025-11-27 22:32:07,829 level=INFO logger=registry.listeners message=listener_register uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=chat listener_id=chat_7hQs0jluP5YUWcREqdi22NRFnU32_AAAABzwjXro_klk_ccc56189-cb08-4308-94d8-24981538f34f channel=chat:7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro:klk_ccc56189-cb08-4308-94d8-24981538f34f space=AAAABzwjXro thread=klk_ccc56189-cb08-4308-94d8-24981538f34f mode=active_chats
+[2025-11-27 23:32:07.832000] INFO:     172.31.11.113:42968 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:32:14.014000] time=2025-11-27 22:32:14,014 level=INFO logger=listeners.manager message=notifications_change_triggered uid=7hQs0jluP5YUWcREqdi22NRFnU32 changes_count=1
+[2025-11-27 23:32:14.014000] time=2025-11-27 22:32:14,014 level=INFO logger=listeners.manager message=notification_change uid=7hQs0jluP5YUWcREqdi22NRFnU32 doc_id=klk_ccc56189-cb08-4308-94d8-24981538f34f type=MODIFIED
+[2025-11-27 23:32:14.014000] time=2025-11-27 22:32:14,014 level=INFO logger=listeners.manager message=notifications_resync_start uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:32:14.223000] time=2025-11-27 22:32:14,223 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:32:14.223000] time=2025-11-27 22:32:14,223 level=INFO logger=listeners.manager message=publish type=notif.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:32:14.223000] time=2025-11-27 22:32:14,223 level=INFO logger=listeners.manager message=notif_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=2 sample_ids=['klk_ccc56189-cb08-4308-94d8-24981538f34f', '1oAEkBHTVZ-p4cGMlTSIQg9TncwqC-QS9']
+[2025-11-27 23:32:14.223000] time=2025-11-27 22:32:14,223 level=INFO logger=listeners.manager message=notifications_resync_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:32:19.557000] time=2025-11-27 22:32:19,557 level=INFO logger=listeners.manager message=registry_detach_trigger uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired
+[2025-11-27 23:32:19.557000] time=2025-11-27 22:32:19,557 level=INFO logger=listeners.manager message=user_detach_scheduled uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired listeners=2 workflow=0
+[2025-11-27 23:32:19.557000] time=2025-11-27 22:32:19,557 level=INFO logger=listeners.manager message=⏰ user_detach_delay_start uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired delay=5s
+[2025-11-27 23:32:19.619000] time=2025-11-27 22:32:19,619 level=INFO logger=listeners.manager message=registry_detach_trigger uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired
+[2025-11-27 23:32:24.563000] time=2025-11-27 22:32:24,562 level=INFO logger=listeners.manager message=🧹 user_detach_executing uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired (no reconnection detected)
+[2025-11-27 23:32:26.169000] time=2025-11-27 22:32:26,169 level=INFO logger=listeners.manager message=🔵 REGISTRY_CLEANUP_START nettoyage pour uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired
+[2025-11-27 23:32:26.273000] time=2025-11-27 22:32:26,273 level=INFO logger=listeners.manager message=🟢 REGISTRY_CLEANUP_SUCCESS uid=7hQs0jluP5YUWcREqdi22NRFnU32 cleaned=0
+[2025-11-27 23:35:09.340000] time=2025-11-27 22:35:09,340 level=INFO logger=listeners.manager message=user_attach_start uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:09.340000] time=2025-11-27 22:35:09,340 level=INFO logger=listeners.manager message=user_attach_firebase_query uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:09.340000] time=2025-11-27 22:35:09,340 level=INFO logger=listeners.manager message=user_attach_firebase_listener uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:09.344000] time=2025-11-27 22:35:09,344 level=INFO logger=listeners.manager message=user_attach_notification_listener_attached uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:09.344000] time=2025-11-27 22:35:09,344 level=INFO logger=listeners.manager message=user_attach_publish_sync_notifications uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:09.566000] time=2025-11-27 22:35:09,566 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:09.566000] time=2025-11-27 22:35:09,566 level=INFO logger=listeners.manager message=publish type=notif.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:09.566000] time=2025-11-27 22:35:09,566 level=INFO logger=listeners.manager message=notif_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=2 sample_ids=['klk_ccc56189-cb08-4308-94d8-24981538f34f', '1oAEkBHTVZ-p4cGMlTSIQg9TncwqC-QS9']
+[2025-11-27 23:35:09.567000] time=2025-11-27 22:35:09,566 level=INFO logger=listeners.manager message=user_attach_rtdb_messages uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:09.776000] time=2025-11-27 22:35:09,775 level=INFO logger=listeners.manager message=user_attach_message_listener_attached uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:09.943000] time=2025-11-27 22:35:09,943 level=INFO logger=listeners.manager message=notifications_change_triggered uid=7hQs0jluP5YUWcREqdi22NRFnU32 changes_count=2
+[2025-11-27 23:35:09.943000] time=2025-11-27 22:35:09,943 level=INFO logger=listeners.manager message=notification_change uid=7hQs0jluP5YUWcREqdi22NRFnU32 doc_id=1oAEkBHTVZ-p4cGMlTSIQg9TncwqC-QS9 type=ADDED
+[2025-11-27 23:35:09.943000] time=2025-11-27 22:35:09,943 level=INFO logger=listeners.manager message=notification_change uid=7hQs0jluP5YUWcREqdi22NRFnU32 doc_id=klk_ccc56189-cb08-4308-94d8-24981538f34f type=ADDED
+[2025-11-27 23:35:09.943000] time=2025-11-27 22:35:09,943 level=INFO logger=listeners.manager message=notifications_resync_start uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:10.091000] time=2025-11-27 22:35:10,091 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:10.092000] time=2025-11-27 22:35:10,092 level=INFO logger=listeners.manager message=publish type=msg.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:10.093000] time=2025-11-27 22:35:10,093 level=INFO logger=listeners.manager message=msg_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=0 sample_ids=[]
+[2025-11-27 23:35:10.094000] time=2025-11-27 22:35:10,094 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:10.094000] time=2025-11-27 22:35:10,094 level=INFO logger=listeners.manager message=publish type=msg.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:10.095000] time=2025-11-27 22:35:10,095 level=INFO logger=listeners.manager message=msg_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=0 sample_ids=[]
+[2025-11-27 23:35:10.095000] time=2025-11-27 22:35:10,095 level=INFO logger=listeners.manager message=user_attach_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32 listeners_count=2
+[2025-11-27 23:35:10.095000] time=2025-11-27 22:35:10,095 level=INFO logger=listeners.manager message=🔵 REGISTRY_START enregistrement des listeners pour uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:10.095000] time=2025-11-27 22:35:10,095 level=INFO logger=listeners.manager message=🔵 REGISTRY_INSTANCE récupérée pour uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:10.155000] time=2025-11-27 22:35:10,155 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:10.155000] time=2025-11-27 22:35:10,155 level=INFO logger=listeners.manager message=publish type=notif.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:10.155000] time=2025-11-27 22:35:10,155 level=INFO logger=listeners.manager message=notif_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=2 sample_ids=['klk_ccc56189-cb08-4308-94d8-24981538f34f', '1oAEkBHTVZ-p4cGMlTSIQg9TncwqC-QS9']
+[2025-11-27 23:35:10.155000] time=2025-11-27 22:35:10,155 level=INFO logger=listeners.manager message=notifications_resync_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:10.196000] time=2025-11-27 22:35:10,195 level=WARNING logger=registry.listeners message=listener_already_exists uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=notif space=None thread=None
+[2025-11-27 23:35:10.196000] time=2025-11-27 22:35:10,195 level=INFO logger=listeners.manager message=🔵 REGISTRY_NOTIF uid=7hQs0jluP5YUWcREqdi22NRFnU32 success=False
+[2025-11-27 23:35:10.296000] time=2025-11-27 22:35:10,296 level=WARNING logger=registry.listeners message=listener_already_exists uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=msg space=None thread=None
+[2025-11-27 23:35:10.297000] time=2025-11-27 22:35:10,297 level=INFO logger=listeners.manager message=🔵 REGISTRY_MSG uid=7hQs0jluP5YUWcREqdi22NRFnU32 success=False
+[2025-11-27 23:35:10.297000] time=2025-11-27 22:35:10,297 level=INFO logger=listeners.manager message=🟢 REGISTRY_COMPLETE uid=7hQs0jluP5YUWcREqdi22NRFnU32 enregistrement terminé
+[2025-11-27 23:36:24.019000] time=2025-11-27 22:36:24,018 level=INFO logger=listeners.manager message=registry_detach_trigger uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired
+[2025-11-27 23:36:24.019000] time=2025-11-27 22:36:24,018 level=INFO logger=listeners.manager message=user_detach_scheduled uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired listeners=2 workflow=0
+[2025-11-27 23:36:24.019000] time=2025-11-27 22:36:24,019 level=INFO logger=listeners.manager message=⏰ user_detach_delay_start uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired delay=5s
+[2025-11-27 23:36:24.028000] time=2025-11-27 22:36:24,028 level=INFO logger=listeners.manager message=registry_detach_trigger uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired
+[2025-11-27 23:36:29.020000] time=2025-11-27 22:36:29,019 level=INFO logger=listeners.manager message=🧹 user_detach_executing uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired (no reconnection detected)
+[2025-11-27 23:36:39.773000] time=2025-11-27 22:36:39,772 level=INFO logger=listeners.manager message=🔵 REGISTRY_CLEANUP_START nettoyage pour uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired
+[2025-11-27 23:36:39.881000] time=2025-11-27 22:36:39,881 level=INFO logger=listeners.manager message=🟢 REGISTRY_CLEANUP_SUCCESS uid=7hQs0jluP5YUWcREqdi22NRFnU32 cleaned=0

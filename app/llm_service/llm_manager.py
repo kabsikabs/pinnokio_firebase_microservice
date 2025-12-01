@@ -1696,6 +1696,12 @@ class LLMManager:
             # ═══════════════════════════════════════════════════════════
             # ÉTAPE 5.5 : VÉRIFIER MODE INTERMÉDIATION AU CHARGEMENT
             # ═══════════════════════════════════════════════════════════
+            # ⭐ Forcer le rechargement du status depuis Firestore pour avoir la valeur à jour
+            if self._is_onboarding_like(session.context.chat_mode) and session.context.chat_mode in ("router_chat", "banker_chat", "apbookeeper_chat"):
+                job_id = thread_key
+                await brain.load_job_data(job_id, force_reload=True)
+                job_status = brain.job_data.get("status") if brain.job_data else job_status
+            
             await self._check_intermediation_on_load(
                 session=session,
                 collection_name=collection_name,
@@ -2497,7 +2503,9 @@ class LLMManager:
                     )
 
                     # ═══ VÉRIFIER MODE INTERMÉDIATION AU CHARGEMENT ═══
-                    # ⭐ Récupérer le status depuis le brain qui vient d'être chargé
+                    # ⭐ Forcer le rechargement du status depuis Firestore (éviter stale data)
+                    job_id = thread_key
+                    await brain.load_job_data(job_id, force_reload=True)
                     job_status = brain.job_data.get("status") if brain.job_data else None
                     await self._check_intermediation_on_load(
                         session=session,
@@ -2887,16 +2895,8 @@ class LLMManager:
                         initial_entries=log_entries
                     )
                     
-                    # ⭐ NOUVEAU : Vérifier mode intermédiation au chargement
-                    # Permet de réactiver le mode si dernier message était TOOL/CARD/FOLLOW_MESSAGE
-                    # ⭐ Récupérer le status depuis le brain qui vient d'être chargé
-                    job_status_from_brain = brain.job_data.get("status") if brain.job_data else None
-                    await self._check_intermediation_on_load(
-                        session=session,
-                        collection_name=collection_name,
-                        thread_key=thread_key,
-                        job_status=job_status_from_brain or job_status  # Utiliser brain d'abord, sinon paramètre
-                    )
+                    # ⭐ Note : _check_intermediation_on_load() est déjà appelé dans _load_chat()
+                    # Pas besoin de le rappeler ici pour éviter les doublons
                     
                     logger.info(
                         f"[ENTER_CHAT] ✅ Brain initialisé pour mode onboarding-like - "
@@ -3676,56 +3676,29 @@ class LLMManager:
             session.intermediation_mode[thread_key] = True
 
             # ═══ 2. EXTRAIRE LES OUTILS DISPONIBLES ═══
-            # Les outils peuvent être fournis dans 2 formats:
-            # - Format Anthropic (CARD/FOLLOW_MESSAGE): [{"name": "TOOL_X", "description": "...", "input_schema": {...}}, ...]
-            # - Format simple (TOOL): {"content": {"tool_list": ["TOOL_1", "TOOL_2"]}}
-            tools_config_anthropic = message.get("tools_config") or message.get("tools") or []
-
-            # ⭐ EXTRAIRE UNIQUEMENT LES NOMS DES OUTILS (comme send_tools_list le fait)
-            # Le frontend chargera les détails depuis config_tools.json
+            # Format attendu pour FOLLOW_MESSAGE et FOLLOW_CARD :
+            # message["message"]["availableTools"] = ["tool1", "tool2", "tool3"]
             tool_names = []
             
-            # Vérifier si c'est un message TOOL avec format simple
-            # Le tool_list peut être dans "content" ou à la racine du message
-            tool_list_simple = None
+            # ⭐ NOUVEAU FORMAT : Extraire depuis message["message"]["availableTools"]
+            message_payload = message.get("message", {})
+            if isinstance(message_payload, dict):
+                available_tools = message_payload.get("availableTools")
+                if available_tools and isinstance(available_tools, list):
+                    tool_names = available_tools
+                    logger.info(
+                        f"[INTERMEDIATION] 🔧 Outils extraits depuis message.availableTools - "
+                        f"count={len(tool_names)} tools={tool_names}"
+                    )
             
-            # Chercher d'abord à la racine (format le plus courant)
-            if "tool_list" in message:
-                tool_list_simple = message.get("tool_list")
-                logger.debug(f"[INTERMEDIATION] tool_list trouvé à la racine du message")
-            # Sinon chercher dans content
-            else:
-                message_content = message.get("content", {})
-                # ⭐ PARSER LE JSON SI CONTENT EST UNE STRING (format TOOL depuis send_tools_list)
-                if isinstance(message_content, str):
-                    try:
-                        import json
-                        message_content = json.loads(message_content)
-                        logger.debug(f"[INTERMEDIATION] content JSON parsé avec succès")
-                    except (json.JSONDecodeError, TypeError) as e:
-                        logger.warning(f"[INTERMEDIATION] ⚠️ Erreur parsing JSON content: {e}")
-                        message_content = {}
-                
-                if isinstance(message_content, dict):
-                    tool_list_simple = message_content.get("tool_list")
-                    if tool_list_simple:
-                        logger.debug(f"[INTERMEDIATION] tool_list trouvé dans content")
-            
-            if tool_list_simple:
-                # Format simple : liste de strings ["TOOL_1", "TOOL_2"]
-                tool_names = tool_list_simple if isinstance(tool_list_simple, list) else []
-                logger.info(
-                    f"[INTERMEDIATION] 🔧 Outils extraits du format simple (TOOL) - "
-                    f"count={len(tool_names)} tools={tool_names}"
-                )
-            
-            # Sinon, utiliser le format Anthropic (CARD/FOLLOW_MESSAGE)
-            if not tool_names and tools_config_anthropic:
+            # ⭐ FALLBACK : Format legacy (tools_config/tools) pour compatibilité
+            if not tool_names:
+                tools_config_anthropic = message.get("tools_config") or message.get("tools") or []
                 if isinstance(tools_config_anthropic, list):
                     # Format Anthropic (liste de dicts avec "name")
                     tool_names = [tool.get("name") for tool in tools_config_anthropic if isinstance(tool, dict) and "name" in tool]
                     logger.info(
-                        f"[INTERMEDIATION] 🔧 Outils extraits du format Anthropic (CARD/FOLLOW_MESSAGE) - "
+                        f"[INTERMEDIATION] 🔧 Outils extraits depuis tools_config (legacy) - "
                         f"count={len(tool_names)} tools={tool_names}"
                     )
 
@@ -3733,17 +3706,9 @@ class LLMManager:
             tools_list_text = ""
             if tool_names:
                 tools_list_text = "\n\n**Available tools:**\n"
-                # Si format Anthropic, utiliser les descriptions fournies
-                if tools_config_anthropic:
-                    for tool_anthropic in tools_config_anthropic:
-                        if isinstance(tool_anthropic, dict):
-                            tool_name = tool_anthropic.get("name", "Unknown")
-                            tool_desc = tool_anthropic.get("description", "")
-                            tools_list_text += f"- **{tool_name}**: {tool_desc}\n"
-                else:
-                    # Si format simple, juste lister les noms
-                    for tool_name in tool_names:
-                        tools_list_text += f"- **{tool_name}**\n"
+                # Afficher la liste des noms d'outils
+                for tool_name in tool_names:
+                    tools_list_text += f"- **{tool_name}**\n"
 
             # ═══ 3. ENVOYER MESSAGE SYSTÈME AU FRONTEND (VISIBLE, NON SAUVÉ RTDB) ═══
             system_message_content = f"""🔄 **Intermediation Mode Activated**
@@ -4118,6 +4083,22 @@ The intermediation session has been closed {reason_text}. You can now continue t
             user_id = session.context.user_id
             
             # ═══════════════════════════════════════════════════════════
+            # ÉTAPE 0 : Vérifier si le message a déjà été traité localement
+            # ═══════════════════════════════════════════════════════════
+            # ⭐ FIX DOUBLON : Ignorer les messages créés localement par ce backend
+            # (ex: CLOSE_INTERMEDIATION écrit lors de la détection d'un mot de terminaison)
+            message_id = message.get("id") or message.get("message_id")
+            if message_id:
+                existing_processed = session.onboarding_processed_ids.get(thread_key)
+                if existing_processed and message_id in existing_processed:
+                    logger.info(
+                        f"[ONBOARDING_LOG] ⏭️ Message déjà traité localement ignoré - "
+                        f"thread={thread_key} message_id={message_id} "
+                        f"(évite double traitement des messages créés par ce backend)"
+                    )
+                    return
+            
+            # ═══════════════════════════════════════════════════════════
             # ÉTAPE 1 : Extraction du type de message
             # ═══════════════════════════════════════════════════════════
             message_type = message.get('message_type') or message.get('type')
@@ -4297,8 +4278,9 @@ The intermediation session has been closed {reason_text}. You can now continue t
                 )
                 return
 
-            elif message_type in {"CARD", "WAITING_MESSAGE"}:
-                # ═══ ENVOI VIA WEBSOCKET + NOTIFICATION AGENT ═══
+            elif message_type == "FOLLOW_CARD":
+                # ═══ ENVOI VIA WEBSOCKET + ACTIVATION MODE INTERMÉDIATION ═══
+                # FOLLOW_CARD contient une carte interactive avec outils disponibles
                 await self._send_non_message_via_websocket(
                     user_id=user_id,
                     collection_name=collection_name,
@@ -4316,7 +4298,7 @@ The intermediation session has been closed {reason_text}. You can now continue t
                     message=message
                 )
 
-                # ⭐ NOUVELLE LOGIQUE: Démarrer mode intermédiation pour CARD
+                # ⭐ NOUVELLE LOGIQUE: Démarrer mode intermédiation pour FOLLOW_CARD
                 # UNIQUEMENT pour apbookeeper_chat, router_chat, banker_chat
                 if session.context.chat_mode in ("apbookeeper_chat", "router_chat", "banker_chat"):
                     await self._start_intermediation_mode(
@@ -4328,9 +4310,34 @@ The intermediation session has been closed {reason_text}. You can now continue t
                         job_id=job_id
                     )
                     logger.info(
-                        f"[INTERMEDIATION] 🔄 Mode activé via CARD pour {session.context.chat_mode} - "
+                        f"[INTERMEDIATION] 🔄 Mode activé via FOLLOW_CARD pour {session.context.chat_mode} - "
                         f"thread={thread_key} job_id={job_id}"
                     )
+
+                logger.info(
+                    f"[ONBOARDING_LOG] ✅ Message FOLLOW_CARD routé via WebSocket "
+                    f"et contexte partagé avec l'agent"
+                )
+
+            elif message_type in {"CARD", "WAITING_MESSAGE"}:
+                # ═══ ENVOI VIA WEBSOCKET + NOTIFICATION AGENT ═══
+                # Messages de type CARD/WAITING_MESSAGE (sans intermédiation)
+                await self._send_non_message_via_websocket(
+                    user_id=user_id,
+                    collection_name=collection_name,
+                    thread_key=thread_key,
+                    message=message
+                )
+
+                await self._notify_agent_of_waiting_context(
+                    session=session,
+                    brain=brain,
+                    collection_name=collection_name,
+                    thread_key=thread_key,
+                    job_id=job_id,
+                    message_type=message_type,
+                    message=message
+                )
 
                 logger.info(
                     f"[ONBOARDING_LOG] ✅ Message {message_type} routé via WebSocket "
@@ -4338,37 +4345,19 @@ The intermediation session has been closed {reason_text}. You can now continue t
                 )
 
             elif message_type == "TOOL":
-                # ═══ ENVOI OUTILS + ACTIVATION MODE INTERMÉDIATION ═══
-                # Le message TOOL contient la liste des outils disponibles
-                # et déclenche le mode intermédiation pour les modes concernés
-                
-                # Envoyer via WebSocket (pour compatibilité avec ancien système)
+                # ═══ ENVOI VIA WEBSOCKET (LEGACY) ═══
+                # Message TOOL envoyé via WebSocket pour compatibilité
+                # N'active PLUS le mode intermédiation (géré par FOLLOW_MESSAGE/FOLLOW_CARD)
                 await self._send_non_message_via_websocket(
                     user_id=user_id,
                     collection_name=collection_name,
                     thread_key=thread_key,
                     message=message
                 )
-                
-                # ⭐ NOUVEAU : Activer mode intermédiation pour les modes concernés
-                if session.context.chat_mode in ("apbookeeper_chat", "router_chat", "banker_chat"):
-                    await self._start_intermediation_mode(
-                        session=session,
-                        user_id=user_id,
-                        collection_name=collection_name,
-                        thread_key=thread_key,
-                        message=message,
-                        job_id=job_id
-                    )
-                    logger.info(
-                        f"[INTERMEDIATION] 🔄 Mode activé via TOOL - "
-                        f"thread={thread_key} job_id={job_id} message_id={message.get('id', 'N/A')}"
-                    )
-                else:
-                    logger.info(
-                        f"[ONBOARDING_LOG] ✅ Message TOOL routé via WebSocket "
-                        f"(mode {session.context.chat_mode} ne supporte pas l'intermédiation)"
-                    )
+                logger.info(
+                    f"[ONBOARDING_LOG] ✅ Message TOOL routé via WebSocket "
+                    f"(legacy - pas d'activation intermédiation)"
+                )
 
             elif message_type == "CARD_CLICKED_PINNOKIO":
                 # ═══ CARTE CLIQUÉE - FERMETURE MODE INTERMÉDIATION ═══
@@ -4459,10 +4448,19 @@ The intermediation session has been closed {reason_text}. You can now continue t
             
             job_id = listener_info.get("job_id")
             
-            # Vérifier si le message contient un mot de terminaison
+            # Vérifier si le message SE TERMINE par un mot de terminaison (détection stricte)
             termination_words = ["TERMINATE", "PENDING", "NEXT"]
-            message_upper = message.upper()
-            has_termination = any(word in message_upper for word in termination_words)
+            message_stripped = message.strip()
+            message_upper = message_stripped.upper()
+            
+            # Détecter quel mot de terminaison est utilisé (à la fin du message)
+            detected_word = None
+            for word in termination_words:
+                if message_upper.endswith(word):
+                    detected_word = word
+                    break
+            
+            has_termination = detected_word is not None
             
             # Envoyer la réponse au RTDB de l'application métier
             messages_path = f"{collection_name}/job_chats/{job_id}/messages"
@@ -4493,17 +4491,47 @@ The intermediation session has been closed {reason_text}. You can now continue t
             # apparaîtrait comme message de l'agent dans active_chats
             # Seules les réponses de l'agent métier (MESSAGE avec from_agent=True) sont envoyées
 
-            # Si mot de terminaison détecté, écrire CLOSE_INTERMEDIATION et désactiver le mode
+            # Si mot de terminaison détecté, attendre que Pinnokio traite puis fermer
             if has_termination:
+                logger.info(
+                    f"[INTERMEDIATION] 🔚 Mot de terminaison détecté : {detected_word} - "
+                    f"thread={thread_key} - Attente traitement Pinnokio avant fermeture"
+                )
+                
+                # ⭐ Attendre un court délai pour que Pinnokio traite le message avant qu'on ferme
+                await asyncio.sleep(0.1)  # 100ms pour que Pinnokio traite
+                
                 # Écrire le message CLOSE_INTERMEDIATION dans RTDB
                 close_message_id = str(uuid.uuid4())
                 close_timestamp = datetime.now(timezone.utc).isoformat()
+                
+                # ⭐ FIX DOUBLON : Marquer ce message comme "déjà traité" AVANT de l'écrire
+                # Cela évite que le listener ne le retraite et renvoie les messages système 2x
+                existing_processed = session.onboarding_processed_ids.get(thread_key)
+                if existing_processed is None:
+                    existing_processed = set()
+                    session.onboarding_processed_ids[thread_key] = existing_processed
+                existing_processed.add(close_message_id)
+                
+                # Aussi mettre à jour dans le listener_info pour cohérence
+                listener_info = session.onboarding_listeners.get(thread_key)
+                if listener_info:
+                    listener_info.setdefault("processed_message_ids", existing_processed)
+                
+                logger.info(
+                    f"[INTERMEDIATION] 🏷️ Message CLOSE_INTERMEDIATION marqué comme traité localement - "
+                    f"close_message_id={close_message_id} (évite double envoi messages système)"
+                )
+                
                 close_message_ref = self._get_rtdb_ref(f"{messages_path}/{close_message_id}")
 
                 close_payload = {
                     "id": close_message_id,
                     "message_type": "CLOSE_INTERMEDIATION",
                     "content": "Intermediation closed by user",
+                    "reason": "termination_word",
+                    "termination_word": detected_word,  # TERMINATE, PENDING ou NEXT
+                    "original_message_id": message_id,
                     "timestamp": close_timestamp,
                     "read": False,
                     "eventTime": close_timestamp
@@ -4523,7 +4551,7 @@ The intermediation session has been closed {reason_text}. You can now continue t
 
                 logger.info(
                     f"[INTERMEDIATION] 🔚 Mode désactivé - CLOSE_INTERMEDIATION écrit dans RTDB - "
-                    f"thread={thread_key} mot_terminaison_détecté=True"
+                    f"thread={thread_key} termination_word={detected_word}"
                 )
             
             return {
@@ -4551,23 +4579,23 @@ The intermediation session has been closed {reason_text}. You can now continue t
         Vérifie si le chat doit être en mode intermédiation au chargement.
 
         ⭐ LOGIQUE CORRECTE :
-        1. Cherche dans TOUT l'historique s'il existe un CARD/TOOL/FOLLOW_MESSAGE
+        1. Cherche dans TOUT l'historique s'il existe un FOLLOW_CARD/FOLLOW_MESSAGE
         2. Vérifie s'il y a un CLOSE_INTERMEDIATION après ce message
         3. Si OUI → mode normal (intermédiation terminée)
         4. Si NON → activer mode intermédiation (peu importe les messages entre)
         
         Le dernier message n'a pas d'importance : ce qui compte c'est l'existence
-        d'un CARD/TOOL/FOLLOW_MESSAGE sans CLOSE_INTERMEDIATION après.
+        d'un FOLLOW_CARD/FOLLOW_MESSAGE sans CLOSE_INTERMEDIATION après.
         
         ⭐ RENVOI DE CARTE :
-        Si une CARD existe dans l'historique et n'a pas été cliquée (CARD_CLICKED_PINNOKIO),
+        Si une FOLLOW_CARD existe dans l'historique et n'a pas été cliquée (CARD_CLICKED_PINNOKIO),
         elle est renvoyée au frontend pour permettre à l'utilisateur d'interagir avec
         les boutons d'action (même s'il y a eu des échanges après).
         
         ⭐ CONDITIONS D'ACTIVATION :
-        - CARD/TOOL/FOLLOW_MESSAGE trouvé dans l'historique
+        - FOLLOW_CARD/FOLLOW_MESSAGE trouvé dans l'historique
         - Pas de CLOSE_INTERMEDIATION après
-        - Job actif (job_status in ['running', 'in queue'])
+        - Job actif (job_status == 'running')
 
         Args:
             session: Session LLM active
@@ -4637,21 +4665,21 @@ The intermediation session has been closed {reason_text}. You can now continue t
             messages.sort(key=_sort_key, reverse=True)
             
             # ⭐ LOGIQUE CORRIGÉE AVEC VÉRIFICATION CHRONOLOGIQUE:
-            # 1. Trouver la CARD/TOOL/FOLLOW_MESSAGE la plus récente
-            # 2. Vérifier s'il y a un CLOSE_INTERMEDIATION APRÈS cette CARD (plus récent chronologiquement)
-            # 3. Si CLOSE_INTERMEDIATION est APRÈS la CARD → mode fermé
-            # 4. Si CLOSE_INTERMEDIATION est AVANT la CARD → mode doit être activé (nouvelle intermédiation)
+            # 1. Trouver la FOLLOW_CARD/FOLLOW_MESSAGE la plus récente
+            # 2. Vérifier s'il y a un CLOSE_INTERMEDIATION APRÈS cette FOLLOW_CARD (plus récent chronologiquement)
+            # 3. Si CLOSE_INTERMEDIATION est APRÈS la FOLLOW_CARD → mode fermé
+            # 4. Si CLOSE_INTERMEDIATION est AVANT la FOLLOW_CARD → mode doit être activé (nouvelle intermédiation)
             
             has_card_clicked = False
-            card_or_tool_message = None  # Dernier CARD/TOOL/FOLLOW_MESSAGE trouvé
-            card_or_tool_index = None
-            last_card_for_display = None  # Dernière CARD à afficher (si pas cliquée)
+            card_or_follow_message = None  # Dernier FOLLOW_CARD/FOLLOW_MESSAGE trouvé
+            card_or_follow_index = None
+            last_card_for_display = None  # Dernière FOLLOW_CARD à afficher (si pas cliquée)
             last_card_index = None
             close_message_index = None  # Index du CLOSE_INTERMEDIATION le plus récent
             
             # 1. Parcourir TOUS les messages pour trouver :
-            #    - Dernier CARD/TOOL/FOLLOW_MESSAGE (le plus récent)
-            #    - Dernière CARD (pour affichage)
+            #    - Dernier FOLLOW_CARD/FOLLOW_MESSAGE (le plus récent)
+            #    - Dernière FOLLOW_CARD (pour affichage)
             #    - CLOSE_INTERMEDIATION le plus récent (pour comparaison chronologique)
             for idx, msg in enumerate(messages):
                 msg_type = msg.get('message_type')
@@ -4664,75 +4692,75 @@ The intermediation session has been closed {reason_text}. You can now continue t
                         f"thread={thread_key} message_id={msg.get('id', 'N/A')}"
                     )
                 
-                # Sauvegarder le premier (plus récent) CARD/TOOL/FOLLOW_MESSAGE trouvé
-                if msg_type in ('CARD', 'TOOL', 'FOLLOW_MESSAGE') and card_or_tool_message is None:
-                    card_or_tool_message = msg
-                    card_or_tool_index = idx
+                # Sauvegarder le premier (plus récent) FOLLOW_CARD/FOLLOW_MESSAGE trouvé
+                if msg_type in ('FOLLOW_CARD', 'FOLLOW_MESSAGE') and card_or_follow_message is None:
+                    card_or_follow_message = msg
+                    card_or_follow_index = idx
                     logger.info(
                         f"[INTERMEDIATION_LOAD] 🔧 Dernier {msg_type} trouvé à l'index {idx} - "
                         f"thread={thread_key} message_id={msg.get('id', 'N/A')}"
                     )
                 
-                # Sauvegarder la première (plus récente) CARD trouvée pour affichage
-                if msg_type == 'CARD' and last_card_for_display is None:
+                # Sauvegarder la première (plus récente) FOLLOW_CARD trouvée pour affichage
+                if msg_type == 'FOLLOW_CARD' and last_card_for_display is None:
                     last_card_for_display = msg
                     last_card_index = idx
                     logger.info(
-                        f"[INTERMEDIATION_LOAD] 🃏 Dernière CARD trouvée à l'index {idx} - "
+                        f"[INTERMEDIATION_LOAD] 🃏 Dernière FOLLOW_CARD trouvée à l'index {idx} - "
                         f"thread={thread_key} card_id={msg.get('id', 'N/A')}"
                     )
             
-            # 2. Vérifier l'ordre chronologique : CLOSE_INTERMEDIATION est-il APRÈS la CARD ?
+            # 2. Vérifier l'ordre chronologique : CLOSE_INTERMEDIATION est-il APRÈS la FOLLOW_CARD ?
             # Les messages sont triés du plus récent (idx 0) au plus ancien
-            # Si close_message_index < card_or_tool_index → CLOSE est plus récent que CARD → mode fermé
-            # Si close_message_index > card_or_tool_index ou None → CLOSE est plus ancien ou absent → mode doit être activé
+            # Si close_message_index < card_or_follow_index → CLOSE est plus récent que FOLLOW_CARD → mode fermé
+            # Si close_message_index > card_or_follow_index ou None → CLOSE est plus ancien ou absent → mode doit être activé
             has_close_after_card = False
-            if card_or_tool_index is not None and close_message_index is not None:
-                if close_message_index < card_or_tool_index:
-                    # CLOSE_INTERMEDIATION est plus récent que la CARD → mode fermé
+            if card_or_follow_index is not None and close_message_index is not None:
+                if close_message_index < card_or_follow_index:
+                    # CLOSE_INTERMEDIATION est plus récent que la FOLLOW_CARD → mode fermé
                     has_close_after_card = True
                     logger.info(
-                        f"[INTERMEDIATION_LOAD] 🔚 CLOSE_INTERMEDIATION est APRÈS la CARD "
-                        f"(close_idx={close_message_index} < card_idx={card_or_tool_index}) - "
+                        f"[INTERMEDIATION_LOAD] 🔚 CLOSE_INTERMEDIATION est APRÈS la FOLLOW_CARD "
+                        f"(close_idx={close_message_index} < card_idx={card_or_follow_index}) - "
                         f"thread={thread_key} → Mode fermé"
                     )
                 else:
-                    # CLOSE_INTERMEDIATION est plus ancien que la CARD → nouvelle intermédiation
+                    # CLOSE_INTERMEDIATION est plus ancien que la FOLLOW_CARD → nouvelle intermédiation
                     logger.info(
-                        f"[INTERMEDIATION_LOAD] ✅ CLOSE_INTERMEDIATION est AVANT la CARD "
-                        f"(close_idx={close_message_index} >= card_idx={card_or_tool_index}) - "
+                        f"[INTERMEDIATION_LOAD] ✅ CLOSE_INTERMEDIATION est AVANT la FOLLOW_CARD "
+                        f"(close_idx={close_message_index} >= card_idx={card_or_follow_index}) - "
                         f"thread={thread_key} → Nouvelle intermédiation détectée"
                     )
-            elif close_message_index is not None and card_or_tool_index is None:
-                # CLOSE_INTERMEDIATION existe mais pas de CARD → mode fermé
+            elif close_message_index is not None and card_or_follow_index is None:
+                # CLOSE_INTERMEDIATION existe mais pas de FOLLOW_CARD → mode fermé
                 has_close_after_card = True
                 logger.info(
-                    f"[INTERMEDIATION_LOAD] 🔚 CLOSE_INTERMEDIATION trouvé sans CARD/TOOL/FOLLOW_MESSAGE - "
+                    f"[INTERMEDIATION_LOAD] 🔚 CLOSE_INTERMEDIATION trouvé sans FOLLOW_CARD/FOLLOW_MESSAGE - "
                     f"thread={thread_key} → Mode fermé"
                 )
             
-            # 3. Si une CARD a été trouvée, vérifier si elle a été cliquée
+            # 3. Si une FOLLOW_CARD a été trouvée, vérifier si elle a été cliquée
             if last_card_for_display and last_card_index is not None:
-                for msg in messages[:last_card_index]:  # Messages plus récents que la CARD
+                for msg in messages[:last_card_index]:  # Messages plus récents que la FOLLOW_CARD
                     if msg.get('message_type') == 'CARD_CLICKED_PINNOKIO':
                         has_card_clicked = True
                         logger.info(
-                            f"[INTERMEDIATION_LOAD] ✅ CARD_CLICKED_PINNOKIO trouvé après CARD - "
+                            f"[INTERMEDIATION_LOAD] ✅ CARD_CLICKED_PINNOKIO trouvé après FOLLOW_CARD - "
                             f"thread={thread_key} message_id={msg.get('id', 'N/A')}"
                         )
                         break
             
             # 4. Décider d'activer le mode intermédiation
-            if card_or_tool_message and not has_close_after_card:
-                # Un CARD/TOOL/FOLLOW_MESSAGE existe ET pas de CLOSE_INTERMEDIATION après
+            if card_or_follow_message and not has_close_after_card:
+                # Un FOLLOW_CARD/FOLLOW_MESSAGE existe ET pas de CLOSE_INTERMEDIATION après
                 # → Activer le mode intermédiation
 
                 # Déterminer si le job est en cours de traitement
                 job_in_process = True  # Par défaut, on suppose que le job est en cours
 
                 if job_status:
-                    # Si job_status est fourni, vérifier qu'il est bien "running" ou "in queue"
-                    job_in_process = job_status in ('running', 'in queue')
+                    # Si job_status est fourni, vérifier qu'il est bien "running" uniquement
+                    job_in_process = job_status == 'running'
                     logger.info(
                         f"[INTERMEDIATION_LOAD] 🔍 job_status={job_status} → "
                         f"job_in_process={job_in_process}"
@@ -4741,13 +4769,13 @@ The intermediation session has been closed {reason_text}. You can now continue t
                 # Ne réactiver l'intermédiation QUE si le job est en cours
                 if job_in_process:
                     # Réactiver le mode intermédiation avec message système
-                    # Utiliser card_or_tool_message pour les outils
+                    # Utiliser card_or_follow_message pour les outils
                     mode_activated = await self._start_intermediation_mode(
                         session=session,
                         user_id=session.context.user_id,
                         collection_name=collection_name,
                         thread_key=thread_key,
-                        message=card_or_tool_message,
+                        message=card_or_follow_message,
                         job_id=job_id
                     )
                     
@@ -4755,7 +4783,7 @@ The intermediation session has been closed {reason_text}. You can now continue t
                         logger.info(
                             f"[INTERMEDIATION_LOAD] ✅ Mode réactivé au chargement - "
                             f"thread={thread_key} job_id={job_id} "
-                            f"(CARD/TOOL/FOLLOW_MESSAGE trouvé sans CLOSE_INTERMEDIATION, job_status={job_status})"
+                            f"(FOLLOW_CARD/FOLLOW_MESSAGE trouvé sans CLOSE_INTERMEDIATION, job_status={job_status})"
                         )
                     else:
                         logger.info(
@@ -4819,16 +4847,16 @@ The intermediation session has been closed {reason_text}. You can now continue t
                         f"(job terminé ou non démarré, job_status={job_status})"
                     )
             else:
-                # Pas de CARD/TOOL/FOLLOW_MESSAGE OU CLOSE_INTERMEDIATION détecté APRÈS la CARD
+                # Pas de FOLLOW_CARD/FOLLOW_MESSAGE OU CLOSE_INTERMEDIATION détecté APRÈS
                 if has_close_after_card:
                     logger.info(
                         f"[INTERMEDIATION_LOAD] ⏭️ Mode normal conservé - "
-                        f"thread={thread_key} (CLOSE_INTERMEDIATION détecté APRÈS la CARD/TOOL/FOLLOW_MESSAGE)"
+                        f"thread={thread_key} (CLOSE_INTERMEDIATION détecté APRÈS la FOLLOW_CARD/FOLLOW_MESSAGE)"
                     )
-                elif not card_or_tool_message:
+                elif not card_or_follow_message:
                     logger.info(
                         f"[INTERMEDIATION_LOAD] ⏭️ Mode normal - "
-                        f"thread={thread_key} (aucun CARD/TOOL/FOLLOW_MESSAGE trouvé)"
+                        f"thread={thread_key} (aucun FOLLOW_CARD/FOLLOW_MESSAGE trouvé)"
                     )
                 else:
                     logger.info(
@@ -5314,7 +5342,17 @@ The intermediation session has been closed {reason_text}. You can now continue t
             )
 
     def _stop_onboarding_listener(self, session: LLMSession, thread_key: Optional[str] = None) -> None:
-        """Arrête les écouteurs onboarding pour un thread ou pour tous."""
+        """
+        Arrête les écouteurs onboarding pour un thread ou pour tous.
+        
+        ⭐ OPTIMISATION: Fermeture NON-BLOQUANTE en arrière-plan
+        Les listeners Firebase RTDB sont fermés dans des threads séparés pour éviter
+        les blocages de 10-15 secondes qui retardent la réponse au client.
+        
+        Args:
+            session: Session LLM contenant les listeners
+            thread_key: Thread spécifique à arrêter (None = tous)
+        """
 
         if thread_key:
             listeners = {thread_key: session.onboarding_listeners.get(thread_key)}
@@ -5325,14 +5363,35 @@ The intermediation session has been closed {reason_text}. You can now continue t
             if not info:
                 continue
             listener = info.get("listener")
-            try:
-                if listener:
-                    listener.close()
-                    logger.info(f"[ONBOARDING_LISTENER] 🔚 Listener arrêté pour thread={key}")
-            except Exception as e:
-                logger.warning(f"[ONBOARDING_LISTENER] ⚠️ Erreur arrêt listener thread={key}: {e}")
-            finally:
-                session.onboarding_listeners.pop(key, None)
+            
+            # ⭐ Supprimer immédiatement du registre (pour éviter les doublons/réutilisations)
+            session.onboarding_listeners.pop(key, None)
+            
+            if listener:
+                # ⭐ FERMETURE EN ARRIÈRE-PLAN (NON-BLOQUANTE)
+                # listener.close() peut prendre 10-15 secondes avec Firebase RTDB
+                # → Exécution dans un thread séparé pour ne pas bloquer la réponse
+                def _close_listener_async():
+                    """Ferme le listener de manière asynchrone."""
+                    try:
+                        listener.close()
+                        logger.info(f"[ONBOARDING_LISTENER] 🔚 Listener arrêté pour thread={key}")
+                    except Exception as e:
+                        logger.warning(
+                            f"[ONBOARDING_LISTENER] ⚠️ Erreur arrêt listener thread={key}: {e}"
+                        )
+                
+                # Lancer dans un thread daemon (s'arrête automatiquement avec l'app)
+                close_thread = threading.Thread(
+                    target=_close_listener_async,
+                    daemon=True,  # Thread daemon pour ne pas bloquer l'arrêt de l'application
+                    name=f"listener_close_{key[:20]}"  # Nom explicite pour debug
+                )
+                close_thread.start()
+                
+                logger.info(
+                    f"[ONBOARDING_LISTENER] ⏳ Fermeture en arrière-plan lancée pour thread={key}"
+                )
 
     # ═══════════════════════════════════════════════════════════════
     # COEUR MÉTIER UNIFIÉ - UI ET BACKEND
@@ -6582,7 +6641,8 @@ The intermediation session has been closed {reason_text}. You can now continue t
         card_name: str,
         card_message_id: str,
         action: str,
-        user_message: str = ""
+        user_message: str = "",
+        message_data: Dict[str, Any] = None
         ) -> Dict[str, Any]:
         """
         Point de terminaison RPC pour réception de réponse carte.
@@ -6593,10 +6653,11 @@ The intermediation session has been closed {reason_text}. You can now continue t
             user_id: ID Firebase utilisateur
             collection_name: ID société
             thread_key: Clé du thread
-            card_name: Type de carte (ex: 'approval_card', 'text_modification_approval')
+            card_name: Type de carte (ex: 'approval_card', 'klk_router_approval_card')
             card_message_id: ID du message RTDB
-            action: Action utilisateur ('approve_four_eyes', 'reject_four_eyes', etc.)
+            action: Action utilisateur ('approve_four_eyes', 'answer_pinnokio', etc.)
             user_message: Commentaire optionnel
+            message_data: Données complètes de la carte (pour intermédiation) - Format CARD_CLICKED complet
             
         Returns:
             {"success": bool, "error": str (si échec)}
@@ -6608,6 +6669,10 @@ The intermediation session has been closed {reason_text}. You can now continue t
             f"card={card_name}, action={action}, key={approval_key}"
         )
         
+        # ⭐ NOUVEAU : Détecter le mode intermédiation
+        if message_data:
+            logger.info(f"[CARD_RESPONSE] 🔄 Mode intermédiation détecté - message_data fourni")
+        
         # ═══════════════════════════════════════════════════════════
         # ÉTAPE 1 : VÉRIFIER SI MODE ONBOARDING_CHAT
         # ═══════════════════════════════════════════════════════════
@@ -6617,7 +6682,7 @@ The intermediation session has been closed {reason_text}. You can now continue t
                 session = self.sessions.get(session_key)
             
             if session and self._is_onboarding_like(session.context.chat_mode):
-                # ═══ MODE ONBOARDING : Envoyer à l'application métier ═══
+                # ═══ MODE ONBOARDING/ROUTER/BANKER : Envoyer à l'application métier ═══
                 listener_info = session.onboarding_listeners.get(thread_key)
                 if not listener_info:
                     logger.warning(
@@ -6632,66 +6697,81 @@ The intermediation session has been closed {reason_text}. You can now continue t
                     )
                     return {"success": False, "error": "Job ID not found"}
                 
-                # Construire le payload au format CARD_CLICKED_PINNOKIO
-                # ⭐ FORMAT EXACT comme Reflex : Structure Google Chat Card complète
-                message_id = str(uuid.uuid4())
-                timestamp = datetime.now(timezone.utc).isoformat()
-                
-                # Déterminer le statut de l'action pour le subtitle
-                action_status = "APPROUVÉ" if "approve" in action else "REFUSÉ"
-                
-                card_response_data = {
-                    "type": "CARD_CLICKED",
-                    "threadKey": thread_key,
-                    "message": {
-                        "cardsV2": [{
-                            "cardId": card_name,  # 'approval_card' ou 'four_eyes_approval_card'
-                            "card": {
-                                "header": {
-                                    "title": "Réponse de validation",
-                                    "subtitle": f"Action: {action_status}"
-                                },
-                                "sections": [{
-                                    "widgets": [{
-                                        "textParagraph": {
-                                            "text": user_message or ""
-                                        }
+                # ⭐ MODE INTERMÉDIATION : Transférer message_data TEL QUEL (sans transformation)
+                if message_data:
+                    logger.info(
+                        f"[CARD_RESPONSE_INTERMEDIATION] 🔄 Transfert message_data complet (sans transformation) - "
+                        f"card={card_name}, job_id={job_id}"
+                    )
+                    # ✅ Utiliser le message_data tel quel (déjà au bon format depuis Reflex)
+                    card_response_data = message_data
+                    message_id = card_response_data.get("message", {}).get("name", str(uuid.uuid4()))
+                else:
+                    # ⚠️ MODE LEGACY : Construire le payload (pour compatibilité avec anciennes cartes)
+                    logger.info(
+                        f"[CARD_RESPONSE_LEGACY] 🔧 Construction du payload (mode legacy) - "
+                        f"card={card_name}, action={action}"
+                    )
+                    message_id = str(uuid.uuid4())
+                    timestamp = datetime.now(timezone.utc).isoformat()
+                    action_status = "APPROUVÉ" if "approve" in action else "REFUSÉ"
+                    
+                    card_response_data = {
+                        "type": "CARD_CLICKED",
+                        "threadKey": thread_key,
+                        "message": {
+                            "cardsV2": [{
+                                "cardId": card_name,
+                                "card": {
+                                    "header": {
+                                        "title": "Réponse de validation",
+                                        "subtitle": f"Action: {action_status}"
+                                    },
+                                    "sections": [{
+                                        "widgets": [{
+                                            "textParagraph": {
+                                                "text": user_message or ""
+                                            }
+                                        }]
                                     }]
-                                }]
-                            }
-                        }]
-                    },
-                    "common": {
-                        "formInputs": {
-                            "user_message": {
-                                "stringInputs": {
-                                    "value": [user_message or ""]
+                                }
+                            }]
+                        },
+                        "common": {
+                            "formInputs": {
+                                "user_message": {
+                                    "stringInputs": {
+                                        "value": [user_message or ""]
+                                    }
+                                },
+                                "action": {
+                                    "stringInputs": {
+                                        "value": [action]
+                                    }
                                 }
                             },
-                            "action": {
-                                "stringInputs": {
-                                    "value": [action]
-                                }
-                            }
+                            "invokedFunction": action
                         },
-                        "invokedFunction": action
-                    },
-                    "message_type": "CARD_CLICKED_PINNOKIO",
-                    "timestamp": timestamp,
-                    "sender_id": user_id,
-                    "read": False
-                }
+                        "message_type": "CARD_CLICKED_PINNOKIO",
+                        "timestamp": timestamp,
+                        "sender_id": user_id,
+                        "read": False
+                    }
                 
                 # Envoyer dans job_chats/{job_id}/messages
                 rtdb_path = f"{collection_name}/job_chats/{job_id}/messages/{message_id}"
                 self._get_rtdb_ref(rtdb_path).set(card_response_data)
                 
+                # Déterminer le mode pour les logs
+                mode_label = session.context.chat_mode if session else "onboarding"
+                transfer_mode = "intermediation" if message_data else "legacy"
                 logger.info(
-                    f"[CARD_RESPONSE_ONBOARDING] ✅ Réponse carte envoyée à application métier - "
-                    f"job_id={job_id} message_id={message_id} action={action}"
+                    f"[CARD_RESPONSE] ✅ Réponse carte envoyée à application métier - "
+                    f"chat_mode={mode_label}, transfer={transfer_mode}, job_id={job_id}, "
+                    f"message_id={message_id}, action={action}"
                 )
                 
-                return {"success": True, "message_id": message_id, "mode": "onboarding"}
+                return {"success": True, "message_id": message_id, "mode": mode_label, "transfer": transfer_mode}
             
             # ═══════════════════════════════════════════════════════════
             # ÉTAPE 2 : MODE GENERAL_CHAT (logique Future existante)

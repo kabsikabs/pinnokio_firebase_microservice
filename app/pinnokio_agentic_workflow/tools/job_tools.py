@@ -1129,33 +1129,66 @@ Retourne le profil complet de l'entreprise cliente.""",
                 original_text = router_prompt_data.get(service_name, "")
                 context_source = f"router_prompt/{service_name}"
                 
+                # ✅ Gérer le cas d'un contexte vide (permettre création via "add")
                 if not original_text:
-                    return {
-                        "success": False,
-                        "error": f"Service '{service_name}' non trouvé dans router_context"
-                    }
+                    # Vérifier si toutes les opérations sont des "add"
+                    all_operations_are_add = all(
+                        op.get("operation") == "add" 
+                        for op in operations
+                    )
+                    
+                    if not all_operations_are_add:
+                        return {
+                            "success": False,
+                            "error": f"Service '{service_name}' est vide - seules les opérations 'add' sont autorisées pour créer du contenu"
+                        }
+                    
+                    logger.info(f"[UPDATE_CONTEXT] Service '{service_name}' vide, création de contenu via 'add'")
+                    original_text = ""  # Travailler sur chaîne vide
             
             elif context_type == "accounting":
                 accounting_context = all_contexts.get("accounting", {})
                 original_text = accounting_context.get("accounting_context_0", "")
                 context_source = "accounting_context/data/accounting_context_0"
                 
+                # ✅ Gérer le cas d'un contexte vide (permettre création via "add")
                 if not original_text:
-                    return {
-                        "success": False,
-                        "error": "accounting_context_0 est vide"
-                    }
+                    # Vérifier si toutes les opérations sont des "add"
+                    all_operations_are_add = all(
+                        op.get("operation") == "add" 
+                        for op in operations
+                    )
+                    
+                    if not all_operations_are_add:
+                        return {
+                            "success": False,
+                            "error": "accounting_context_0 est vide - seules les opérations 'add' sont autorisées pour créer du contenu"
+                        }
+                    
+                    logger.info("[UPDATE_CONTEXT] accounting_context_0 vide, création de contenu via 'add'")
+                    original_text = ""  # Travailler sur chaîne vide
             
             elif context_type == "company":
                 general_context = all_contexts.get("general", {})
                 original_text = general_context.get("context_company_profile_report", "")
                 context_source = "general_context/context_company_profile_report"
                 
+                # ✅ Gérer le cas d'un contexte vide (permettre création via "add")
                 if not original_text:
-                    return {
-                        "success": False,
-                        "error": "context_company_profile_report est vide"
-                    }
+                    # Vérifier si toutes les opérations sont des "add"
+                    all_operations_are_add = all(
+                        op.get("operation") == "add" 
+                        for op in operations
+                    )
+                    
+                    if not all_operations_are_add:
+                        return {
+                            "success": False,
+                            "error": "context_company_profile_report est vide - seules les opérations 'add' sont autorisées pour créer du contenu"
+                        }
+                    
+                    logger.info("[UPDATE_CONTEXT] context_company_profile_report vide, création de contenu via 'add'")
+                    original_text = ""  # Travailler sur chaîne vide
             
             # Initialiser le text_updater
             self._init_text_updater()

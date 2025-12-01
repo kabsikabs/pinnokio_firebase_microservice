@@ -17,6 +17,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
+from google.cloud import firestore
 
 logger = logging.getLogger("cron_scheduler")
 
@@ -252,7 +253,7 @@ class CronScheduler:
             scheduler_ref.update({
                 "next_execution_local_time": next_local,
                 "next_execution_utc": next_utc,
-                "updated_at": fbm.db.SERVER_TIMESTAMP
+                "updated_at": firestore.SERVER_TIMESTAMP
             })
 
             logger.info(f"[CRON] Prochaine exécution: {next_local} (local) | {next_utc} (UTC)")

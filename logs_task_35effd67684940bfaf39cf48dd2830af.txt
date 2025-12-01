@@ -1,0 +1,598 @@
+=== Logs de la tâche 35effd67684940bfaf39cf48dd2830af ===
+=== Nombre d'événements: 595 ===
+
+[2025-11-27 23:34:43.017000] 🚀 Démarrage du microservice Firebase...
+[2025-11-27 23:34:43.017000] Mode: api
+[2025-11-27 23:34:43.017000] Registre unifié: false
+[2025-11-27 23:34:43.017000] 🌐 Démarrage FastAPI Server...
+[2025-11-27 23:34:43.017000] Port: 8090
+[2025-11-27 23:34:43.017000] Workers: 1
+[2025-11-27 23:34:43.017000] 📝 Mode legacy (registre unifié désactivé)
+[2025-11-27 23:34:48.568000] time=2025-11-27 22:34:48,567 level=INFO logger=listeners.app message=service_start version=0.1.0 region=us-east-1
+[2025-11-27 23:34:48.568000] time=2025-11-27 22:34:48,567 level=INFO logger=listeners.app message=redis_mode mode=cloud host=pinnokio-cache-7uum2j.serverless.use1.cache.amazonaws.com port=6379 tls=True
+[2025-11-27 23:34:48.606000] time=2025-11-27 22:34:48,606 level=INFO logger=listeners.app message=redis_connect status=ok host=pinnokio-cache-7uum2j.serverless.use1.cache.amazonaws.com port=6379 tls=True
+[2025-11-27 23:34:48.619000] INFO:     Started server process [1]
+[2025-11-27 23:34:48.619000] INFO:     Waiting for application startup.
+[2025-11-27 23:34:48.878000] time=2025-11-27 22:34:48,877 level=INFO logger=listeners.manager message=registry_watch start collection=listeners_registry
+[2025-11-27 23:34:48.880000] time=2025-11-27 22:34:48,880 level=INFO logger=listeners.app message=listeners_manager status=started
+[2025-11-27 23:34:48.884000] time=2025-11-27 22:34:48,884 level=INFO logger=cron_scheduler message=[CRON] Scheduler initialisé (intervalle: 60s)
+[2025-11-27 23:34:48.884000] time=2025-11-27 22:34:48,884 level=INFO logger=cron_scheduler message=[CRON] Scheduler démarré
+[2025-11-27 23:34:48.884000] time=2025-11-27 22:34:48,884 level=INFO logger=listeners.app message=cron_scheduler status=started
+[2025-11-27 23:34:48.885000] time=2025-11-27 22:34:48,884 level=INFO logger=cron_scheduler message=[CRON] Boucle principale démarrée
+[2025-11-27 23:34:49.065000] ✅ Stripe configuré avec succès
+[2025-11-27 23:34:49.681000] time=2025-11-27 22:34:49,681 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[2025-11-27 23:34:49.681000] INFO:     Application startup complete.
+[2025-11-27 23:34:49.682000] INFO:     Uvicorn running on http://0.0.0.0:8090 (Press CTRL+C to quit)
+[2025-11-27 23:34:49.684000] time=2025-11-27 22:34:49,683 level=INFO logger=listeners.manager message=registry_snapshot triggered changes_count=4
+[2025-11-27 23:34:49.684000] time=2025-11-27 22:34:49,684 level=INFO logger=listeners.manager message=registry_detach_trigger uid=2AqjLVOp1UcA9m1NvE3znuvnmW73 reason=offline_or_expired
+[2025-11-27 23:34:49.684000] time=2025-11-27 22:34:49,684 level=INFO logger=listeners.manager message=user_attach_start uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:49.684000] time=2025-11-27 22:34:49,684 level=INFO logger=listeners.manager message=user_attach_firebase_query uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:49.684000] time=2025-11-27 22:34:49,684 level=INFO logger=listeners.manager message=user_attach_firebase_listener uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:49.685000] time=2025-11-27 22:34:49,685 level=INFO logger=listeners.manager message=user_attach_notification_listener_attached uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:49.685000] time=2025-11-27 22:34:49,685 level=INFO logger=listeners.manager message=user_attach_publish_sync_notifications uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:50.289000] time=2025-11-27 22:34:50,289 level=INFO logger=listeners.manager message=notifications_change_triggered uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 changes_count=4
+[2025-11-27 23:34:50.290000] time=2025-11-27 22:34:50,289 level=INFO logger=listeners.manager message=notification_change uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 doc_id=onboarding_45c9bc87cd7143e598 type=ADDED
+[2025-11-27 23:34:50.290000] time=2025-11-27 22:34:50,289 level=INFO logger=listeners.manager message=notification_change uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 doc_id=onboarding_5224fb7ef2764ffaa3 type=ADDED
+[2025-11-27 23:34:50.290000] time=2025-11-27 22:34:50,289 level=INFO logger=listeners.manager message=notification_change uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 doc_id=onboarding_e3153c0e43474e4aaf type=ADDED
+[2025-11-27 23:34:50.290000] time=2025-11-27 22:34:50,289 level=INFO logger=listeners.manager message=notification_change uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 doc_id=onboarding_e9d0821f8d5340a5ae type=ADDED
+[2025-11-27 23:34:50.290000] time=2025-11-27 22:34:50,289 level=INFO logger=listeners.manager message=notifications_resync_start uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:50.299000] time=2025-11-27 22:34:50,299 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:50.299000] time=2025-11-27 22:34:50,299 level=INFO logger=listeners.manager message=publish type=notif.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:50.299000] time=2025-11-27 22:34:50,299 level=INFO logger=listeners.manager message=notif_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=4 sample_ids=['onboarding_e3153c0e43474e4aaf', 'onboarding_e9d0821f8d5340a5ae', 'onboarding_5224fb7ef2764ffaa3', 'onboarding_45c9bc87cd7143e598']
+[2025-11-27 23:34:50.299000] time=2025-11-27 22:34:50,299 level=INFO logger=listeners.manager message=user_attach_rtdb_messages uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:50.779000] time=2025-11-27 22:34:50,778 level=INFO logger=listeners.manager message=user_attach_message_listener_attached uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:50.784000] time=2025-11-27 22:34:50,784 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:50.785000] time=2025-11-27 22:34:50,784 level=INFO logger=listeners.manager message=publish type=notif.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:50.785000] time=2025-11-27 22:34:50,785 level=INFO logger=listeners.manager message=notif_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=4 sample_ids=['onboarding_e3153c0e43474e4aaf', 'onboarding_e9d0821f8d5340a5ae', 'onboarding_5224fb7ef2764ffaa3', 'onboarding_45c9bc87cd7143e598']
+[2025-11-27 23:34:50.785000] time=2025-11-27 22:34:50,785 level=INFO logger=listeners.manager message=notifications_resync_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:50.975000] INFO:     172.31.62.150:28158 - "GET /healthz HTTP/1.1" 200 OK
+[2025-11-27 23:34:50.985000] INFO:     172.31.41.136:46718 - "GET /healthz HTTP/1.1" 200 OK
+[2025-11-27 23:34:51.059000] INFO:     172.31.11.113:23000 - "GET /healthz HTTP/1.1" 200 OK
+[2025-11-27 23:34:51.091000] time=2025-11-27 22:34:51,091 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:51.091000] time=2025-11-27 22:34:51,091 level=INFO logger=listeners.manager message=publish type=msg.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:51.092000] time=2025-11-27 22:34:51,091 level=INFO logger=listeners.manager message=msg_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=0 sample_ids=[]
+[2025-11-27 23:34:51.188000] time=2025-11-27 22:34:51,188 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:51.188000] time=2025-11-27 22:34:51,188 level=INFO logger=listeners.manager message=publish type=msg.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:51.188000] time=2025-11-27 22:34:51,188 level=INFO logger=listeners.manager message=msg_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=0 sample_ids=[]
+[2025-11-27 23:34:51.188000] time=2025-11-27 22:34:51,188 level=INFO logger=listeners.manager message=user_attach_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 listeners_count=2
+[2025-11-27 23:34:51.188000] time=2025-11-27 22:34:51,188 level=INFO logger=listeners.manager message=🔵 REGISTRY_START enregistrement des listeners pour uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:51.188000] time=2025-11-27 22:34:51,188 level=INFO logger=listeners.manager message=🔵 REGISTRY_INSTANCE récupérée pour uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[2025-11-27 23:34:51.408000] time=2025-11-27 22:34:51,408 level=INFO logger=registry.listeners message=listener_register uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=notif listener_id=notif_4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2 space=None thread=None mode=None
+[2025-11-27 23:34:51.408000] time=2025-11-27 22:34:51,408 level=INFO logger=listeners.manager message=🔵 REGISTRY_NOTIF uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 success=True
+[2025-11-27 23:34:51.627000] time=2025-11-27 22:34:51,626 level=INFO logger=registry.listeners message=listener_register uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=msg listener_id=msg_4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2 space=None thread=None mode=None
+[2025-11-27 23:34:51.627000] time=2025-11-27 22:34:51,626 level=INFO logger=listeners.manager message=🔵 REGISTRY_MSG uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 success=True
+[2025-11-27 23:34:51.627000] time=2025-11-27 22:34:51,626 level=INFO logger=listeners.manager message=🟢 REGISTRY_COMPLETE uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 enregistrement terminé
+[2025-11-27 23:34:51.627000] time=2025-11-27 22:34:51,627 level=INFO logger=listeners.manager message=registry_detach_trigger uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired
+[2025-11-27 23:34:51.627000] time=2025-11-27 22:34:51,627 level=INFO logger=listeners.manager message=registry_detach_trigger uid=WdCdwNS2ElghGiAGlwS9ha72hrs1 reason=offline_or_expired
+[2025-11-27 23:35:05.562000] INFO:     172.31.62.150:12172 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:07.882000] time=2025-11-27 22:35:07,882 level=INFO logger=llm_service.manager message=[LLM_INIT] 📥 Requête initialize_session
+[2025-11-27 23:35:07.882000] time=2025-11-27 22:35:07,882 level=INFO logger=llm_service.manager message=[LLM_INIT] Paramètres: user_id=7hQs0jluP5YUWcREqdi22NRFnU32, collection_name=AAAABzwjXro, client_uuid=cccd0781-26d7-47a0-97c8-e192ac9ec256
+[2025-11-27 23:35:07.884000] time=2025-11-27 22:35:07,884 level=INFO logger=llm_service.manager message=[LLM_INIT] ⏳ Initialisation déjà en cours (Redis): 7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro
+[2025-11-27 23:35:07.886000] INFO:     172.31.62.150:12172 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:07.939000] time=2025-11-27 22:35:07,939 level=INFO logger=llm_service.manager message=[LLM_INIT] 📥 Requête initialize_session
+[2025-11-27 23:35:07.939000] time=2025-11-27 22:35:07,939 level=INFO logger=llm_service.manager message=[LLM_INIT] Paramètres: user_id=7hQs0jluP5YUWcREqdi22NRFnU32, collection_name=AAAABzwjXro, client_uuid=cccd0781-26d7-47a0-97c8-e192ac9ec256
+[2025-11-27 23:35:07.941000] time=2025-11-27 22:35:07,941 level=INFO logger=llm_service.manager message=[LLM_INIT] ⏳ Initialisation déjà en cours (Redis): 7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro
+[2025-11-27 23:35:07.945000] INFO:     172.31.62.150:12172 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:08.073000] 🔗 Connexion ChromaDB: None:None
+[2025-11-27 23:35:08.080000] INFO:     172.31.62.150:12172 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:08.101000] time=2025-11-27 22:35:08,101 level=INFO logger=chromadb.telemetry.posthog message=Anonymized telemetry enabled. See https://docs.trychroma.com/telemetry for more information.
+[2025-11-27 23:35:08.151000] INFO:     172.31.62.150:12172 - "WebSocket /ws?uid=7hQs0jluP5YUWcREqdi22NRFnU32" [accepted]
+[2025-11-27 23:35:08.157000] time=2025-11-27 22:35:08,156 level=INFO logger=listeners.ws message=ws_connect uid=7hQs0jluP5YUWcREqdi22NRFnU32 total=1
+[2025-11-27 23:35:08.157000] time=2025-11-27 22:35:08,157 level=INFO logger=listeners.app message=ws_register_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:08.157000] time=2025-11-27 22:35:08,157 level=INFO logger=listeners.app message=force_user_watchers_test uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:08.158000] time=2025-11-27 22:35:08,158 level=INFO logger=listeners.manager message=user_attach_start uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:08.158000] time=2025-11-27 22:35:08,158 level=ERROR logger=chromadb.telemetry.posthog message=Failed to send telemetry event ClientStartEvent: capture() takes 1 positional argument but 3 were given
+[2025-11-27 23:35:08.158000] time=2025-11-27 22:35:08,158 level=INFO logger=listeners.manager message=user_attach_firebase_query uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:08.160000] time=2025-11-27 22:35:08,160 level=INFO logger=listeners.manager message=user_attach_firebase_listener uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:08.161000] time=2025-11-27 22:35:08,161 level=INFO logger=listeners.manager message=user_attach_notification_listener_attached uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:08.161000] time=2025-11-27 22:35:08,161 level=INFO logger=listeners.manager message=user_attach_publish_sync_notifications uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:08.299000] time=2025-11-27 22:35:08,298 level=INFO logger=listeners.manager message=notifications_change_triggered uid=7hQs0jluP5YUWcREqdi22NRFnU32 changes_count=2
+[2025-11-27 23:35:08.299000] time=2025-11-27 22:35:08,299 level=INFO logger=listeners.manager message=notification_change uid=7hQs0jluP5YUWcREqdi22NRFnU32 doc_id=1oAEkBHTVZ-p4cGMlTSIQg9TncwqC-QS9 type=ADDED
+[2025-11-27 23:35:08.299000] time=2025-11-27 22:35:08,299 level=INFO logger=listeners.manager message=notification_change uid=7hQs0jluP5YUWcREqdi22NRFnU32 doc_id=klk_ccc56189-cb08-4308-94d8-24981538f34f type=ADDED
+[2025-11-27 23:35:08.299000] time=2025-11-27 22:35:08,299 level=INFO logger=listeners.manager message=notifications_resync_start uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:08.329000] ✅ ChromaDB connecté, heartbeat: 1764282908285990126
+[2025-11-27 23:35:08.372000] time=2025-11-27 22:35:08,372 level=INFO logger=listeners.manager message=publish type=notif.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:08.372000] time=2025-11-27 22:35:08,372 level=INFO logger=listeners.manager message=notif_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=2 sample_ids=['klk_ccc56189-cb08-4308-94d8-24981538f34f', '1oAEkBHTVZ-p4cGMlTSIQg9TncwqC-QS9']
+[2025-11-27 23:35:08.373000] time=2025-11-27 22:35:08,372 level=INFO logger=listeners.manager message=user_attach_rtdb_messages uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:08.400000] ✅ ChromaVectorService initialisé avec succès
+[2025-11-27 23:35:08.404000] 🔗 Enregistrement Chroma: utilisateur=7hQs0jluP5YUWcREqdi22NRFnU32, collection=AAAABzwjXro
+[2025-11-27 23:35:08.514000] time=2025-11-27 22:35:08,513 level=INFO logger=listeners.manager message=publish type=notif.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:08.514000] time=2025-11-27 22:35:08,514 level=INFO logger=listeners.manager message=notif_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=2 sample_ids=['klk_ccc56189-cb08-4308-94d8-24981538f34f', '1oAEkBHTVZ-p4cGMlTSIQg9TncwqC-QS9']
+[2025-11-27 23:35:08.514000] time=2025-11-27 22:35:08,514 level=INFO logger=listeners.manager message=notifications_resync_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:08.584000] time=2025-11-27 22:35:08,584 level=INFO logger=listeners.manager message=user_attach_message_listener_attached uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:08.793000] time=2025-11-27 22:35:08,793 level=INFO logger=listeners.manager message=publish type=msg.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:08.793000] time=2025-11-27 22:35:08,793 level=INFO logger=listeners.manager message=msg_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=0 sample_ids=[]
+[2025-11-27 23:35:08.794000] time=2025-11-27 22:35:08,793 level=INFO logger=listeners.manager message=user_attach_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32 listeners_count=2
+[2025-11-27 23:35:08.794000] time=2025-11-27 22:35:08,793 level=INFO logger=listeners.manager message=🔵 REGISTRY_START enregistrement des listeners pour uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:08.794000] time=2025-11-27 22:35:08,794 level=INFO logger=listeners.manager message=🔵 REGISTRY_INSTANCE récupérée pour uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:08.827000] time=2025-11-27 22:35:08,827 level=INFO logger=listeners.manager message=publish type=msg.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:08.827000] time=2025-11-27 22:35:08,827 level=INFO logger=listeners.manager message=msg_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=0 sample_ids=[]
+[2025-11-27 23:35:09.002000] time=2025-11-27 22:35:09,002 level=INFO logger=registry.listeners message=listener_register uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=notif listener_id=notif_7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32 space=None thread=None mode=None
+[2025-11-27 23:35:09.002000] time=2025-11-27 22:35:09,002 level=INFO logger=listeners.manager message=🔵 REGISTRY_NOTIF uid=7hQs0jluP5YUWcREqdi22NRFnU32 success=True
+[2025-11-27 23:35:09.212000] time=2025-11-27 22:35:09,211 level=INFO logger=registry.listeners message=listener_register uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=msg listener_id=msg_7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32 space=None thread=None mode=None
+[2025-11-27 23:35:09.212000] time=2025-11-27 22:35:09,211 level=INFO logger=listeners.manager message=🔵 REGISTRY_MSG uid=7hQs0jluP5YUWcREqdi22NRFnU32 success=True
+[2025-11-27 23:35:09.212000] time=2025-11-27 22:35:09,211 level=INFO logger=listeners.manager message=🟢 REGISTRY_COMPLETE uid=7hQs0jluP5YUWcREqdi22NRFnU32 enregistrement terminé
+[2025-11-27 23:35:09.212000] time=2025-11-27 22:35:09,212 level=INFO logger=listeners.app message=force_user_watchers_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:09.213000] INFO:     connection open
+[2025-11-27 23:35:09.217000] time=2025-11-27 22:35:09,217 level=INFO logger=listeners.ws message=ws_broadcast uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=notif.sync channel= connections=1
+[2025-11-27 23:35:09.217000] time=2025-11-27 22:35:09,217 level=INFO logger=listeners.ws message=ws_broadcast uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=notif.sync channel= connections=1
+[2025-11-27 23:35:09.217000] time=2025-11-27 22:35:09,217 level=INFO logger=listeners.ws message=ws_broadcast uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=msg.sync channel= connections=1
+[2025-11-27 23:35:09.218000] time=2025-11-27 22:35:09,217 level=INFO logger=listeners.ws message=ws_broadcast uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=msg.sync channel= connections=1
+[2025-11-27 23:35:09.218000] INFO:     172.31.62.150:12178 - "WebSocket /ws?uid=7hQs0jluP5YUWcREqdi22NRFnU32" [accepted]
+[2025-11-27 23:35:09.218000] time=2025-11-27 22:35:09,218 level=INFO logger=listeners.ws message=ws_connect uid=7hQs0jluP5YUWcREqdi22NRFnU32 total=2
+[2025-11-27 23:35:09.218000] time=2025-11-27 22:35:09,218 level=INFO logger=listeners.app message=ws_register_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:09.218000] time=2025-11-27 22:35:09,218 level=INFO logger=listeners.app message=force_user_watchers_test uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:09.218000] time=2025-11-27 22:35:09,218 level=INFO logger=listeners.app message=force_user_watchers_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:09.219000] INFO:     connection open
+[2025-11-27 23:35:09.221000] INFO:     172.31.62.150:12190 - "WebSocket /ws?uid=7hQs0jluP5YUWcREqdi22NRFnU32" [accepted]
+[2025-11-27 23:35:09.221000] time=2025-11-27 22:35:09,221 level=INFO logger=listeners.ws message=ws_connect uid=7hQs0jluP5YUWcREqdi22NRFnU32 total=3
+[2025-11-27 23:35:09.221000] time=2025-11-27 22:35:09,221 level=INFO logger=listeners.app message=ws_register_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:09.222000] time=2025-11-27 22:35:09,222 level=INFO logger=listeners.app message=force_user_watchers_test uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:09.222000] time=2025-11-27 22:35:09,222 level=INFO logger=listeners.app message=force_user_watchers_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:09.328000] Job klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 trouvé avec statut: in queue
+[2025-11-27 23:35:09.331000] INFO:     172.31.62.150:12194 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:09.332000] INFO:     connection open
+[2025-11-27 23:35:09.966000] INFO:     172.31.62.150:12204 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:10.075000] INFO:     172.31.62.150:12204 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:10.144000] time=2025-11-27 22:35:10,144 level=INFO logger=llm_service.manager message=[FLUSH_CHAT] 🗑️ Demande fermeture pour session=7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro, thread=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938
+[2025-11-27 23:35:10.146000] INFO:     172.31.62.150:12194 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:10.156000] time=2025-11-27 22:35:10,156 level=INFO logger=llm_service.manager message=[LEAVE_CHAT] 📥 Signal reçu - session=7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro, thread_key=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938
+[2025-11-27 23:35:10.156000] time=2025-11-27 22:35:10,156 level=WARNING logger=llm_service.manager message=[LEAVE_CHAT] ⚠️ Session non trouvée: 7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro
+[2025-11-27 23:35:10.159000] INFO:     172.31.62.150:12204 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:10.168000] time=2025-11-27 22:35:10,167 level=ERROR logger=registry.listeners message=check_listener_status_error uid= type=chat error=space_code et thread_key sont requis pour le type chat
+[2025-11-27 23:35:10.170000] INFO:     172.31.62.150:12204 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:10.280000] time=2025-11-27 22:35:10,280 level=ERROR logger=registry.listeners message=check_listener_status_error uid= type=workflow error=400 Document name "projects/pinnokio-gpt/databases/(default)/documents/listeners_active//listeners/workflow___" lacks a resource id at index 69.
+[2025-11-27 23:35:10.283000] INFO:     172.31.62.150:12194 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:10.439000] INFO:     172.31.62.150:12204 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:10.559000] Erreur lors du téléchargement des données : 400 Document name "projects/pinnokio-gpt/databases/(default)/documents/task_manager//document/initial_data" lacks a resource id at index 65.
+[2025-11-27 23:35:10.561000] INFO:     172.31.62.150:12194 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:10.676000] time=2025-11-27 22:35:10,676 level=ERROR logger=listeners.app message=rpc_error code=INTERNAL method=FIREBASE_MANAGEMENT.get_internal_message dt_ms=100 trace_id=029ed66b-0a76-4ae0-b220-b5f085591401 error=InvalidArgument('Document name "projects/pinnokio-gpt/databases/(default)/documents/task_manager//internal_message/messages" lacks a resource id at index 65.')
+[2025-11-27 23:35:10.676000] INFO:     172.31.62.150:12194 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:10.790000] Erreur lors du téléchargement du rapport d'audit: 400 Document name "projects/pinnokio-gpt/databases/(default)/documents/task_manager/" has invalid trailing "/".
+[2025-11-27 23:35:10.792000] INFO:     172.31.62.150:12204 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:10.805000] Erreur lors de la récupération des messages: Invalid path argument: "/active_chats//messages". Child path must not start with "/"
+[2025-11-27 23:35:10.807000] INFO:     172.31.62.150:12194 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:10.868000] time=2025-11-27 22:35:10,867 level=ERROR logger=registry.listeners message=check_listener_status_error uid= type=chat error=space_code et thread_key sont requis pour le type chat
+[2025-11-27 23:35:10.870000] INFO:     172.31.62.150:12194 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:10.876000] INFO:     172.31.62.150:12194 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:10.890000] INFO:     172.31.62.150:12204 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:10.910000] INFO:     172.31.62.150:12194 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:10.911000] INFO:     connection open
+[2025-11-27 23:35:10.918000] INFO:     connection closed
+[2025-11-27 23:35:11.436000] INFO:     172.31.62.150:12204 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:11.436000] INFO:     connection open
+[2025-11-27 23:35:11.438000] INFO:     connection closed
+[2025-11-27 23:35:11.943000] INFO:     172.31.62.150:12218 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:11.944000] INFO:     connection open
+[2025-11-27 23:35:11.946000] INFO:     connection closed
+[2025-11-27 23:35:12.450000] INFO:     172.31.62.150:12220 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:12.450000] INFO:     connection open
+[2025-11-27 23:35:12.453000] INFO:     connection closed
+[2025-11-27 23:35:12.957000] INFO:     172.31.62.150:12234 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:12.957000] INFO:     connection open
+[2025-11-27 23:35:12.960000] INFO:     connection closed
+[2025-11-27 23:35:13.463000] INFO:     172.31.62.150:19026 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:13.464000] INFO:     connection open
+[2025-11-27 23:35:13.466000] INFO:     connection closed
+[2025-11-27 23:35:13.971000] INFO:     172.31.62.150:19036 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:13.971000] INFO:     connection open
+[2025-11-27 23:35:13.973000] INFO:     connection closed
+[2025-11-27 23:35:14.478000] INFO:     172.31.62.150:19048 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:14.478000] INFO:     connection open
+[2025-11-27 23:35:14.480000] INFO:     connection closed
+[2025-11-27 23:35:14.984000] INFO:     172.31.62.150:19052 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:14.984000] INFO:     connection open
+[2025-11-27 23:35:14.987000] INFO:     connection closed
+[2025-11-27 23:35:15.492000] INFO:     172.31.62.150:19054 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:15.492000] INFO:     connection open
+[2025-11-27 23:35:15.495000] INFO:     connection closed
+[2025-11-27 23:35:15.999000] INFO:     172.31.62.150:19060 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:15.999000] INFO:     connection open
+[2025-11-27 23:35:16.002000] INFO:     connection closed
+[2025-11-27 23:35:16.507000] INFO:     172.31.62.150:19062 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:16.507000] INFO:     connection open
+[2025-11-27 23:35:16.510000] INFO:     connection closed
+[2025-11-27 23:35:17.016000] INFO:     172.31.62.150:19068 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:17.016000] INFO:     connection open
+[2025-11-27 23:35:17.018000] INFO:     connection closed
+[2025-11-27 23:35:17.522000] INFO:     172.31.62.150:19084 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:17.523000] INFO:     connection open
+[2025-11-27 23:35:17.525000] INFO:     connection closed
+[2025-11-27 23:35:18.031000] INFO:     172.31.62.150:19086 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:18.032000] INFO:     connection open
+[2025-11-27 23:35:18.034000] INFO:     connection closed
+[2025-11-27 23:35:18.453000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:18.561000] Job klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 trouvé avec statut: in queue
+[2025-11-27 23:35:18.568000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:18.673000] Job klk_2d91eb56-c5e9-46c6-8ddc-feab2205a4e2 trouvé avec statut: pending
+[2025-11-27 23:35:18.675000] INFO:     172.31.62.150:19104 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:18.781000] Job klk_64fbf3d9-2700-475e-a372-96a7caaa036f trouvé avec statut: stopped
+[2025-11-27 23:35:18.783000] INFO:     172.31.62.150:19104 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:18.889000] Job klk_1fcd1cd0-52d1-4fa5-9588-e276114db960 trouvé avec statut: stopped
+[2025-11-27 23:35:18.892000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:18.998000] Job klk_64d6497a-4e64-4630-a679-447e3219e2b2 trouvé avec statut: stopped
+[2025-11-27 23:35:19] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:19.105000] Job klk_ad7e24c0-2dc5-4454-a271-7febb0fdf43f trouvé avec statut: stopped
+[2025-11-27 23:35:19.108000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:19.214000] Job klk_655d3e8e-efd5-4be6-858d-6b7967916f50 trouvé avec statut: stopped
+[2025-11-27 23:35:19.217000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:19.322000] Job klk_c2e3097a-1f54-42c9-b339-9292ba9b2f9c trouvé avec statut: stopping
+[2025-11-27 23:35:19.325000] INFO:     172.31.62.150:19104 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:19.431000] Job klk_9c223393-3c5a-4c66-9647-3731cbb3748a trouvé avec statut: stopped
+[2025-11-27 23:35:19.434000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:19.542000] Job klk_e0753aa4-cdae-487b-a665-d1016494865a trouvé avec statut: stopped
+[2025-11-27 23:35:19.544000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:19.651000] Job klk_1659321d-a74a-4254-b17a-c5d8e2c2dc96 trouvé avec statut: stopped
+[2025-11-27 23:35:19.654000] INFO:     172.31.62.150:19104 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:19.759000] Job klk_15da2fb5-5549-4bba-8e34-162178a991bf trouvé avec statut: stopped
+[2025-11-27 23:35:19.761000] INFO:     172.31.62.150:19104 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:19.872000] Job klk_35c2e748-e80e-4fd3-ab41-811ef54c93c4 trouvé avec statut: stopped
+[2025-11-27 23:35:19.875000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:19.980000] Job klk_ba73b79c-b8b5-48f4-95d6-7536db31d44f trouvé avec statut: stopped
+[2025-11-27 23:35:19.982000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:20.088000] Job klk_37fb8f1b-8b07-4627-8ace-ccb28f656fd7 trouvé avec statut: stopped
+[2025-11-27 23:35:20.091000] INFO:     172.31.62.150:19104 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:20.196000] Job klk_2d156d69-4ae8-4007-b274-9ef3ccad8aa2 trouvé avec statut: stopped
+[2025-11-27 23:35:20.199000] INFO:     172.31.62.150:19104 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:20.305000] Aucun document trouvé avec job_id=klk_4e328d2e-6bed-4c65-b260-4610aa522296
+[2025-11-27 23:35:20.309000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:20.414000] Aucun document trouvé avec job_id=klk_6b875a61-9e65-44f8-8612-23e2b0ce8256
+[2025-11-27 23:35:20.417000] INFO:     172.31.62.150:19104 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:20.525000] Aucun document trouvé avec job_id=klk_9fe32497-2ef7-4ae9-8030-822b3be98fb6
+[2025-11-27 23:35:20.527000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:20.633000] Aucun document trouvé avec job_id=klk_2169ffb2-bca6-4599-96bc-6b3d360be2ea
+[2025-11-27 23:35:20.635000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:20.740000] Aucun document trouvé avec job_id=klk_706898ac-6d56-426e-8447-9457b28220bc
+[2025-11-27 23:35:20.742000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:20.847000] Aucun document trouvé avec job_id=klk_edfe7d3f-601b-410e-8be3-20cfd23436c1
+[2025-11-27 23:35:20.850000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:20.955000] Aucun document trouvé avec job_id=klk_34cc9c8d-b39b-4220-ae90-1d3a10ab040e
+[2025-11-27 23:35:20.957000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:21.061000] Aucun document trouvé avec job_id=klk_662f0065-4411-42fa-8cc9-02360b6ed37e
+[2025-11-27 23:35:21.063000] INFO:     172.31.62.150:19104 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:21.067000] INFO:     172.31.62.150:19112 - "GET /healthz HTTP/1.1" 200 OK
+[2025-11-27 23:35:21.170000] Aucun document trouvé avec job_id=klk_73dcacf9-f7b5-4c48-9709-df01403f73c7
+[2025-11-27 23:35:21.172000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:21.173000] INFO:     172.31.41.136:58308 - "GET /healthz HTTP/1.1" 200 OK
+[2025-11-27 23:35:21.174000] INFO:     172.31.11.113:36570 - "GET /healthz HTTP/1.1" 200 OK
+[2025-11-27 23:35:21.278000] Aucun document trouvé avec job_id=klk_07030440-e7b5-482c-afc8-3335a67c5112
+[2025-11-27 23:35:21.280000] INFO:     172.31.62.150:19104 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:21.385000] Aucun document trouvé avec job_id=klk_61962d8a-3aba-431e-b438-b42c64163a95
+[2025-11-27 23:35:21.387000] INFO:     172.31.62.150:19104 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:21.492000] Aucun document trouvé avec job_id=klk_cd3fa6eb-d9d8-4d8f-84ce-22f243c4ce8c
+[2025-11-27 23:35:21.495000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:21.600000] Aucun document trouvé avec job_id=klk_9dc27f2b-3617-491b-a8f9-8964c09dd19a
+[2025-11-27 23:35:21.602000] INFO:     172.31.62.150:19104 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:21.709000] Aucun document trouvé avec job_id=klk_667be234-8acb-45c9-b369-6217b5cd916e
+[2025-11-27 23:35:21.711000] INFO:     172.31.62.150:19104 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:21.820000] Document trouvé pour pending: {'departement': 'APbookeeper', 'chat_threadkey': 'klk_2bea5d13b8aa4cfe8fdcd453d38a8c65_APbookeeper'}
+[2025-11-27 23:35:21.931000] Document pending trouvé: Presupuesto 1-000807 - Status: pending
+[2025-11-27 23:35:21.932000] Document pending trouvé: Factures_GDR-ARCHITECTURE 2024 2 - Status: pending
+[2025-11-27 23:35:21.932000] Total documents pending récupérés: 2
+[2025-11-27 23:35:21.933000] INFO:     172.31.62.150:19104 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:22.040000] Job klk_2d91eb56-c5e9-46c6-8ddc-feab2205a4e2 trouvé avec statut: pending
+[2025-11-27 23:35:22.043000] INFO:     172.31.62.150:19104 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:22.148000] Aucun document trouvé avec job_id=klk_706898ac-6d56-426e-8447-9457b28220bc
+[2025-11-27 23:35:22.150000] INFO:     172.31.62.150:19104 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:22.402000] INFO:     172.31.62.150:19104 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:22.414000] INFO:     172.31.62.150:19104 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:22.414000] INFO:     connection open
+[2025-11-27 23:35:22.426000] INFO:     connection closed
+[2025-11-27 23:35:22.651000] INFO:     172.31.62.150:19100 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:22.937000] INFO:     172.31.62.150:19118 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:22.938000] INFO:     connection open
+[2025-11-27 23:35:22.940000] INFO:     connection closed
+[2025-11-27 23:35:23.445000] INFO:     172.31.62.150:25220 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:23.446000] INFO:     connection open
+[2025-11-27 23:35:23.448000] INFO:     connection closed
+[2025-11-27 23:35:23.952000] INFO:     172.31.62.150:25226 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:23.953000] INFO:     connection open
+[2025-11-27 23:35:23.955000] INFO:     connection closed
+[2025-11-27 23:35:24.460000] INFO:     172.31.62.150:25236 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:24.460000] INFO:     connection open
+[2025-11-27 23:35:24.463000] INFO:     connection closed
+[2025-11-27 23:35:24.966000] INFO:     172.31.62.150:19100 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:24.967000] INFO:     connection open
+[2025-11-27 23:35:24.969000] INFO:     connection closed
+[2025-11-27 23:35:25.473000] INFO:     172.31.62.150:25240 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:25.474000] INFO:     connection open
+[2025-11-27 23:35:25.476000] INFO:     connection closed
+[2025-11-27 23:35:25.979000] INFO:     172.31.62.150:25242 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:25.980000] INFO:     connection open
+[2025-11-27 23:35:25.982000] INFO:     connection closed
+[2025-11-27 23:35:26.486000] INFO:     172.31.62.150:25244 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:26.486000] INFO:     connection open
+[2025-11-27 23:35:26.488000] INFO:     connection closed
+[2025-11-27 23:35:26.994000] INFO:     172.31.62.150:25248 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:26.994000] INFO:     connection open
+[2025-11-27 23:35:26.996000] INFO:     connection closed
+[2025-11-27 23:35:27.500000] INFO:     172.31.62.150:25252 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:27.501000] INFO:     connection open
+[2025-11-27 23:35:27.503000] INFO:     connection closed
+[2025-11-27 23:35:28.008000] INFO:     172.31.62.150:25264 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:28.009000] INFO:     connection open
+[2025-11-27 23:35:28.011000] INFO:     connection closed
+[2025-11-27 23:35:28.515000] INFO:     172.31.62.150:25266 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:28.516000] INFO:     connection open
+[2025-11-27 23:35:28.518000] INFO:     connection closed
+[2025-11-27 23:35:29.022000] INFO:     172.31.62.150:25280 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:29.022000] INFO:     connection open
+[2025-11-27 23:35:29.025000] INFO:     connection closed
+[2025-11-27 23:35:29.530000] INFO:     172.31.62.150:25294 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:29.530000] INFO:     connection open
+[2025-11-27 23:35:29.532000] INFO:     connection closed
+[2025-11-27 23:35:30.037000] INFO:     172.31.62.150:25310 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:30.038000] INFO:     connection open
+[2025-11-27 23:35:30.040000] INFO:     connection closed
+[2025-11-27 23:35:30.544000] INFO:     172.31.62.150:25318 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:30.545000] INFO:     connection open
+[2025-11-27 23:35:30.547000] INFO:     connection closed
+[2025-11-27 23:35:31.051000] INFO:     172.31.62.150:25324 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:31.052000] INFO:     connection open
+[2025-11-27 23:35:31.054000] INFO:     connection closed
+[2025-11-27 23:35:31.460000] Job klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 trouvé avec statut: in queue
+[2025-11-27 23:35:31.463000] INFO:     172.31.62.150:25332 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:31.558000] INFO:     172.31.62.150:25332 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:31.558000] INFO:     connection open
+[2025-11-27 23:35:31.560000] INFO:     connection closed
+[2025-11-27 23:35:31.701000] INFO:     172.31.62.150:25346 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:31.809000] INFO:     172.31.62.150:25352 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:31.926000] INFO:     172.31.62.150:25346 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:32.509000] Le document spécifié n'existe pas.
+[2025-11-27 23:35:32.512000] INFO:     172.31.62.150:25346 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:32.525000] INFO:     172.31.62.150:25352 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:32.525000] INFO:     connection open
+[2025-11-27 23:35:32.636000] Aucun message trouvé.
+[2025-11-27 23:35:32.639000] INFO:     172.31.62.150:25346 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:32.644000] INFO:     connection closed
+[2025-11-27 23:35:33.231000] Données formatées (avec workflow): {'step_name': {}}
+[2025-11-27 23:35:33.233000] INFO:     172.31.62.150:25346 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:33.353000] INFO:     172.31.62.150:25346 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:33.363000] INFO:     172.31.62.150:61936 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:33.363000] INFO:     connection open
+[2025-11-27 23:35:33.563000] INFO:     172.31.62.150:25346 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:33.797000] time=2025-11-27 22:35:33,797 level=INFO logger=registry.listeners message=listener_register uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=chat listener_id=chat_7hQs0jluP5YUWcREqdi22NRFnU32_AAAABzwjXro_klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 channel=chat:7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro:klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 space=AAAABzwjXro thread=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 mode=active_chats
+[2025-11-27 23:35:33.800000] INFO:     172.31.62.150:61944 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:33.815000] INFO:     connection closed
+[2025-11-27 23:35:33.819000] INFO:     172.31.62.150:25346 - "WebSocket /ws?uid=7hQs0jluP5YUWcREqdi22NRFnU32&space_code=AAAABzwjXro&thread_key=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938&mode=active_chats" [accepted]
+[2025-11-27 23:35:33.819000] time=2025-11-27 22:35:33,819 level=INFO logger=listeners.ws message=ws_connect uid=7hQs0jluP5YUWcREqdi22NRFnU32 total=4
+[2025-11-27 23:35:33.819000] time=2025-11-27 22:35:33,819 level=INFO logger=listeners.app message=ws_register_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:33.819000] time=2025-11-27 22:35:33,819 level=INFO logger=listeners.app message=force_user_watchers_test uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:33.819000] time=2025-11-27 22:35:33,819 level=INFO logger=listeners.app message=force_user_watchers_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:33.929000] time=2025-11-27 22:35:33,929 level=INFO logger=listeners.manager message=🔍 CHAT_RTDB_PATH uid=7hQs0jluP5YUWcREqdi22NRFnU32 full_path=AAAABzwjXro/active_chats/klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938/messages
+[2025-11-27 23:35:33.929000] time=2025-11-27 22:35:33,929 level=INFO logger=listeners.manager message=chat_path_resolved uid=7hQs0jluP5YUWcREqdi22NRFnU32 space=AAAABzwjXro thread=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 requested_mode=active_chats chosen_mode=active_chats
+[2025-11-27 23:35:34.138000] time=2025-11-27 22:35:34,137 level=INFO logger=listeners.manager message=🔵 REGISTRY_CHAT_START uid=7hQs0jluP5YUWcREqdi22NRFnU32 space=AAAABzwjXro thread=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 mode=active_chats
+[2025-11-27 23:35:34.173000] time=2025-11-27 22:35:34,173 level=INFO logger=listeners.manager message=🔍 CHAT_RAW_EVENT uid=7hQs0jluP5YUWcREqdi22NRFnU32 event_type=put path=/ data_type=dict data_is_dict=True data_keys=['-OeHDhWdIoYa_3qhgssr', '-OeVZDtFvwYzq0lIuwJ9', '8ee11651-1ff5-41ac-a7d6-63bb596fad2e', 'bfbd4d1b-86fd-4af2-95f8-5062473dea2e']
+[2025-11-27 23:35:34.173000] time=2025-11-27 22:35:34,173 level=INFO logger=listeners.manager message=🔵 CHAT_EVENT_RECEIVED uid=7hQs0jluP5YUWcREqdi22NRFnU32 space=AAAABzwjXro thread=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 event_type=put path=/
+[2025-11-27 23:35:34.174000] time=2025-11-27 22:35:34,174 level=INFO logger=listeners.manager message=🔵 CHAT_SNAPSHOT_RECEIVED uid=7hQs0jluP5YUWcREqdi22NRFnU32 space=AAAABzwjXro thread=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 messages_count=4
+[2025-11-27 23:35:34.174000] time=2025-11-27 22:35:34,174 level=INFO logger=listeners.manager message=🔍 CHAT_LISTENER_ACTIVE uid=7hQs0jluP5YUWcREqdi22NRFnU32 space=AAAABzwjXro thread=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 status=waiting_for_new_messages
+[2025-11-27 23:35:34.262000] time=2025-11-27 22:35:34,262 level=WARNING logger=registry.listeners message=listener_already_exists uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=chat space=AAAABzwjXro thread=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938
+[2025-11-27 23:35:34.262000] time=2025-11-27 22:35:34,262 level=WARNING logger=listeners.manager message=🟡 REGISTRY_CHAT_FAILED uid=7hQs0jluP5YUWcREqdi22NRFnU32 space=AAAABzwjXro thread=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 error=LISTENER_ALREADY_EXISTS
+[2025-11-27 23:35:34.262000] time=2025-11-27 22:35:34,262 level=INFO logger=listeners.manager message=chat_attach uid=7hQs0jluP5YUWcREqdi22NRFnU32 space=AAAABzwjXro thread=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 mode=active_chats
+[2025-11-27 23:35:34.267000] INFO:     connection open
+[2025-11-27 23:35:34.322000] INFO:     172.31.62.150:61950 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:34.322000] INFO:     connection open
+[2025-11-27 23:35:34.324000] INFO:     connection closed
+[2025-11-27 23:35:34.829000] INFO:     172.31.62.150:61954 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:34.829000] INFO:     connection open
+[2025-11-27 23:35:34.832000] INFO:     connection closed
+[2025-11-27 23:35:35.337000] INFO:     172.31.62.150:61944 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:35.337000] INFO:     connection open
+[2025-11-27 23:35:35.340000] INFO:     connection closed
+[2025-11-27 23:35:35.845000] INFO:     172.31.62.150:61964 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:35.845000] INFO:     connection open
+[2025-11-27 23:35:35.848000] INFO:     connection closed
+[2025-11-27 23:35:36.352000] INFO:     172.31.62.150:61978 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:36.352000] INFO:     connection open
+[2025-11-27 23:35:36.355000] INFO:     connection closed
+[2025-11-27 23:35:36.862000] INFO:     172.31.62.150:61994 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:36.862000] INFO:     connection open
+[2025-11-27 23:35:36.865000] INFO:     connection closed
+[2025-11-27 23:35:37.369000] INFO:     172.31.62.150:61996 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:37.370000] INFO:     connection open
+[2025-11-27 23:35:37.372000] INFO:     connection closed
+[2025-11-27 23:35:37.877000] INFO:     172.31.62.150:62004 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:37.877000] INFO:     connection open
+[2025-11-27 23:35:37.880000] INFO:     connection closed
+[2025-11-27 23:35:38.384000] INFO:     172.31.62.150:62010 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:38.385000] INFO:     connection open
+[2025-11-27 23:35:38.388000] INFO:     connection closed
+[2025-11-27 23:35:38.892000] INFO:     172.31.62.150:62020 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:38.893000] INFO:     connection open
+[2025-11-27 23:35:38.895000] INFO:     connection closed
+[2025-11-27 23:35:39.399000] INFO:     172.31.62.150:62024 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:39.400000] INFO:     connection open
+[2025-11-27 23:35:39.402000] INFO:     connection closed
+[2025-11-27 23:35:39.907000] INFO:     172.31.62.150:62032 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:39.907000] INFO:     connection open
+[2025-11-27 23:35:39.910000] INFO:     connection closed
+[2025-11-27 23:35:40.419000] INFO:     172.31.62.150:62042 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:40.419000] INFO:     connection open
+[2025-11-27 23:35:40.422000] INFO:     connection closed
+[2025-11-27 23:35:40.927000] INFO:     172.31.62.150:62046 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:40.927000] INFO:     connection open
+[2025-11-27 23:35:40.931000] INFO:     connection closed
+[2025-11-27 23:35:41.436000] INFO:     172.31.62.150:62058 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:41.436000] INFO:     connection open
+[2025-11-27 23:35:41.439000] INFO:     connection closed
+[2025-11-27 23:35:41.943000] INFO:     172.31.62.150:62066 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:41.943000] INFO:     connection open
+[2025-11-27 23:35:41.946000] INFO:     connection closed
+[2025-11-27 23:35:42.450000] INFO:     172.31.62.150:62080 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:42.451000] INFO:     connection open
+[2025-11-27 23:35:42.453000] INFO:     connection closed
+[2025-11-27 23:35:42.958000] INFO:     172.31.62.150:62086 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:42.958000] INFO:     connection open
+[2025-11-27 23:35:42.960000] INFO:     connection closed
+[2025-11-27 23:35:43.465000] INFO:     172.31.62.150:30958 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:43.466000] INFO:     connection open
+[2025-11-27 23:35:43.468000] INFO:     connection closed
+[2025-11-27 23:35:43.972000] INFO:     172.31.62.150:30966 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:43.973000] INFO:     connection open
+[2025-11-27 23:35:43.975000] INFO:     connection closed
+[2025-11-27 23:35:44.481000] INFO:     172.31.62.150:30972 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:44.482000] INFO:     connection open
+[2025-11-27 23:35:44.484000] INFO:     connection closed
+[2025-11-27 23:35:44.989000] INFO:     172.31.62.150:30978 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:44.989000] INFO:     connection open
+[2025-11-27 23:35:44.992000] INFO:     connection closed
+[2025-11-27 23:35:45.498000] INFO:     172.31.62.150:30984 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:45.499000] INFO:     connection open
+[2025-11-27 23:35:45.501000] INFO:     connection closed
+[2025-11-27 23:35:46.006000] INFO:     172.31.62.150:30986 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:46.006000] INFO:     connection open
+[2025-11-27 23:35:46.009000] INFO:     connection closed
+[2025-11-27 23:35:46.514000] INFO:     172.31.62.150:30996 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:46.514000] INFO:     connection open
+[2025-11-27 23:35:46.517000] INFO:     connection closed
+[2025-11-27 23:35:47.022000] INFO:     172.31.62.150:31006 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:47.023000] INFO:     connection open
+[2025-11-27 23:35:47.025000] INFO:     connection closed
+[2025-11-27 23:35:47.530000] INFO:     172.31.62.150:31008 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:47.530000] INFO:     connection open
+[2025-11-27 23:35:47.533000] INFO:     connection closed
+[2025-11-27 23:35:48.037000] INFO:     172.31.62.150:31012 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:48.038000] INFO:     connection open
+[2025-11-27 23:35:48.040000] INFO:     connection closed
+[2025-11-27 23:35:48.544000] INFO:     172.31.62.150:31014 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:48.544000] INFO:     connection open
+[2025-11-27 23:35:48.547000] INFO:     connection closed
+[2025-11-27 23:35:48.784000] INFO:     172.31.62.150:31028 - "WebSocket /ws?uid=7hQs0jluP5YUWcREqdi22NRFnU32" [accepted]
+[2025-11-27 23:35:48.784000] time=2025-11-27 22:35:48,784 level=INFO logger=listeners.ws message=ws_connect uid=7hQs0jluP5YUWcREqdi22NRFnU32 total=5
+[2025-11-27 23:35:48.784000] time=2025-11-27 22:35:48,784 level=INFO logger=listeners.app message=ws_register_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:48.784000] time=2025-11-27 22:35:48,784 level=INFO logger=listeners.app message=force_user_watchers_test uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:48.784000] time=2025-11-27 22:35:48,784 level=INFO logger=listeners.app message=force_user_watchers_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:48.785000] INFO:     connection open
+[2025-11-27 23:35:49.052000] INFO:     172.31.62.150:31044 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:49.053000] INFO:     connection open
+[2025-11-27 23:35:49.055000] INFO:     connection closed
+[2025-11-27 23:35:49.560000] INFO:     172.31.62.150:31050 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:49.561000] INFO:     connection open
+[2025-11-27 23:35:49.563000] INFO:     connection closed
+[2025-11-27 23:35:49.787000] time=2025-11-27 22:35:49,787 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[2025-11-27 23:35:49.789000] INFO:     172.31.62.150:31054 - "WebSocket /ws?uid=7hQs0jluP5YUWcREqdi22NRFnU32" [accepted]
+[2025-11-27 23:35:49.789000] time=2025-11-27 22:35:49,789 level=INFO logger=listeners.ws message=ws_connect uid=7hQs0jluP5YUWcREqdi22NRFnU32 total=6
+[2025-11-27 23:35:49.789000] time=2025-11-27 22:35:49,789 level=INFO logger=listeners.app message=ws_register_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:49.789000] time=2025-11-27 22:35:49,789 level=INFO logger=listeners.app message=force_user_watchers_test uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:49.789000] time=2025-11-27 22:35:49,789 level=INFO logger=listeners.app message=force_user_watchers_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:49.789000] INFO:     connection open
+[2025-11-27 23:35:50.068000] INFO:     172.31.62.150:31058 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:50.068000] INFO:     connection open
+[2025-11-27 23:35:50.071000] INFO:     connection closed
+[2025-11-27 23:35:50.576000] INFO:     172.31.62.150:31068 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:50.576000] INFO:     connection open
+[2025-11-27 23:35:50.579000] INFO:     connection closed
+[2025-11-27 23:35:50.984000] INFO:     172.31.62.150:31072 - "GET /healthz HTTP/1.1" 200 OK
+[2025-11-27 23:35:51.008000] INFO:     172.31.41.136:58580 - "GET /healthz HTTP/1.1" 200 OK
+[2025-11-27 23:35:51.083000] INFO:     172.31.62.150:31076 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:51.083000] INFO:     connection open
+[2025-11-27 23:35:51.086000] INFO:     connection closed
+[2025-11-27 23:35:51.093000] INFO:     172.31.11.113:28904 - "GET /healthz HTTP/1.1" 200 OK
+[2025-11-27 23:35:51.590000] INFO:     172.31.62.150:31088 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:51.591000] INFO:     connection open
+[2025-11-27 23:35:51.593000] INFO:     connection closed
+[2025-11-27 23:35:52.099000] INFO:     172.31.62.150:31092 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:52.099000] INFO:     connection open
+[2025-11-27 23:35:52.101000] INFO:     connection closed
+[2025-11-27 23:35:52.607000] INFO:     172.31.62.150:31100 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:52.608000] INFO:     connection open
+[2025-11-27 23:35:52.610000] INFO:     connection closed
+[2025-11-27 23:35:53.115000] INFO:     172.31.62.150:31104 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:53.116000] INFO:     connection open
+[2025-11-27 23:35:53.119000] INFO:     connection closed
+[2025-11-27 23:35:53.630000] INFO:     172.31.62.150:42180 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:53.631000] INFO:     connection open
+[2025-11-27 23:35:53.634000] INFO:     connection closed
+[2025-11-27 23:35:54.138000] INFO:     172.31.62.150:42196 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:54.138000] INFO:     connection open
+[2025-11-27 23:35:54.140000] INFO:     connection closed
+[2025-11-27 23:35:54.645000] INFO:     172.31.62.150:42210 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:54.646000] INFO:     connection open
+[2025-11-27 23:35:54.649000] INFO:     connection closed
+[2025-11-27 23:35:55.154000] INFO:     172.31.62.150:42222 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:55.154000] INFO:     connection open
+[2025-11-27 23:35:55.156000] INFO:     connection closed
+[2025-11-27 23:35:55.661000] INFO:     172.31.62.150:42234 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:55.661000] INFO:     connection open
+[2025-11-27 23:35:55.664000] INFO:     connection closed
+[2025-11-27 23:35:56.168000] INFO:     172.31.62.150:42236 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:56.168000] INFO:     connection open
+[2025-11-27 23:35:56.171000] INFO:     connection closed
+[2025-11-27 23:35:56.677000] INFO:     172.31.62.150:42242 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:56.677000] INFO:     connection open
+[2025-11-27 23:35:56.679000] INFO:     connection closed
+[2025-11-27 23:35:57.248000] Job klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 trouvé avec statut: in queue
+[2025-11-27 23:35:57.250000] INFO:     172.31.62.150:42256 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:57.255000] time=2025-11-27 22:35:57,255 level=INFO logger=llm_service.manager message=[ENTER_CHAT] 📥 Signal reçu - session=7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro, thread_key=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938
+[2025-11-27 23:35:57.255000] time=2025-11-27 22:35:57,255 level=INFO logger=llm_service.manager message=[ENSURE_SESSION] Initialisation session (nouvelle ou données manquantes): 7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro
+[2025-11-27 23:35:57.470000] time=2025-11-27 22:35:57,469 level=INFO logger=llm_service.manager message=[ENSURE_SESSION] ✅ client_uuid résolu: cccd0781-26d7-47a0-97c8-e192ac9ec256 (contact_space=AAAABzwjXro)
+[2025-11-27 23:35:57.470000] time=2025-11-27 22:35:57,470 level=INFO logger=llm_service.manager message=[LLM_INIT] 📥 Requête initialize_session
+[2025-11-27 23:35:57.470000] time=2025-11-27 22:35:57,470 level=INFO logger=llm_service.manager message=[LLM_INIT] Paramètres: user_id=7hQs0jluP5YUWcREqdi22NRFnU32, collection_name=AAAABzwjXro, client_uuid=cccd0781-26d7-47a0-97c8-e192ac9ec256
+[2025-11-27 23:35:57.472000] time=2025-11-27 22:35:57,472 level=INFO logger=llm_service.manager message=[LLM_INIT] ⏳ Initialisation déjà en cours (Redis): 7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro
+[2025-11-27 23:35:57.472000] time=2025-11-27 22:35:57,472 level=INFO logger=llm_service.manager message=[ENSURE_SESSION] ⏳ Attente fin initialisation background: 7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro (status=initializing)
+[2025-11-27 23:35:59.267000] Envoi vers le chemin: AAAABzwjXro/active_chats/klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938/messages
+[2025-11-27 23:35:59.377000] time=2025-11-27 22:35:59,377 level=INFO logger=listeners.manager message=🔍 CHAT_RAW_EVENT uid=7hQs0jluP5YUWcREqdi22NRFnU32 event_type=put path=/-Of6SNMXA3QO-0U6JlK_ data_type=dict data_is_dict=True data_keys=['content', 'local_processed', 'message_type', 'message_uuid', 'read', 'sender_id', 'timestamp']
+[2025-11-27 23:35:59.378000] time=2025-11-27 22:35:59,378 level=INFO logger=listeners.manager message=🔵 CHAT_EVENT_RECEIVED uid=7hQs0jluP5YUWcREqdi22NRFnU32 space=AAAABzwjXro thread=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 event_type=put path=/-Of6SNMXA3QO-0U6JlK_
+[2025-11-27 23:35:59.378000] time=2025-11-27 22:35:59,378 level=INFO logger=listeners.manager message=🔵 CHAT_MESSAGE_PROCESSING uid=7hQs0jluP5YUWcREqdi22NRFnU32 msg_id=-Of6SNMXA3QO-0U6JlK_ content_preview=Il s'est passé quoi ?
+[2025-11-27 23:35:59.380000] INFO:     172.31.62.150:42282 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:35:59.385000] INFO:     172.31.62.150:42256 - "WebSocket /ws?uid=" [accepted]
+[2025-11-27 23:35:59.385000] INFO:     connection open
+[2025-11-27 23:35:59.388000] INFO:     connection closed
+[2025-11-27 23:35:59.484000] time=2025-11-27 22:35:59,483 level=INFO logger=listeners.manager message=publish type=chat.message uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=chat:7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro:klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938
+[2025-11-27 23:35:59.484000] time=2025-11-27 22:35:59,484 level=INFO logger=listeners.manager message=🟢 CHAT_MESSAGE_PUBLISHED uid=7hQs0jluP5YUWcREqdi22NRFnU32 msg_id=-Of6SNMXA3QO-0U6JlK_ channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:35:59.485000] time=2025-11-27 22:35:59,485 level=INFO logger=listeners.manager message=🔍 CHAT_RAW_EVENT uid=7hQs0jluP5YUWcREqdi22NRFnU32 event_type=patch path=/-Of6SNMXA3QO-0U6JlK_ data_type=dict data_is_dict=True data_keys=['read']
+[2025-11-27 23:35:59.486000] time=2025-11-27 22:35:59,485 level=INFO logger=listeners.manager message=🔵 CHAT_EVENT_RECEIVED uid=7hQs0jluP5YUWcREqdi22NRFnU32 space=AAAABzwjXro thread=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 event_type=patch path=/-Of6SNMXA3QO-0U6JlK_
+[2025-11-27 23:35:59.486000] time=2025-11-27 22:35:59,486 level=WARNING logger=listeners.manager message=🟡 CHAT_EVENT_SKIP uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=not_put event_type=patch
+[2025-11-27 23:35:59.486000] time=2025-11-27 22:35:59,486 level=INFO logger=listeners.ws message=ws_broadcast uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=chat.message channel= connections=6
+[2025-11-27 23:35:59.506000] time=2025-11-27 22:35:59,506 level=INFO logger=llm_service.manager message=[SEND_MESSAGE] 🚀 MODE UI - user=7hQs0jluP5YUWcREqdi22NRFnU32 collection=AAAABzwjXro thread=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 message=Il s'est passé quoi ?...
+[2025-11-27 23:35:59.507000] time=2025-11-27 22:35:59,506 level=INFO logger=llm_service.manager message=[ENSURE_SESSION] Initialisation session (nouvelle ou données manquantes): 7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro
+[2025-11-27 23:35:59.723000] time=2025-11-27 22:35:59,722 level=INFO logger=llm_service.manager message=[ENSURE_SESSION] ✅ client_uuid résolu: cccd0781-26d7-47a0-97c8-e192ac9ec256 (contact_space=AAAABzwjXro)
+[2025-11-27 23:35:59.723000] time=2025-11-27 22:35:59,723 level=INFO logger=llm_service.manager message=[LLM_INIT] 📥 Requête initialize_session
+[2025-11-27 23:35:59.723000] time=2025-11-27 22:35:59,723 level=INFO logger=llm_service.manager message=[LLM_INIT] Paramètres: user_id=7hQs0jluP5YUWcREqdi22NRFnU32, collection_name=AAAABzwjXro, client_uuid=cccd0781-26d7-47a0-97c8-e192ac9ec256
+[2025-11-27 23:35:59.725000] time=2025-11-27 22:35:59,725 level=INFO logger=llm_service.manager message=[LLM_INIT] ⏳ Initialisation déjà en cours (Redis): 7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro
+[2025-11-27 23:35:59.725000] time=2025-11-27 22:35:59,725 level=INFO logger=llm_service.manager message=[ENSURE_SESSION] ⏳ Attente fin initialisation background: 7hQs0jluP5YUWcREqdi22NRFnU32:AAAABzwjXro (status=initializing)
+[2025-11-27 23:36:20.996000] INFO:     172.31.62.150:54866 - "GET /healthz HTTP/1.1" 200 OK
+[2025-11-27 23:36:21.040000] INFO:     172.31.41.136:11546 - "GET /healthz HTTP/1.1" 200 OK
+[2025-11-27 23:36:21.124000] INFO:     172.31.11.113:61960 - "GET /healthz HTTP/1.1" 200 OK
+[2025-11-27 23:36:23.893000] time=2025-11-27 22:36:23,892 level=WARNING logger=listeners.app message=🔴 ws_disconnect uid=7hQs0jluP5YUWcREqdi22NRFnU32 code=CloseCode.ABNORMAL_CLOSURE reason= type=abnormal_closure
+[2025-11-27 23:36:23.894000] time=2025-11-27 22:36:23,894 level=INFO logger=listeners.ws message=ws_disconnect uid=7hQs0jluP5YUWcREqdi22NRFnU32 total=5
+[2025-11-27 23:36:23.894000] INFO:     connection closed
+[2025-11-27 23:36:23.895000] time=2025-11-27 22:36:23,894 level=WARNING logger=listeners.app message=🔴 ws_disconnect uid=7hQs0jluP5YUWcREqdi22NRFnU32 code=CloseCode.ABNORMAL_CLOSURE reason= type=abnormal_closure
+[2025-11-27 23:36:23.895000] time=2025-11-27 22:36:23,895 level=INFO logger=listeners.ws message=ws_disconnect uid=7hQs0jluP5YUWcREqdi22NRFnU32 total=4
+[2025-11-27 23:36:23.895000] INFO:     connection closed
+[2025-11-27 23:36:23.895000] time=2025-11-27 22:36:23,895 level=WARNING logger=listeners.app message=🔴 ws_disconnect uid=7hQs0jluP5YUWcREqdi22NRFnU32 code=CloseCode.ABNORMAL_CLOSURE reason= type=abnormal_closure
+[2025-11-27 23:36:23.895000] time=2025-11-27 22:36:23,895 level=INFO logger=listeners.ws message=ws_disconnect uid=7hQs0jluP5YUWcREqdi22NRFnU32 total=3
+[2025-11-27 23:36:23.895000] INFO:     connection closed
+[2025-11-27 23:36:23.895000] time=2025-11-27 22:36:23,895 level=WARNING logger=listeners.app message=🔴 ws_disconnect uid=7hQs0jluP5YUWcREqdi22NRFnU32 code=CloseCode.ABNORMAL_CLOSURE reason= type=abnormal_closure
+[2025-11-27 23:36:23.895000] time=2025-11-27 22:36:23,895 level=WARNING logger=listeners.ws_metrics message=ws_metrics_frequent_disconnect uid=7hQs0jluP5YUWcREqdi22NRFnU32 total=4 reasons={'abnormal_closure': 4}
+[2025-11-27 23:36:23.895000] time=2025-11-27 22:36:23,895 level=INFO logger=listeners.ws message=ws_disconnect uid=7hQs0jluP5YUWcREqdi22NRFnU32 total=2
+[2025-11-27 23:36:23.896000] INFO:     connection closed
+[2025-11-27 23:36:24.007000] time=2025-11-27 22:36:24,007 level=INFO logger=listeners.app message=🟡 ws_cleanup_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:36:24.008000] time=2025-11-27 22:36:24,008 level=INFO logger=listeners.app message=🟡 ws_cleanup_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:36:24.010000] time=2025-11-27 22:36:24,010 level=INFO logger=listeners.app message=🟡 ws_cleanup_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:36:24.019000] time=2025-11-27 22:36:24,019 level=INFO logger=listeners.app message=🟡 ws_cleanup_complete uid=7hQs0jluP5YUWcREqdi22NRFnU32
+[2025-11-27 23:36:24.020000] time=2025-11-27 22:36:24,020 level=INFO logger=listeners.manager message=registry_detach_trigger uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired
+[2025-11-27 23:36:24.020000] time=2025-11-27 22:36:24,020 level=INFO logger=listeners.manager message=user_detach_scheduled uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired listeners=3 workflow=0
+[2025-11-27 23:36:24.020000] time=2025-11-27 22:36:24,020 level=INFO logger=listeners.manager message=⏰ user_detach_delay_start uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired delay=5s
+[2025-11-27 23:36:24.028000] time=2025-11-27 22:36:24,028 level=INFO logger=listeners.manager message=registry_detach_trigger uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired
+[2025-11-27 23:36:25.714000] INFO:     172.31.62.150:61668 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:36:25.940000] time=2025-11-27 22:36:25,940 level=INFO logger=llm_service.manager message=[LLM_INIT] 📥 Requête initialize_session
+[2025-11-27 23:36:25.940000] time=2025-11-27 22:36:25,940 level=INFO logger=llm_service.manager message=[LLM_INIT] Paramètres: user_id=7hQs0jluP5YUWcREqdi22NRFnU32, collection_name=AAAAgaDzK_I, client_uuid=32dd3346-043d-4e99-99f9-3072c9e2b9a1
+[2025-11-27 23:36:25.942000] time=2025-11-27 22:36:25,942 level=WARNING logger=llm_service.manager message=[LLM_INIT] ⚠️ Redis dit 'ready' mais session absente de la mémoire → Réinitialisation
+[2025-11-27 23:36:25.947000] time=2025-11-27 22:36:25,947 level=INFO logger=llm_service.manager message=[LLM_INIT] ✅ Marqué comme 'initializing' dans Redis
+[2025-11-27 23:36:25.947000] time=2025-11-27 22:36:25,947 level=INFO logger=llm_service.manager message=[LLM_INIT] 🚀 Lancement initialisation background pour 7hQs0jluP5YUWcREqdi22NRFnU32:AAAAgaDzK_I
+[2025-11-27 23:36:25.948000] time=2025-11-27 22:36:25,948 level=INFO logger=llm_service.manager message=[LLM_INIT] ⚡ Retour immédiat - initialisation en cours en background
+[2025-11-27 23:36:25.950000] INFO:     172.31.62.150:61668 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:36:25.950000] time=2025-11-27 22:36:25,950 level=INFO logger=llm_service.manager message=[LLM_INIT_BG] 🔄 Début initialisation background pour 7hQs0jluP5YUWcREqdi22NRFnU32:AAAAgaDzK_I
+[2025-11-27 23:36:25.950000] time=2025-11-27 22:36:25,950 level=INFO logger=llm_service.manager message=[SESSION_INIT] 📦 LLMSession créée: 7hQs0jluP5YUWcREqdi22NRFnU32:AAAAgaDzK_I
+[2025-11-27 23:36:25.950000] time=2025-11-27 22:36:25,950 level=INFO logger=llm_service.manager message=[LLM_INIT_BG] 📥 Chargement données session...
+[2025-11-27 23:36:25.950000] time=2025-11-27 22:36:25,950 level=INFO logger=llm_service.manager message=[SESSION_DATA] 🔄 Chargement données permanentes pour session 7hQs0jluP5YUWcREqdi22NRFnU32:AAAAgaDzK_I
+[2025-11-27 23:36:25.952000] time=2025-11-27 22:36:25,952 level=INFO logger=llm_service.manager message=[SESSION_DATA] 🔍 Mode détecté: BACKEND
+[2025-11-27 23:36:25.952000] time=2025-11-27 22:36:25,952 level=INFO logger=llm_service.manager message=[SESSION_DATA] ✅ client_uuid fourni: 32dd3346-043d-4e99-99f9-3072c9e2b9a1
+[2025-11-27 23:36:26.458000] INFO:     172.31.62.150:61668 - "POST /rpc HTTP/1.1" 200 OK
+[2025-11-27 23:36:29.024000] time=2025-11-27 22:36:29,024 level=INFO logger=listeners.manager message=🧹 user_detach_executing uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired (no reconnection detected)
+[2025-11-27 23:36:59.483000] time=2025-11-27 22:36:59,483 level=INFO logger=listeners.manager message=🔵 REGISTRY_CHAT_UNREGISTER uid=7hQs0jluP5YUWcREqdi22NRFnU32 space=AAAABzwjXro thread=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938
+[2025-11-27 23:36:59.583000] time=2025-11-27 22:36:59,583 level=INFO logger=registry.listeners message=listener_unregister_skip uid=7hQs0jluP5YUWcREqdi22NRFnU32 listener_id=chat_7hQs0jluP5YUWcREqdi22NRFnU32_AAAABzwjXro_klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938 reason=not_found
+[2025-11-27 23:36:59.584000] time=2025-11-27 22:36:59,583 level=INFO logger=listeners.manager message=🟢 REGISTRY_CHAT_UNREGISTER_SUCCESS uid=7hQs0jluP5YUWcREqdi22NRFnU32 space=AAAABzwjXro thread=klk_ea2b0f5e-737a-4933-8cb8-1cbbfaf79938
+[2025-11-27 23:36:59.584000] time=2025-11-27 22:36:59,584 level=INFO logger=listeners.manager message=🔵 REGISTRY_CLEANUP_START nettoyage pour uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired
+[2025-11-27 23:36:59.686000] time=2025-11-27 22:36:59,686 level=INFO logger=listeners.manager message=🟢 REGISTRY_CLEANUP_SUCCESS uid=7hQs0jluP5YUWcREqdi22NRFnU32 cleaned=0

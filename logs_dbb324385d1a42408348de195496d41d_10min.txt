@@ -1,0 +1,92 @@
+=== Logs de pinnokio_microservice ===
+=== Task: dbb324385d1a42408348de195496d41d ===
+=== Periode: 2025-11-30 17:59:23.946853 a 2025-11-30 18:09:23.946853 ===
+=== Total evenements: 87 ===
+
+[  1] [2025-11-30 17:59:34] time=2025-11-30 16:59:34,440 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[  2] [2025-11-30 17:59:46] INFO:     172.31.11.113:20708 - "GET /healthz HTTP/1.1" 200 OK
+[  3] [2025-11-30 17:59:47] INFO:     172.31.62.150:5522 - "GET /healthz HTTP/1.1" 200 OK
+[  4] [2025-11-30 18:00:16] INFO:     172.31.11.113:31958 - "GET /healthz HTTP/1.1" 200 OK
+[  5] [2025-11-30 18:00:17] INFO:     172.31.62.150:42634 - "GET /healthz HTTP/1.1" 200 OK
+[  6] [2025-11-30 18:00:34] time=2025-11-30 17:00:34,547 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[  7] [2025-11-30 18:00:46] INFO:     172.31.11.113:25368 - "GET /healthz HTTP/1.1" 200 OK
+[  8] [2025-11-30 18:00:47] INFO:     172.31.62.150:30734 - "GET /healthz HTTP/1.1" 200 OK
+[  9] [2025-11-30 18:01:14] time=2025-11-30 17:01:14,652 level=INFO logger=listeners.manager message=publish type=msg.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 10] [2025-11-30 18:01:14] time=2025-11-30 17:01:14,653 level=INFO logger=listeners.manager message=msg_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=1 sample_ids=['-OfKfUYbYwMZSkZ2tOjt']
+[ 11] [2025-11-30 18:01:14] time=2025-11-30 17:01:14,654 level=INFO logger=listeners.ws message=ws_broadcast uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=msg.sync channel= connections=7
+[ 12] [2025-11-30 18:01:16] INFO:     172.31.11.113:24704 - "GET /healthz HTTP/1.1" 200 OK
+[ 13] [2025-11-30 18:01:17] INFO:     172.31.62.150:33696 - "GET /healthz HTTP/1.1" 200 OK
+[ 14] [2025-11-30 18:01:34] time=2025-11-30 17:01:34,650 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 15] [2025-11-30 18:01:47] INFO:     172.31.11.113:47690 - "GET /healthz HTTP/1.1" 200 OK
+[ 16] [2025-11-30 18:01:47] INFO:     172.31.62.150:58572 - "GET /healthz HTTP/1.1" 200 OK
+[ 17] [2025-11-30 18:02:17] INFO:     172.31.11.113:1142 - "GET /healthz HTTP/1.1" 200 OK
+[ 18] [2025-11-30 18:02:17] INFO:     172.31.62.150:53406 - "GET /healthz HTTP/1.1" 200 OK
+[ 19] [2025-11-30 18:02:34] time=2025-11-30 17:02:34,758 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 20] [2025-11-30 18:02:47] INFO:     172.31.11.113:57712 - "GET /healthz HTTP/1.1" 200 OK
+[ 21] [2025-11-30 18:02:47] INFO:     172.31.62.150:22408 - "GET /healthz HTTP/1.1" 200 OK
+[ 22] [2025-11-30 18:03:17] INFO:     172.31.11.113:3972 - "GET /healthz HTTP/1.1" 200 OK
+[ 23] [2025-11-30 18:03:17] INFO:     172.31.62.150:15478 - "GET /healthz HTTP/1.1" 200 OK
+[ 24] [2025-11-30 18:03:34] time=2025-11-30 17:03:34,866 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 25] [2025-11-30 18:03:47] INFO:     172.31.11.113:30594 - "GET /healthz HTTP/1.1" 200 OK
+[ 26] [2025-11-30 18:03:47] INFO:     172.31.62.150:61764 - "GET /healthz HTTP/1.1" 200 OK
+[ 27] [2025-11-30 18:04:17] INFO:     172.31.11.113:23572 - "GET /healthz HTTP/1.1" 200 OK
+[ 28] [2025-11-30 18:04:17] INFO:     172.31.62.150:46892 - "GET /healthz HTTP/1.1" 200 OK
+[ 29] [2025-11-30 18:04:34] time=2025-11-30 17:04:34,974 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 30] [2025-11-30 18:04:47] INFO:     172.31.11.113:36624 - "GET /healthz HTTP/1.1" 200 OK
+[ 31] [2025-11-30 18:04:47] INFO:     172.31.62.150:33962 - "GET /healthz HTTP/1.1" 200 OK
+[ 32] [2025-11-30 18:05:17] INFO:     172.31.11.113:18862 - "GET /healthz HTTP/1.1" 200 OK
+[ 33] [2025-11-30 18:05:17] INFO:     172.31.62.150:27158 - "GET /healthz HTTP/1.1" 200 OK
+[ 34] [2025-11-30 18:05:23] time=2025-11-30 17:05:23,583 level=INFO logger=listeners.manager message=publish type=msg.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 35] [2025-11-30 18:05:23] time=2025-11-30 17:05:23,584 level=INFO logger=listeners.manager message=msg_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=1 sample_ids=['-OfKfUYbYwMZSkZ2tOjt']
+[ 36] [2025-11-30 18:05:23] time=2025-11-30 17:05:23,585 level=INFO logger=listeners.ws message=ws_broadcast uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=msg.sync channel= connections=7
+[ 37] [2025-11-30 18:05:35] time=2025-11-30 17:05:35,081 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 38] [2025-11-30 18:05:47] INFO:     172.31.11.113:35088 - "GET /healthz HTTP/1.1" 200 OK
+[ 39] [2025-11-30 18:05:47] INFO:     172.31.62.150:18816 - "GET /healthz HTTP/1.1" 200 OK
+[ 40] [2025-11-30 18:06:17] INFO:     172.31.11.113:30626 - "GET /healthz HTTP/1.1" 200 OK
+[ 41] [2025-11-30 18:06:17] INFO:     172.31.62.150:11642 - "GET /healthz HTTP/1.1" 200 OK
+[ 42] [2025-11-30 18:06:35] time=2025-11-30 17:06:35,185 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 43] [2025-11-30 18:06:40] time=2025-11-30 17:06:40,615 level=INFO logger=listeners.manager message=🔍 CHAT_RAW_EVENT uid=7hQs0jluP5YUWcREqdi22NRFnU32 event_type=put path=/ data_type=dict data_is_dict=True data_keys=['-OfH7_WPmN6QN0ffv1Es', '-OfH7eBXOOgmjig6WdRh', '-OfH7j8l29CtE6myMzmp', '-OfH87WS3POO5W4joQRh', '-OfH8TE9IA-QJYQwm0XL', '-OfH8_Jc0dxvux2n3mHH', '-OfH8fLzX002H8Dc1T-Y', '-OfH8mZJ5oESpoz_nsfX', '-OfH8xDX97DOiB01peQD', '-OfH9eI3I3UjkXUJ7Lll', '-OfH9lUxE7nSZ1BO0J0p', '-OfHB8dBhdmOzZSGs3D2', '-OfHBGxAYtQD0NEIPmWU', '-OfHBNg5T2G2XmSOqGf_', '-OfHBSqQTGtHJbWbz35y', '093e41ad-f731-486d-875b-b3a34f0e8519', '270246b9-f07b-4511-9979-e9cc6ea7c459', '385bebf0-be45-47f1-8132-9fa039ef2ad7', '3bbb4413-9a43-46ed-aa72-cb9fbd54521d', '425ea47e-958a-45a7-9b87-c5877fad7a0a', '4b726bf6-8f8b-41c8-80c6-5bb75dc02fad', '518687a5-ed32-437e-8099-b7cb93353d8b', '52c035e8-dd7f-40fc-a98b-7fe9df5059f0', '72955156-6296-41b0-a94f-47f8859322a5', '8b319f4c-741e-47f4-8a10-e3104b0f820f', '9c428348-9d40-4773-ab9c-1bf207080f37', 'a1ba1799-22c4-4723-8d04-387874131fd5', 'da6a716e-2fb2-41ee-981d-b0810488aaac', 'e4a46245-4a69-418a-b9a8-d5a95e55caa1', 'f61f11d4-ddae-4b3a-9ea9-f8b7bd0ba408', 'fe9a94f5-7dc2-41d9-9352-d8d0d28ad62b']
+[ 44] [2025-11-30 18:06:40] time=2025-11-30 17:06:40,615 level=INFO logger=listeners.manager message=🔵 CHAT_EVENT_RECEIVED uid=7hQs0jluP5YUWcREqdi22NRFnU32 space=klk_space_id_685096 thread=virgin_chat_e4121a27 event_type=put path=/
+[ 45] [2025-11-30 18:06:40] time=2025-11-30 17:06:40,615 level=INFO logger=listeners.manager message=🔵 CHAT_SNAPSHOT_RECEIVED uid=7hQs0jluP5YUWcREqdi22NRFnU32 space=klk_space_id_685096 thread=virgin_chat_e4121a27 messages_count=31
+[ 46] [2025-11-30 18:06:40] time=2025-11-30 17:06:40,615 level=INFO logger=listeners.manager message=🔍 CHAT_LISTENER_ACTIVE uid=7hQs0jluP5YUWcREqdi22NRFnU32 space=klk_space_id_685096 thread=virgin_chat_e4121a27 status=waiting_for_new_messages
+[ 47] [2025-11-30 18:06:47] INFO:     172.31.11.113:44568 - "GET /healthz HTTP/1.1" 200 OK
+[ 48] [2025-11-30 18:06:47] INFO:     172.31.62.150:4990 - "GET /healthz HTTP/1.1" 200 OK
+[ 49] [2025-11-30 18:07:17] INFO:     172.31.11.113:44328 - "GET /healthz HTTP/1.1" 200 OK
+[ 50] [2025-11-30 18:07:17] INFO:     172.31.62.150:42176 - "GET /healthz HTTP/1.1" 200 OK
+[ 51] [2025-11-30 18:07:35] time=2025-11-30 17:07:35,770 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 52] [2025-11-30 18:07:47] INFO:     172.31.11.113:11546 - "GET /healthz HTTP/1.1" 200 OK
+[ 53] [2025-11-30 18:07:47] INFO:     172.31.62.150:41334 - "GET /healthz HTTP/1.1" 200 OK
+[ 54] [2025-11-30 18:08:17] INFO:     172.31.11.113:45808 - "GET /healthz HTTP/1.1" 200 OK
+[ 55] [2025-11-30 18:08:17] INFO:     172.31.62.150:24526 - "GET /healthz HTTP/1.1" 200 OK
+[ 56] [2025-11-30 18:08:35] time=2025-11-30 17:08:35,578 level=INFO logger=listeners.manager message=publish type=msg.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[ 57] [2025-11-30 18:08:35] time=2025-11-30 17:08:35,579 level=INFO logger=listeners.manager message=msg_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=0 sample_ids=[]
+[ 58] [2025-11-30 18:08:35] time=2025-11-30 17:08:35,579 level=INFO logger=listeners.ws message=ws_broadcast uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=msg.sync channel= connections=4
+[ 59] [2025-11-30 18:08:35] time=2025-11-30 17:08:35,674 level=INFO logger=listeners.manager message=publish type=msg.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 60] [2025-11-30 18:08:35] time=2025-11-30 17:08:35,675 level=INFO logger=listeners.manager message=msg_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=1 sample_ids=['-OfKfUYbYwMZSkZ2tOjt']
+[ 61] [2025-11-30 18:08:35] time=2025-11-30 17:08:35,675 level=INFO logger=listeners.ws message=ws_broadcast uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=msg.sync channel= connections=7
+[ 62] [2025-11-30 18:08:35] time=2025-11-30 17:08:35,886 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 63] [2025-11-30 18:08:36] time=2025-11-30 17:08:36,470 level=INFO logger=listeners.manager message=publish type=msg.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[ 64] [2025-11-30 18:08:36] time=2025-11-30 17:08:36,470 level=INFO logger=listeners.manager message=msg_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=0 sample_ids=[]
+[ 65] [2025-11-30 18:08:36] time=2025-11-30 17:08:36,470 level=INFO logger=listeners.ws message=ws_broadcast uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=msg.sync channel= connections=4
+[ 66] [2025-11-30 18:08:36] time=2025-11-30 17:08:36,472 level=INFO logger=listeners.manager message=publish type=msg.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 67] [2025-11-30 18:08:36] time=2025-11-30 17:08:36,472 level=INFO logger=listeners.manager message=msg_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=1 sample_ids=['-OfKfUYbYwMZSkZ2tOjt']
+[ 68] [2025-11-30 18:08:36] time=2025-11-30 17:08:36,473 level=INFO logger=listeners.ws message=ws_broadcast uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=msg.sync channel= connections=7
+[ 69] [2025-11-30 18:08:36] time=2025-11-30 17:08:36,565 level=INFO logger=listeners.manager message=publish type=msg.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[ 70] [2025-11-30 18:08:36] time=2025-11-30 17:08:36,565 level=INFO logger=listeners.manager message=msg_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=0 sample_ids=[]
+[ 71] [2025-11-30 18:08:36] time=2025-11-30 17:08:36,566 level=INFO logger=listeners.ws message=ws_broadcast uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=msg.sync channel= connections=4
+[ 72] [2025-11-30 18:08:36] time=2025-11-30 17:08:36,585 level=INFO logger=listeners.manager message=publish type=msg.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[ 73] [2025-11-30 18:08:36] time=2025-11-30 17:08:36,585 level=INFO logger=listeners.manager message=msg_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=0 sample_ids=[]
+[ 74] [2025-11-30 18:08:36] time=2025-11-30 17:08:36,585 level=INFO logger=listeners.ws message=ws_broadcast uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=msg.sync channel= connections=4
+[ 75] [2025-11-30 18:08:37] time=2025-11-30 17:08:37,462 level=INFO logger=listeners.manager message=publish type=msg.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 76] [2025-11-30 18:08:37] time=2025-11-30 17:08:37,463 level=INFO logger=listeners.manager message=msg_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=1 sample_ids=['-OfKfUYbYwMZSkZ2tOjt']
+[ 77] [2025-11-30 18:08:37] time=2025-11-30 17:08:37,463 level=INFO logger=listeners.ws message=ws_broadcast uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=msg.sync channel= connections=7
+[ 78] [2025-11-30 18:08:37] time=2025-11-30 17:08:37,464 level=INFO logger=listeners.manager message=publish type=msg.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[ 79] [2025-11-30 18:08:37] time=2025-11-30 17:08:37,464 level=INFO logger=listeners.manager message=msg_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=0 sample_ids=[]
+[ 80] [2025-11-30 18:08:37] time=2025-11-30 17:08:37,465 level=INFO logger=listeners.ws message=ws_broadcast uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=msg.sync channel= connections=4
+[ 81] [2025-11-30 18:08:47] INFO:     172.31.11.113:60074 - "GET /healthz HTTP/1.1" 200 OK
+[ 82] [2025-11-30 18:08:47] INFO:     172.31.62.150:50032 - "GET /healthz HTTP/1.1" 200 OK
+[ 83] [2025-11-30 18:08:48] time=2025-11-30 17:08:48,470 level=INFO logger=listeners.manager message=publish type=msg.sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 channel=user:7hQs0jluP5YUWcREqdi22NRFnU32
+[ 84] [2025-11-30 18:08:48] time=2025-11-30 17:08:48,471 level=INFO logger=listeners.manager message=msg_sync uid=7hQs0jluP5YUWcREqdi22NRFnU32 count=0 sample_ids=[]
+[ 85] [2025-11-30 18:08:48] time=2025-11-30 17:08:48,471 level=INFO logger=listeners.ws message=ws_broadcast uid=7hQs0jluP5YUWcREqdi22NRFnU32 type=msg.sync channel= connections=4
+[ 86] [2025-11-30 18:09:17] INFO:     172.31.11.113:60504 - "GET /healthz HTTP/1.1" 200 OK
+[ 87] [2025-11-30 18:09:17] INFO:     172.31.62.150:17338 - "GET /healthz HTTP/1.1" 200 OK

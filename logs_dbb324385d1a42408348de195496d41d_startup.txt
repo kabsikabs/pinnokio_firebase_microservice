@@ -1,0 +1,577 @@
+=== LOGS DEMARRAGE - pinnokio_microservice ===
+=== Task: dbb324385d1a42408348de195496d41d ===
+=== Total evenements: 573 ===
+
+[   1] [2025-11-27 23:38:10] 🚀 Démarrage du microservice Firebase...
+[   2] [2025-11-27 23:38:10] Mode: api
+[   3] [2025-11-27 23:38:10] Registre unifié: false
+[   4] [2025-11-27 23:38:10] 🌐 Démarrage FastAPI Server...
+[   5] [2025-11-27 23:38:10] Port: 8090
+[   6] [2025-11-27 23:38:10] Workers: 1
+[   7] [2025-11-27 23:38:10] 📝 Mode legacy (registre unifié désactivé)
+[   8] [2025-11-27 23:38:15] time=2025-11-27 22:38:15,095 level=INFO logger=listeners.app message=service_start version=0.1.0 region=us-east-1
+[   9] [2025-11-27 23:38:15] time=2025-11-27 22:38:15,095 level=INFO logger=listeners.app message=redis_mode mode=cloud host=pinnokio-cache-7uum2j.serverless.use1.cache.amazonaws.com port=6379 tls=True
+[  10] [2025-11-27 23:38:15] time=2025-11-27 22:38:15,131 level=INFO logger=listeners.app message=redis_connect status=ok host=pinnokio-cache-7uum2j.serverless.use1.cache.amazonaws.com port=6379 tls=True
+[  11] [2025-11-27 23:38:15] INFO:     Started server process [1]
+[  12] [2025-11-27 23:38:15] INFO:     Waiting for application startup.
+[  13] [2025-11-27 23:38:15] time=2025-11-27 22:38:15,372 level=INFO logger=listeners.manager message=registry_watch start collection=listeners_registry
+[  14] [2025-11-27 23:38:15] time=2025-11-27 22:38:15,374 level=INFO logger=listeners.app message=listeners_manager status=started
+[  15] [2025-11-27 23:38:15] time=2025-11-27 22:38:15,377 level=INFO logger=cron_scheduler message=[CRON] Scheduler initialisé (intervalle: 60s)
+[  16] [2025-11-27 23:38:15] time=2025-11-27 22:38:15,377 level=INFO logger=cron_scheduler message=[CRON] Scheduler démarré
+[  17] [2025-11-27 23:38:15] time=2025-11-27 22:38:15,377 level=INFO logger=listeners.app message=cron_scheduler status=started
+[  18] [2025-11-27 23:38:15] time=2025-11-27 22:38:15,378 level=INFO logger=cron_scheduler message=[CRON] Boucle principale démarrée
+[  19] [2025-11-27 23:38:15] ✅ Stripe configuré avec succès
+[  20] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,090 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[  21] [2025-11-27 23:38:16] INFO:     Application startup complete.
+[  22] [2025-11-27 23:38:16] INFO:     Uvicorn running on http://0.0.0.0:8090 (Press CTRL+C to quit)
+[  23] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,096 level=INFO logger=listeners.manager message=registry_snapshot triggered changes_count=4
+[  24] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,096 level=INFO logger=listeners.manager message=registry_detach_trigger uid=2AqjLVOp1UcA9m1NvE3znuvnmW73 reason=offline_or_expired
+[  25] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,096 level=INFO logger=listeners.manager message=user_attach_start uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  26] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,096 level=INFO logger=listeners.manager message=user_attach_firebase_query uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  27] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,097 level=INFO logger=listeners.manager message=user_attach_firebase_listener uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  28] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,097 level=INFO logger=listeners.manager message=user_attach_notification_listener_attached uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  29] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,097 level=INFO logger=listeners.manager message=user_attach_publish_sync_notifications uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  30] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,788 level=INFO logger=listeners.manager message=notifications_change_triggered uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 changes_count=4
+[  31] [2025-11-27 23:38:16] INFO:     172.31.11.113:10424 - "GET /healthz HTTP/1.1" 200 OK
+[  32] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,789 level=INFO logger=listeners.manager message=notification_change uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 doc_id=onboarding_45c9bc87cd7143e598 type=ADDED
+[  33] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,789 level=INFO logger=listeners.manager message=notification_change uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 doc_id=onboarding_5224fb7ef2764ffaa3 type=ADDED
+[  34] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,789 level=INFO logger=listeners.manager message=notification_change uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 doc_id=onboarding_e3153c0e43474e4aaf type=ADDED
+[  35] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,789 level=INFO logger=listeners.manager message=notification_change uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 doc_id=onboarding_e9d0821f8d5340a5ae type=ADDED
+[  36] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,789 level=INFO logger=listeners.manager message=notifications_resync_start uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  37] [2025-11-27 23:38:16] INFO:     172.31.41.136:18190 - "GET /healthz HTTP/1.1" 200 OK
+[  38] [2025-11-27 23:38:16] INFO:     172.31.62.150:17818 - "GET /healthz HTTP/1.1" 200 OK
+[  39] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,826 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  40] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,826 level=INFO logger=listeners.manager message=publish type=notif.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  41] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,826 level=INFO logger=listeners.manager message=notif_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=4 sample_ids=['onboarding_e3153c0e43474e4aaf', 'onboarding_e9d0821f8d5340a5ae', 'onboarding_5224fb7ef2764ffaa3', 'onboarding_45c9bc87cd7143e598']
+[  42] [2025-11-27 23:38:16] time=2025-11-27 22:38:16,827 level=INFO logger=listeners.manager message=user_attach_rtdb_messages uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  43] [2025-11-27 23:38:17] time=2025-11-27 22:38:17,116 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  44] [2025-11-27 23:38:17] time=2025-11-27 22:38:17,116 level=INFO logger=listeners.manager message=publish type=notif.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  45] [2025-11-27 23:38:17] time=2025-11-27 22:38:17,116 level=INFO logger=listeners.manager message=notif_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=4 sample_ids=['onboarding_e3153c0e43474e4aaf', 'onboarding_e9d0821f8d5340a5ae', 'onboarding_5224fb7ef2764ffaa3', 'onboarding_45c9bc87cd7143e598']
+[  46] [2025-11-27 23:38:17] time=2025-11-27 22:38:17,116 level=INFO logger=listeners.manager message=notifications_resync_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  47] [2025-11-27 23:38:17] time=2025-11-27 22:38:17,179 level=INFO logger=listeners.manager message=user_attach_message_listener_attached uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  48] [2025-11-27 23:38:17] time=2025-11-27 22:38:17,569 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  49] [2025-11-27 23:38:17] time=2025-11-27 22:38:17,569 level=INFO logger=listeners.manager message=publish type=msg.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  50] [2025-11-27 23:38:17] time=2025-11-27 22:38:17,569 level=INFO logger=listeners.manager message=msg_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=0 sample_ids=[]
+[  51] [2025-11-27 23:38:17] time=2025-11-27 22:38:17,582 level=ERROR logger=listeners.ws message=ws_broadcast_threadsafe_no_loop uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  52] [2025-11-27 23:38:17] time=2025-11-27 22:38:17,583 level=INFO logger=listeners.manager message=publish type=msg.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  53] [2025-11-27 23:38:17] time=2025-11-27 22:38:17,583 level=INFO logger=listeners.manager message=msg_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=0 sample_ids=[]
+[  54] [2025-11-27 23:38:17] time=2025-11-27 22:38:17,583 level=INFO logger=listeners.manager message=user_attach_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 listeners_count=2
+[  55] [2025-11-27 23:38:17] time=2025-11-27 22:38:17,583 level=INFO logger=listeners.manager message=🔵 REGISTRY_START enregistrement des listeners pour uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  56] [2025-11-27 23:38:17] time=2025-11-27 22:38:17,583 level=INFO logger=listeners.manager message=🔵 REGISTRY_INSTANCE récupérée pour uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[  57] [2025-11-27 23:38:17] time=2025-11-27 22:38:17,803 level=INFO logger=registry.listeners message=listener_register uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=notif listener_id=notif_4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2 space=None thread=None mode=None
+[  58] [2025-11-27 23:38:17] time=2025-11-27 22:38:17,803 level=INFO logger=listeners.manager message=🔵 REGISTRY_NOTIF uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 success=True
+[  59] [2025-11-27 23:38:18] time=2025-11-27 22:38:18,023 level=INFO logger=registry.listeners message=listener_register uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=msg listener_id=msg_4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2 space=None thread=None mode=None
+[  60] [2025-11-27 23:38:18] time=2025-11-27 22:38:18,023 level=INFO logger=listeners.manager message=🔵 REGISTRY_MSG uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 success=True
+[  61] [2025-11-27 23:38:18] time=2025-11-27 22:38:18,023 level=INFO logger=listeners.manager message=🟢 REGISTRY_COMPLETE uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 enregistrement terminé
+[  62] [2025-11-27 23:38:18] time=2025-11-27 22:38:18,024 level=INFO logger=listeners.manager message=registry_detach_trigger uid=7hQs0jluP5YUWcREqdi22NRFnU32 reason=offline_or_expired
+[  63] [2025-11-27 23:38:18] time=2025-11-27 22:38:18,024 level=INFO logger=listeners.manager message=registry_detach_trigger uid=WdCdwNS2ElghGiAGlwS9ha72hrs1 reason=offline_or_expired
+[  64] [2025-11-27 23:38:46] INFO:     172.31.11.113:43478 - "GET /healthz HTTP/1.1" 200 OK
+[  65] [2025-11-27 23:38:46] INFO:     172.31.41.136:50470 - "GET /healthz HTTP/1.1" 200 OK
+[  66] [2025-11-27 23:38:46] INFO:     172.31.62.150:41846 - "GET /healthz HTTP/1.1" 200 OK
+[  67] [2025-11-27 23:39:16] time=2025-11-27 22:39:16,196 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[  68] [2025-11-27 23:39:16] INFO:     172.31.11.113:1818 - "GET /healthz HTTP/1.1" 200 OK
+[  69] [2025-11-27 23:39:16] INFO:     172.31.41.136:57750 - "GET /healthz HTTP/1.1" 200 OK
+[  70] [2025-11-27 23:39:16] INFO:     172.31.62.150:20426 - "GET /healthz HTTP/1.1" 200 OK
+[  71] [2025-11-27 23:39:46] INFO:     172.31.11.113:56824 - "GET /healthz HTTP/1.1" 200 OK
+[  72] [2025-11-27 23:39:46] INFO:     172.31.62.150:14220 - "GET /healthz HTTP/1.1" 200 OK
+[  73] [2025-11-27 23:39:46] INFO:     172.31.41.136:30486 - "GET /healthz HTTP/1.1" 200 OK
+[  74] [2025-11-27 23:40:16] time=2025-11-27 22:40:16,304 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[  75] [2025-11-27 23:40:16] INFO:     172.31.11.113:19010 - "GET /healthz HTTP/1.1" 200 OK
+[  76] [2025-11-27 23:40:16] INFO:     172.31.41.136:60688 - "GET /healthz HTTP/1.1" 200 OK
+[  77] [2025-11-27 23:40:16] INFO:     172.31.62.150:45594 - "GET /healthz HTTP/1.1" 200 OK
+[  78] [2025-11-27 23:40:46] INFO:     172.31.11.113:42698 - "GET /healthz HTTP/1.1" 200 OK
+[  79] [2025-11-27 23:40:46] INFO:     172.31.41.136:20304 - "GET /healthz HTTP/1.1" 200 OK
+[  80] [2025-11-27 23:40:46] INFO:     172.31.62.150:30218 - "GET /healthz HTTP/1.1" 200 OK
+[  81] [2025-11-27 23:41:16] time=2025-11-27 22:41:16,419 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[  82] [2025-11-27 23:41:16] INFO:     172.31.41.136:20448 - "GET /healthz HTTP/1.1" 200 OK
+[  83] [2025-11-27 23:41:16] INFO:     172.31.11.113:19724 - "GET /healthz HTTP/1.1" 200 OK
+[  84] [2025-11-27 23:41:16] INFO:     172.31.62.150:19952 - "GET /healthz HTTP/1.1" 200 OK
+[  85] [2025-11-27 23:41:46] INFO:     172.31.41.136:28092 - "GET /healthz HTTP/1.1" 200 OK
+[  86] [2025-11-27 23:41:46] INFO:     172.31.11.113:10954 - "GET /healthz HTTP/1.1" 200 OK
+[  87] [2025-11-27 23:41:46] INFO:     172.31.62.150:42964 - "GET /healthz HTTP/1.1" 200 OK
+[  88] [2025-11-27 23:42:16] time=2025-11-27 22:42:16,535 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[  89] [2025-11-27 23:42:16] INFO:     172.31.41.136:9054 - "GET /healthz HTTP/1.1" 200 OK
+[  90] [2025-11-27 23:42:16] INFO:     172.31.11.113:39738 - "GET /healthz HTTP/1.1" 200 OK
+[  91] [2025-11-27 23:42:16] INFO:     172.31.62.150:48106 - "GET /healthz HTTP/1.1" 200 OK
+[  92] [2025-11-27 23:42:46] INFO:     172.31.41.136:50256 - "GET /healthz HTTP/1.1" 200 OK
+[  93] [2025-11-27 23:42:46] INFO:     172.31.11.113:10670 - "GET /healthz HTTP/1.1" 200 OK
+[  94] [2025-11-27 23:42:46] INFO:     172.31.62.150:1080 - "GET /healthz HTTP/1.1" 200 OK
+[  95] [2025-11-27 23:43:17] time=2025-11-27 22:43:17,120 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[  96] [2025-11-27 23:43:17] INFO:     172.31.41.136:13752 - "GET /healthz HTTP/1.1" 200 OK
+[  97] [2025-11-27 23:43:17] INFO:     172.31.11.113:32748 - "GET /healthz HTTP/1.1" 200 OK
+[  98] [2025-11-27 23:43:17] INFO:     172.31.62.150:2474 - "GET /healthz HTTP/1.1" 200 OK
+[  99] [2025-11-27 23:43:46] INFO:     172.31.41.136:41670 - "GET /healthz HTTP/1.1" 200 OK
+[ 100] [2025-11-27 23:43:46] INFO:     172.31.11.113:42992 - "GET /healthz HTTP/1.1" 200 OK
+[ 101] [2025-11-27 23:43:46] INFO:     172.31.62.150:30856 - "GET /healthz HTTP/1.1" 200 OK
+[ 102] [2025-11-27 23:44:16] INFO:     172.31.41.136:57530 - "GET /healthz HTTP/1.1" 200 OK
+[ 103] [2025-11-27 23:44:16] INFO:     172.31.11.113:29942 - "GET /healthz HTTP/1.1" 200 OK
+[ 104] [2025-11-27 23:44:16] INFO:     172.31.62.150:8940 - "GET /healthz HTTP/1.1" 200 OK
+[ 105] [2025-11-27 23:44:17] time=2025-11-27 22:44:17,228 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 106] [2025-11-27 23:44:46] INFO:     172.31.41.136:53878 - "GET /healthz HTTP/1.1" 200 OK
+[ 107] [2025-11-27 23:44:46] INFO:     172.31.11.113:54084 - "GET /healthz HTTP/1.1" 200 OK
+[ 108] [2025-11-27 23:44:46] INFO:     172.31.62.150:25480 - "GET /healthz HTTP/1.1" 200 OK
+[ 109] [2025-11-27 23:45:16] INFO:     172.31.41.136:46684 - "GET /healthz HTTP/1.1" 200 OK
+[ 110] [2025-11-27 23:45:16] INFO:     172.31.11.113:54122 - "GET /healthz HTTP/1.1" 200 OK
+[ 111] [2025-11-27 23:45:16] INFO:     172.31.62.150:9450 - "GET /healthz HTTP/1.1" 200 OK
+[ 112] [2025-11-27 23:45:17] time=2025-11-27 22:45:17,335 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 113] [2025-11-27 23:45:46] INFO:     172.31.41.136:2384 - "GET /healthz HTTP/1.1" 200 OK
+[ 114] [2025-11-27 23:45:46] INFO:     172.31.11.113:26668 - "GET /healthz HTTP/1.1" 200 OK
+[ 115] [2025-11-27 23:45:46] INFO:     172.31.62.150:35322 - "GET /healthz HTTP/1.1" 200 OK
+[ 116] [2025-11-27 23:46:16] INFO:     172.31.41.136:8844 - "GET /healthz HTTP/1.1" 200 OK
+[ 117] [2025-11-27 23:46:16] INFO:     172.31.11.113:56864 - "GET /healthz HTTP/1.1" 200 OK
+[ 118] [2025-11-27 23:46:16] INFO:     172.31.62.150:59392 - "GET /healthz HTTP/1.1" 200 OK
+[ 119] [2025-11-27 23:46:17] time=2025-11-27 22:46:17,445 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 120] [2025-11-27 23:46:46] INFO:     172.31.41.136:57698 - "GET /healthz HTTP/1.1" 200 OK
+[ 121] [2025-11-27 23:46:46] INFO:     172.31.11.113:37548 - "GET /healthz HTTP/1.1" 200 OK
+[ 122] [2025-11-27 23:46:47] INFO:     172.31.62.150:4846 - "GET /healthz HTTP/1.1" 200 OK
+[ 123] [2025-11-27 23:47:16] INFO:     172.31.41.136:16286 - "GET /healthz HTTP/1.1" 200 OK
+[ 124] [2025-11-27 23:47:17] INFO:     172.31.11.113:20056 - "GET /healthz HTTP/1.1" 200 OK
+[ 125] [2025-11-27 23:47:17] INFO:     172.31.62.150:61612 - "GET /healthz HTTP/1.1" 200 OK
+[ 126] [2025-11-27 23:47:17] time=2025-11-27 22:47:17,554 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 127] [2025-11-27 23:47:46] INFO:     172.31.41.136:63456 - "GET /healthz HTTP/1.1" 200 OK
+[ 128] [2025-11-27 23:47:47] INFO:     172.31.11.113:23956 - "GET /healthz HTTP/1.1" 200 OK
+[ 129] [2025-11-27 23:47:47] INFO:     172.31.62.150:24566 - "GET /healthz HTTP/1.1" 200 OK
+[ 130] [2025-11-27 23:48:16] INFO:     172.31.41.136:38674 - "GET /healthz HTTP/1.1" 200 OK
+[ 131] [2025-11-27 23:48:17] INFO:     172.31.11.113:50110 - "GET /healthz HTTP/1.1" 200 OK
+[ 132] [2025-11-27 23:48:17] INFO:     172.31.62.150:60086 - "GET /healthz HTTP/1.1" 200 OK
+[ 133] [2025-11-27 23:48:17] time=2025-11-27 22:48:17,662 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 134] [2025-11-27 23:48:47] INFO:     172.31.41.136:56112 - "GET /healthz HTTP/1.1" 200 OK
+[ 135] [2025-11-27 23:48:47] INFO:     172.31.11.113:33738 - "GET /healthz HTTP/1.1" 200 OK
+[ 136] [2025-11-27 23:48:47] INFO:     172.31.62.150:53318 - "GET /healthz HTTP/1.1" 200 OK
+[ 137] [2025-11-27 23:49:17] INFO:     172.31.41.136:48670 - "GET /healthz HTTP/1.1" 200 OK
+[ 138] [2025-11-27 23:49:17] INFO:     172.31.11.113:35528 - "GET /healthz HTTP/1.1" 200 OK
+[ 139] [2025-11-27 23:49:17] INFO:     172.31.62.150:49894 - "GET /healthz HTTP/1.1" 200 OK
+[ 140] [2025-11-27 23:49:17] time=2025-11-27 22:49:17,781 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 141] [2025-11-27 23:49:47] INFO:     172.31.41.136:20080 - "GET /healthz HTTP/1.1" 200 OK
+[ 142] [2025-11-27 23:49:47] INFO:     172.31.11.113:16866 - "GET /healthz HTTP/1.1" 200 OK
+[ 143] [2025-11-27 23:49:47] INFO:     172.31.62.150:32980 - "GET /healthz HTTP/1.1" 200 OK
+[ 144] [2025-11-27 23:50:17] INFO:     172.31.41.136:3144 - "GET /healthz HTTP/1.1" 200 OK
+[ 145] [2025-11-27 23:50:17] INFO:     172.31.11.113:43042 - "GET /healthz HTTP/1.1" 200 OK
+[ 146] [2025-11-27 23:50:17] INFO:     172.31.62.150:25106 - "GET /healthz HTTP/1.1" 200 OK
+[ 147] [2025-11-27 23:50:17] time=2025-11-27 22:50:17,889 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 148] [2025-11-27 23:50:47] INFO:     172.31.41.136:36730 - "GET /healthz HTTP/1.1" 200 OK
+[ 149] [2025-11-27 23:50:47] INFO:     172.31.11.113:34046 - "GET /healthz HTTP/1.1" 200 OK
+[ 150] [2025-11-27 23:50:47] INFO:     172.31.62.150:47846 - "GET /healthz HTTP/1.1" 200 OK
+[ 151] [2025-11-27 23:51:17] INFO:     172.31.41.136:39958 - "GET /healthz HTTP/1.1" 200 OK
+[ 152] [2025-11-27 23:51:17] INFO:     172.31.11.113:12128 - "GET /healthz HTTP/1.1" 200 OK
+[ 153] [2025-11-27 23:51:17] INFO:     172.31.62.150:36080 - "GET /healthz HTTP/1.1" 200 OK
+[ 154] [2025-11-27 23:51:17] time=2025-11-27 22:51:17,999 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 155] [2025-11-27 23:51:47] INFO:     172.31.41.136:42750 - "GET /healthz HTTP/1.1" 200 OK
+[ 156] [2025-11-27 23:51:47] INFO:     172.31.11.113:22682 - "GET /healthz HTTP/1.1" 200 OK
+[ 157] [2025-11-27 23:51:47] INFO:     172.31.62.150:50140 - "GET /healthz HTTP/1.1" 200 OK
+[ 158] [2025-11-27 23:52:17] INFO:     172.31.41.136:39312 - "GET /healthz HTTP/1.1" 200 OK
+[ 159] [2025-11-27 23:52:17] INFO:     172.31.11.113:43510 - "GET /healthz HTTP/1.1" 200 OK
+[ 160] [2025-11-27 23:52:17] INFO:     172.31.62.150:43828 - "GET /healthz HTTP/1.1" 200 OK
+[ 161] [2025-11-27 23:52:18] time=2025-11-27 22:52:18,115 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 162] [2025-11-27 23:52:47] INFO:     172.31.41.136:49662 - "GET /healthz HTTP/1.1" 200 OK
+[ 163] [2025-11-27 23:52:47] INFO:     172.31.62.150:59430 - "GET /healthz HTTP/1.1" 200 OK
+[ 164] [2025-11-27 23:52:47] INFO:     172.31.11.113:46920 - "GET /healthz HTTP/1.1" 200 OK
+[ 165] [2025-11-27 23:53:17] INFO:     172.31.41.136:14144 - "GET /healthz HTTP/1.1" 200 OK
+[ 166] [2025-11-27 23:53:17] INFO:     172.31.62.150:50630 - "GET /healthz HTTP/1.1" 200 OK
+[ 167] [2025-11-27 23:53:17] INFO:     172.31.11.113:1414 - "GET /healthz HTTP/1.1" 200 OK
+[ 168] [2025-11-27 23:53:18] time=2025-11-27 22:53:18,238 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 169] [2025-11-27 23:53:47] INFO:     172.31.41.136:55840 - "GET /healthz HTTP/1.1" 200 OK
+[ 170] [2025-11-27 23:53:47] INFO:     172.31.62.150:15472 - "GET /healthz HTTP/1.1" 200 OK
+[ 171] [2025-11-27 23:53:47] INFO:     172.31.11.113:9868 - "GET /healthz HTTP/1.1" 200 OK
+[ 172] [2025-11-27 23:54:17] INFO:     172.31.41.136:53540 - "GET /healthz HTTP/1.1" 200 OK
+[ 173] [2025-11-27 23:54:17] INFO:     172.31.62.150:42514 - "GET /healthz HTTP/1.1" 200 OK
+[ 174] [2025-11-27 23:54:17] INFO:     172.31.11.113:14266 - "GET /healthz HTTP/1.1" 200 OK
+[ 175] [2025-11-27 23:54:18] time=2025-11-27 22:54:18,349 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 176] [2025-11-27 23:54:47] INFO:     172.31.41.136:33388 - "GET /healthz HTTP/1.1" 200 OK
+[ 177] [2025-11-27 23:54:47] INFO:     172.31.62.150:60500 - "GET /healthz HTTP/1.1" 200 OK
+[ 178] [2025-11-27 23:54:47] INFO:     172.31.11.113:12952 - "GET /healthz HTTP/1.1" 200 OK
+[ 179] [2025-11-27 23:55:17] INFO:     172.31.41.136:27790 - "GET /healthz HTTP/1.1" 200 OK
+[ 180] [2025-11-27 23:55:17] INFO:     172.31.62.150:12396 - "GET /healthz HTTP/1.1" 200 OK
+[ 181] [2025-11-27 23:55:17] INFO:     172.31.11.113:24404 - "GET /healthz HTTP/1.1" 200 OK
+[ 182] [2025-11-27 23:55:18] time=2025-11-27 22:55:18,459 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 183] [2025-11-27 23:55:47] INFO:     172.31.41.136:27284 - "GET /healthz HTTP/1.1" 200 OK
+[ 184] [2025-11-27 23:55:47] INFO:     172.31.62.150:57804 - "GET /healthz HTTP/1.1" 200 OK
+[ 185] [2025-11-27 23:55:47] INFO:     172.31.11.113:45404 - "GET /healthz HTTP/1.1" 200 OK
+[ 186] [2025-11-27 23:56:17] INFO:     172.31.41.136:54744 - "GET /healthz HTTP/1.1" 200 OK
+[ 187] [2025-11-27 23:56:17] INFO:     172.31.62.150:54364 - "GET /healthz HTTP/1.1" 200 OK
+[ 188] [2025-11-27 23:56:17] INFO:     172.31.11.113:23362 - "GET /healthz HTTP/1.1" 200 OK
+[ 189] [2025-11-27 23:56:18] time=2025-11-27 22:56:18,565 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 190] [2025-11-27 23:56:47] INFO:     172.31.41.136:48132 - "GET /healthz HTTP/1.1" 200 OK
+[ 191] [2025-11-27 23:56:47] INFO:     172.31.62.150:12220 - "GET /healthz HTTP/1.1" 200 OK
+[ 192] [2025-11-27 23:56:47] INFO:     172.31.11.113:2542 - "GET /healthz HTTP/1.1" 200 OK
+[ 193] [2025-11-27 23:57:17] INFO:     172.31.41.136:23284 - "GET /healthz HTTP/1.1" 200 OK
+[ 194] [2025-11-27 23:57:17] INFO:     172.31.62.150:17264 - "GET /healthz HTTP/1.1" 200 OK
+[ 195] [2025-11-27 23:57:17] INFO:     172.31.11.113:2370 - "GET /healthz HTTP/1.1" 200 OK
+[ 196] [2025-11-27 23:57:18] time=2025-11-27 22:57:18,684 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 197] [2025-11-27 23:57:47] INFO:     172.31.41.136:49762 - "GET /healthz HTTP/1.1" 200 OK
+[ 198] [2025-11-27 23:57:47] INFO:     172.31.62.150:12026 - "GET /healthz HTTP/1.1" 200 OK
+[ 199] [2025-11-27 23:57:47] INFO:     172.31.11.113:25062 - "GET /healthz HTTP/1.1" 200 OK
+[ 200] [2025-11-27 23:58:17] INFO:     172.31.41.136:42256 - "GET /healthz HTTP/1.1" 200 OK
+[ 201] [2025-11-27 23:58:17] INFO:     172.31.62.150:47792 - "GET /healthz HTTP/1.1" 200 OK
+[ 202] [2025-11-27 23:58:17] INFO:     172.31.11.113:14428 - "GET /healthz HTTP/1.1" 200 OK
+[ 203] [2025-11-27 23:58:18] time=2025-11-27 22:58:18,795 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 204] [2025-11-27 23:58:47] INFO:     172.31.41.136:47026 - "GET /healthz HTTP/1.1" 200 OK
+[ 205] [2025-11-27 23:58:47] INFO:     172.31.62.150:8828 - "GET /healthz HTTP/1.1" 200 OK
+[ 206] [2025-11-27 23:58:47] INFO:     172.31.11.113:48206 - "GET /healthz HTTP/1.1" 200 OK
+[ 207] [2025-11-27 23:58:48] time=2025-11-27 22:58:48,132 level=INFO logger=listeners.app message=rpc_beta_check_call trace_id=6895c7ab-e060-467a-99cc-f08d2075c36d idemp_key=49726a63eaac5c340625212b96aceb16099a1e64b6791beda8671c6f47428580 email=None
+[ 208] [2025-11-27 23:58:48] time=2025-11-27 22:58:48,242 level=INFO logger=listeners.app message=rpc_beta_check_result trace_id=6895c7ab-e060-467a-99cc-f08d2075c36d email=None shape=['created_at', 'company_name', 'erp', 'country', 'email', 'updated_at', 'authorized_access', 'name', 'id'] authorized_access=True
+[ 209] [2025-11-27 23:58:48] INFO:     172.31.62.150:8842 - "POST /rpc HTTP/1.1" 200 OK
+[ 210] [2025-11-27 23:58:48] 🔍 Référence du document : users/4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 211] [2025-11-27 23:58:48] ✅ Le document pour l'utilisateur 4BHlZ7YMYMXicWIYRYsqEkXcnzL2 existe déjà.
+[ 212] [2025-11-27 23:58:48] INFO:     172.31.62.150:8856 - "POST /rpc HTTP/1.1" 200 OK
+[ 213] [2025-11-27 23:58:48] INFO:     172.31.62.150:8856 - "POST /rpc HTTP/1.1" 200 OK
+[ 214] [2025-11-27 23:58:48] Filtre sur le chemin: clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients
+[ 215] [2025-11-27 23:58:49] Workflow params not found for path: clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN/setup/workflow_params
+[ 216] [2025-11-27 23:58:49] INFO:     172.31.62.150:8842 - "POST /rpc HTTP/1.1" 200 OK
+[ 217] [2025-11-27 23:58:49] 🔗 Connexion ChromaDB: None:None
+[ 218] [2025-11-27 23:58:49] INFO:     172.31.62.150:8842 - "POST /rpc HTTP/1.1" 200 OK
+[ 219] [2025-11-27 23:58:49] time=2025-11-27 22:58:49,641 level=INFO logger=chromadb.telemetry.posthog message=Anonymized telemetry enabled. See https://docs.trychroma.com/telemetry for more information.
+[ 220] [2025-11-27 23:58:49] INFO:     172.31.62.150:8842 - "WebSocket /ws?uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2" [accepted]
+[ 221] [2025-11-27 23:58:49] time=2025-11-27 22:58:49,677 level=INFO logger=listeners.ws message=ws_connect uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 total=1
+[ 222] [2025-11-27 23:58:49] time=2025-11-27 22:58:49,678 level=INFO logger=listeners.app message=ws_register_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 223] [2025-11-27 23:58:49] time=2025-11-27 22:58:49,678 level=INFO logger=listeners.app message=force_user_watchers_test uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 224] [2025-11-27 23:58:49] time=2025-11-27 22:58:49,678 level=INFO logger=listeners.app message=force_user_watchers_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 225] [2025-11-27 23:58:49] INFO:     connection open
+[ 226] [2025-11-27 23:58:49] INFO:     172.31.62.150:8866 - "WebSocket /ws?uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2" [accepted]
+[ 227] [2025-11-27 23:58:49] time=2025-11-27 22:58:49,683 level=INFO logger=listeners.ws message=ws_connect uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 total=2
+[ 228] [2025-11-27 23:58:49] time=2025-11-27 22:58:49,683 level=INFO logger=listeners.app message=ws_register_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 229] [2025-11-27 23:58:49] time=2025-11-27 22:58:49,683 level=INFO logger=listeners.app message=force_user_watchers_test uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 230] [2025-11-27 23:58:49] time=2025-11-27 22:58:49,683 level=INFO logger=listeners.app message=force_user_watchers_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 231] [2025-11-27 23:58:49] INFO:     connection open
+[ 232] [2025-11-27 23:58:49] INFO:     172.31.62.150:8860 - "WebSocket /ws?uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2" [accepted]
+[ 233] [2025-11-27 23:58:49] time=2025-11-27 22:58:49,707 level=INFO logger=listeners.ws message=ws_connect uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 total=3
+[ 234] [2025-11-27 23:58:49] time=2025-11-27 22:58:49,707 level=INFO logger=listeners.app message=ws_register_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 235] [2025-11-27 23:58:49] time=2025-11-27 22:58:49,707 level=INFO logger=listeners.app message=force_user_watchers_test uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 236] [2025-11-27 23:58:49] time=2025-11-27 22:58:49,707 level=INFO logger=listeners.app message=force_user_watchers_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 237] [2025-11-27 23:58:49] time=2025-11-27 22:58:49,721 level=ERROR logger=chromadb.telemetry.posthog message=Failed to send telemetry event ClientStartEvent: capture() takes 1 positional argument but 3 were given
+[ 238] [2025-11-27 23:58:49] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 239] [2025-11-27 23:58:49] INFO:     connection open
+[ 240] [2025-11-27 23:58:49] ✅ ChromaDB connecté, heartbeat: 1764284329847715392
+[ 241] [2025-11-27 23:58:51] ✅ ChromaVectorService initialisé avec succès
+[ 242] [2025-11-27 23:58:51] 🔗 Enregistrement Chroma: utilisateur=4BHlZ7YMYMXicWIYRYsqEkXcnzL2, collection=klk_space_id_77a3bb
+[ 243] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,178 level=INFO logger=llm_service.manager message=[LLM_INIT] 📥 Requête initialize_session
+[ 244] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,179 level=INFO logger=llm_service.manager message=[LLM_INIT] Paramètres: user_id=4BHlZ7YMYMXicWIYRYsqEkXcnzL2, collection_name=klk_space_id_77a3bb, client_uuid=client_09683e99
+[ 245] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,183 level=INFO logger=llm_service.manager message=[LLM_INIT] ✅ Marqué comme 'initializing' dans Redis
+[ 246] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,183 level=INFO logger=llm_service.manager message=[LLM_INIT] 🚀 Lancement initialisation background pour 4BHlZ7YMYMXicWIYRYsqEkXcnzL2:klk_space_id_77a3bb
+[ 247] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,183 level=INFO logger=llm_service.manager message=[LLM_INIT] ⚡ Retour immédiat - initialisation en cours en background
+[ 248] [2025-11-27 23:58:52] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 249] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,185 level=INFO logger=llm_service.manager message=[LLM_INIT_BG] 🔄 Début initialisation background pour 4BHlZ7YMYMXicWIYRYsqEkXcnzL2:klk_space_id_77a3bb
+[ 250] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,185 level=INFO logger=llm_service.manager message=[SESSION_INIT] 📦 LLMSession créée: 4BHlZ7YMYMXicWIYRYsqEkXcnzL2:klk_space_id_77a3bb
+[ 251] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,186 level=INFO logger=llm_service.manager message=[LLM_INIT_BG] 📥 Chargement données session...
+[ 252] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,186 level=INFO logger=llm_service.manager message=[SESSION_DATA] 🔄 Chargement données permanentes pour session 4BHlZ7YMYMXicWIYRYsqEkXcnzL2:klk_space_id_77a3bb
+[ 253] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,187 level=INFO logger=llm_service.manager message=[SESSION_DATA] 🔍 Mode détecté: BACKEND
+[ 254] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,187 level=INFO logger=llm_service.manager message=[SESSION_DATA] ✅ client_uuid fourni: client_09683e99
+[ 255] [2025-11-27 23:58:52] INFO:     172.31.62.150:8856 - "POST /rpc HTTP/1.1" 200 OK
+[ 256] [2025-11-27 23:58:52] INFO:     172.31.62.150:8856 - "POST /rpc HTTP/1.1" 200 OK
+[ 257] [2025-11-27 23:58:52] 🔗 Enregistrement Chroma: utilisateur=4BHlZ7YMYMXicWIYRYsqEkXcnzL2, collection=klk_space_id_77a3bb
+[ 258] [2025-11-27 23:58:52] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 259] [2025-11-27 23:58:52] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 260] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,899 level=INFO logger=llm_service.manager message=[SESSION_DATA] 🔍 DEBUG workflow_params inclus dans session.user_context: True
+[ 261] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,899 level=INFO logger=llm_service.manager message=[SESSION_DATA] 🔍 DEBUG workflow_params clés: ['Apbookeeper_param', 'Router_param', 'Banker_param', 'function_table']
+[ 262] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,899 level=INFO logger=llm_service.manager message=[SESSION_DATA] 🔍 DEBUG Apbookeeper_param: approval_required=False, approval_contact_creation=False
+[ 263] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,899 level=INFO logger=llm_service.manager message=[SESSION_DATA] 🔍 DEBUG function_table disponible=False, services=[]
+[ 264] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,899 level=INFO logger=llm_service.manager message=[SESSION_DATA] ✅ Contexte utilisateur chargé - company=Katalog Sarl, mandate_path=clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN
+[ 265] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,932 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] ═══ DÉBUT Chargement jobs ═══
+[ 266] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,932 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] Mode: BACKEND | User: 4BHlZ7YMYMXicWIYRYsqEkXcnzL2 | Company: klk_space_id_77a3bb
+[ 267] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,932 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] Mode BACKEND → Appel direct aux sources (pas de cache)
+[ 268] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,932 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] Chargement APBookkeeper jobs...
+[ 269] [2025-11-27 23:58:52] time=2025-11-27 22:58:52,933 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] Fetch APBookkeeper depuis Firebase...
+[ 270] [2025-11-27 23:58:53] Total documents pending récupérés: 0
+[ 271] [2025-11-27 23:58:53] time=2025-11-27 22:58:53,252 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] APBookkeeper: 0 to_do, 0 in_process, 0 pending, 0 processed
+[ 272] [2025-11-27 23:58:53] time=2025-11-27 22:58:53,252 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] Chargement Router jobs...
+[ 273] [2025-11-27 23:58:53] time=2025-11-27 22:58:53,252 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] Fetch Router depuis Drive + Firebase...
+[ 274] [2025-11-27 23:58:53] ✅ DriveClientServiceSingleton initialisé en mode PROD
+[ 275] [2025-11-27 23:58:53] ✅ DriveClientServiceSingleton initialisé avec succès
+[ 276] [2025-11-27 23:58:53] time=2025-11-27 22:58:53,356 level=INFO logger=googleapiclient.discovery_cache message=file_cache is only supported with oauth2client<4.0.0
+[ 277] [2025-11-27 23:58:53] time=2025-11-27 22:58:53,365 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] Chargement Bank transactions...
+[ 278] [2025-11-27 23:58:53] time=2025-11-27 22:58:53,365 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] 🔍 DEBUG Bank ERP - mandate_bank_erp=odoo
+[ 279] [2025-11-27 23:58:53] time=2025-11-27 22:58:53,365 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] Fetch Bank depuis ERP Odoo...
+[ 280] [2025-11-27 23:58:53] time=2025-11-27 22:58:53,365 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] Récupération transactions bancaires via singleton ERPService...
+[ 281] [2025-11-27 23:58:53] time=2025-11-27 22:58:53,414 level=INFO logger=google_auth_httplib2 message=Refreshing credentials due to a 401 response. Attempt 1/2.
+[ 282] [2025-11-27 23:58:53] time=2025-11-27 22:58:53,818 level=INFO logger=app.erp_service message=🔍 [ERP] Cache miss, fetching credentials: 4BHlZ7YMYMXicWIYRYsqEkXcnzL2:klk_space_id_77a3bb:odoo
+[ 283] [2025-11-27 23:58:53] time=2025-11-27 22:58:53,818 level=INFO logger=app.erp_service message=✅ [ERP] client_uuid provided by caller: client_09683e99
+[ 284] [2025-11-27 23:58:54] time=2025-11-27 22:58:54,423 level=INFO logger=app.erp_service message=✅ [ERP] Credentials loaded from mandate - company=Katalog sàrl, url=https://katalog-sarl.odoo.com, db=katalog-sarl, username=francis.mahungu@klkvision.tech, secret_name=erp_secret-40ea7c1f-6909-445b-85e4-cabe951aa2f3
+[ 285] [2025-11-27 23:58:54] time=2025-11-27 22:58:54,423 level=INFO logger=app.erp_service message=🔄 [ERP] Creating new connection: 4BHlZ7YMYMXicWIYRYsqEkXcnzL2:klk_space_id_77a3bb:odoo
+[ 286] [2025-11-27 23:58:55] Version d'Odoo : saas~18.4.1.3
+[ 287] [2025-11-27 23:58:56] Tentative de recupération des informatinos sur la société:{'name': 'Katalog sàrl', 'id': 1}
+[ 288] [2025-11-27 23:58:57] time=2025-11-27 22:58:57,389 level=INFO logger=app.erp_service message=✅ [ERP] Connection cached: 4BHlZ7YMYMXicWIYRYsqEkXcnzL2:klk_space_id_77a3bb:odoo
+[ 289] [2025-11-27 23:58:57] time=2025-11-27 22:58:57,760 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] ✅ 22 transactions bancaires récupérées via singleton ERP (avec cache)
+[ 290] [2025-11-27 23:58:57] Aucun document trouvé avec job_id=580
+[ 291] [2025-11-27 23:58:57] Aucun document trouvé avec job_id=578
+[ 292] [2025-11-27 23:58:58] Aucun document trouvé avec job_id=454
+[ 293] [2025-11-27 23:58:58] Aucun document trouvé avec job_id=575
+[ 294] [2025-11-27 23:58:58] Aucun document trouvé avec job_id=577
+[ 295] [2025-11-27 23:58:58] Aucun document trouvé avec job_id=574
+[ 296] [2025-11-27 23:58:58] Aucun document trouvé avec job_id=573
+[ 297] [2025-11-27 23:58:58] Aucun document trouvé avec job_id=572
+[ 298] [2025-11-27 23:58:58] Aucun document trouvé avec job_id=570
+[ 299] [2025-11-27 23:58:58] Aucun document trouvé avec job_id=571
+[ 300] [2025-11-27 23:58:58] Aucun document trouvé avec job_id=569
+[ 301] [2025-11-27 23:58:58] Aucun document trouvé avec job_id=430
+[ 302] [2025-11-27 23:58:59] Aucun document trouvé avec job_id=568
+[ 303] [2025-11-27 23:58:59] Aucun document trouvé avec job_id=423
+[ 304] [2025-11-27 23:58:59] Aucun document trouvé avec job_id=421
+[ 305] [2025-11-27 23:58:59] Aucun document trouvé avec job_id=422
+[ 306] [2025-11-27 23:58:59] Aucun document trouvé avec job_id=420
+[ 307] [2025-11-27 23:58:59] Aucun document trouvé avec job_id=417
+[ 308] [2025-11-27 23:58:59] Aucun document trouvé avec job_id=415
+[ 309] [2025-11-27 23:58:59] Aucun document trouvé avec job_id=567
+[ 310] [2025-11-27 23:58:59] Aucun document trouvé avec job_id=413
+[ 311] [2025-11-27 23:58:59] Aucun document trouvé avec job_id=414
+[ 312] [2025-11-27 23:58:59] time=2025-11-27 22:58:59,993 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] Bank: 22 à réconcilier, 0 en cours, 0 pending, 2 comptes bancaires
+[ 313] [2025-11-27 23:59:00] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 314] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,105 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] Aucun fichier Router trouvé dans Drive
+[ 315] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,105 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] 🔍 DIAGNOSTIC AVANT assemblage - router_data type: <class 'dict'>, clés: ['unprocessed', 'in_process', 'processed']
+[ 316] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,105 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] 🔍 DIAGNOSTIC router_data.unprocessed - Type: <class 'list'>, Longueur: 0
+[ 317] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,105 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] 🔍 DIAGNOSTIC APRÈS assemblage - jobs_data['ROUTER'] type: <class 'dict'>, clés: ['unprocessed', 'in_process', 'processed']
+[ 318] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,105 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] 🔍 DIAGNOSTIC jobs_data['ROUTER']['unprocessed'] - Longueur: 0
+[ 319] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,105 level=INFO logger=pinnokio.job_loader message=[JOB_LOADER] ✅ Jobs chargés - AP: 0, Router: 0, Bank: 2 comptes
+[ 320] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,105 level=INFO logger=llm_service.manager message=[SESSION] 🔍 DIAGNOSTIC jobs_data - Clés: ['APBOOKEEPER', 'ROUTER', 'BANK']
+[ 321] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,105 level=INFO logger=llm_service.manager message=[SESSION] 🔍 DIAGNOSTIC ROUTER - Type: <class 'dict'>, Clés: ['unprocessed', 'in_process', 'processed']
+[ 322] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,105 level=INFO logger=llm_service.manager message=[SESSION] 🔍 DIAGNOSTIC ROUTER détails - to_process: 0, in_process: 0, processed: 0
+[ 323] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,105 level=WARNING logger=llm_service.manager message=[SESSION] ⚠️ DIAGNOSTIC ROUTER - Aucun document unprocessed !
+[ 324] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,105 level=INFO logger=llm_service.manager message=[SESSION] 🔍 DIAGNOSTIC jobs_metrics - ROUTER.to_process: 0
+[ 325] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,105 level=INFO logger=llm_service.manager message=[SESSION_DATA] ✅ Jobs chargés - APBookkeeper: 0 to_do, Router: 0 to_process, Bank: 0 to_reconcile
+[ 326] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,105 level=INFO logger=llm_service.manager message=[SESSION_DATA] 🎉 Données session initialisées (SANS brain - créés par chat)
+[ 327] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,105 level=INFO logger=llm_service.manager message=[LLM_INIT_BG] ✅ Données session initialisées
+[ 328] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,105 level=INFO logger=llm_service.manager message=[LLM_INIT_BG] 💾 Session stockée en cache mémoire
+[ 329] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,107 level=INFO logger=llm_service.manager message=[LLM_INIT_BG] ✅ Redis marqué comme 'ready'
+[ 330] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,107 level=INFO logger=listeners.ws message=ws_broadcast uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=llm.initialization_complete channel= connections=3
+[ 331] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,107 level=INFO logger=llm_service.manager message=[LLM_INIT_BG] 📡 Événement 'llm.initialization_complete' publié
+[ 332] [2025-11-27 23:59:00] INFO:     172.31.62.150:39866 - "POST /rpc HTTP/1.1" 200 OK
+[ 333] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,505 level=INFO logger=llm_service.manager message=[LLM_INIT] 📥 Requête initialize_session
+[ 334] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,505 level=INFO logger=llm_service.manager message=[LLM_INIT] Paramètres: user_id=4BHlZ7YMYMXicWIYRYsqEkXcnzL2, collection_name=klk_space_id_77a3bb, client_uuid=client_09683e99
+[ 335] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,506 level=INFO logger=llm_service.manager message=[LLM_INIT] ✅ Session déjà initialisée (Redis + Mémoire): 4BHlZ7YMYMXicWIYRYsqEkXcnzL2:klk_space_id_77a3bb
+[ 336] [2025-11-27 23:59:00] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 337] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,599 level=INFO logger=llm_service.manager message=[LLM_INIT] 📥 Requête initialize_session
+[ 338] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,599 level=INFO logger=llm_service.manager message=[LLM_INIT] Paramètres: user_id=4BHlZ7YMYMXicWIYRYsqEkXcnzL2, collection_name=klk_space_id_77a3bb, client_uuid=client_09683e99
+[ 339] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,600 level=INFO logger=llm_service.manager message=[LLM_INIT] ✅ Session déjà initialisée (Redis + Mémoire): 4BHlZ7YMYMXicWIYRYsqEkXcnzL2:klk_space_id_77a3bb
+[ 340] [2025-11-27 23:59:00] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 341] [2025-11-27 23:59:00] time=2025-11-27 22:59:00,693 level=INFO logger=app.erp_service message=✅ [ERP] Cache hit: 4BHlZ7YMYMXicWIYRYsqEkXcnzL2:klk_space_id_77a3bb:odoo
+[ 342] [2025-11-27 23:59:01] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 343] [2025-11-27 23:59:01] Récupéré 0 notifications bancaires actives pour la collection klk_space_id_77a3bb
+[ 344] [2025-11-27 23:59:01] Enrichi 0 lots bancaires avec les données de task_manager pour la collection klk_space_id_77a3bb
+[ 345] [2025-11-27 23:59:01] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 346] [2025-11-27 23:59:01] impression de contact_space_id:clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN
+[ 347] [2025-11-27 23:59:01] Base path pour working_doc: clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN/working_doc
+[ 348] [2025-11-27 23:59:01] Document 'pending_item_docsheet' déjà existant.
+[ 349] [2025-11-27 23:59:01] Document 'pending_item_docsheet' récupéré pour clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN.
+[ 350] [2025-11-27 23:59:01] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 351] [2025-11-27 23:59:02] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 352] [2025-11-27 23:59:02] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 353] [2025-11-27 23:59:02] 🔍 analyze_storage_full appelé avec collection_name: 'klk_space_id_77a3bb', max_storage: 10.0 GB
+[ 354] [2025-11-27 23:59:02] 🔍 analyze_collection appelé avec collection_name: 'klk_space_id_77a3bb'
+[ 355] [2025-11-27 23:59:02] ✅ analyze_storage_full résultat: {'success': True, 'data': {'storage_size_gb': 0.0, 'storage_percentage': 0, 'storage_details': 'Total amount of documents: 0\nembeddings: 0 B (0.0%)\ndocuments: 0 B (0.0%)\nmetadata: 0 B (0.0%)'}}
+[ 356] [2025-11-27 23:59:02] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 357] [2025-11-27 23:59:02] time=2025-11-27 22:59:02,736 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches listées pour clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN
+[ 358] [2025-11-27 23:59:02] INFO:     172.31.62.150:39866 - "POST /rpc HTTP/1.1" 200 OK
+[ 359] [2025-11-27 23:59:02] 📚 [FIREBASE] Récupération des expenses depuis: clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN/working_doc/expenses_details
+[ 360] [2025-11-27 23:59:02] ⚠️ [FIREBASE] Document working_doc n'existe pas: clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN/working_doc/expenses_details
+[ 361] [2025-11-27 23:59:02] INFO:     172.31.62.150:39866 - "POST /rpc HTTP/1.1" 200 OK
+[ 362] [2025-11-27 23:59:03] INFO:     172.31.62.150:39866 - "POST /rpc HTTP/1.1" 200 OK
+[ 363] [2025-11-27 23:59:03] Total documents pending récupérés: 0
+[ 364] [2025-11-27 23:59:03] INFO:     172.31.62.150:39866 - "POST /rpc HTTP/1.1" 200 OK
+[ 365] [2025-11-27 23:59:03] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 366] [2025-11-27 23:59:03] 🔍 analyze_storage_full appelé avec collection_name: 'klk_space_id_77a3bb', max_storage: 10.0 GB
+[ 367] [2025-11-27 23:59:03] 🔍 analyze_collection appelé avec collection_name: 'klk_space_id_77a3bb'
+[ 368] [2025-11-27 23:59:03] ✅ analyze_storage_full résultat: {'success': True, 'data': {'storage_size_gb': 0.0, 'storage_percentage': 0, 'storage_details': 'Total amount of documents: 0\nembeddings: 0 B (0.0%)\ndocuments: 0 B (0.0%)\nmetadata: 0 B (0.0%)'}}
+[ 369] [2025-11-27 23:59:03] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 370] [2025-11-27 23:59:03] time=2025-11-27 22:59:03,507 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches listées pour clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN
+[ 371] [2025-11-27 23:59:03] INFO:     172.31.62.150:39866 - "POST /rpc HTTP/1.1" 200 OK
+[ 372] [2025-11-27 23:59:03] 📚 [FIREBASE] Récupération des expenses depuis: clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN/working_doc/expenses_details
+[ 373] [2025-11-27 23:59:03] ⚠️ [FIREBASE] Document working_doc n'existe pas: clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN/working_doc/expenses_details
+[ 374] [2025-11-27 23:59:03] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 375] [2025-11-27 23:59:03] INFO:     172.31.62.150:39866 - "POST /rpc HTTP/1.1" 200 OK
+[ 376] [2025-11-27 23:59:03] Total documents pending récupérés: 0
+[ 377] [2025-11-27 23:59:03] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 378] [2025-11-27 23:59:03] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 379] [2025-11-27 23:59:04] time=2025-11-27 22:59:04,084 level=INFO logger=googleapiclient.discovery_cache message=file_cache is only supported with oauth2client<4.0.0
+[ 380] [2025-11-27 23:59:04] time=2025-11-27 22:59:04,126 level=INFO logger=google_auth_httplib2 message=Refreshing credentials due to a 401 response. Attempt 1/2.
+[ 381] [2025-11-27 23:59:04] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 382] [2025-11-27 23:59:04] Total documents récupérés: 0
+[ 383] [2025-11-27 23:59:04] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 384] [2025-11-27 23:59:04] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 385] [2025-11-27 23:59:05] INFO:     172.31.62.150:39866 - "POST /rpc HTTP/1.1" 200 OK
+[ 386] [2025-11-27 23:59:05] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 387] [2025-11-27 23:59:05] INFO:     172.31.62.150:39866 - "POST /rpc HTTP/1.1" 200 OK
+[ 388] [2025-11-27 23:59:05] time=2025-11-27 22:59:05,491 level=INFO logger=googleapiclient.discovery_cache message=file_cache is only supported with oauth2client<4.0.0
+[ 389] [2025-11-27 23:59:05] time=2025-11-27 22:59:05,534 level=INFO logger=google_auth_httplib2 message=Refreshing credentials due to a 401 response. Attempt 1/2.
+[ 390] [2025-11-27 23:59:05] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 391] [2025-11-27 23:59:05] Total documents récupérés: 0
+[ 392] [2025-11-27 23:59:05] INFO:     172.31.62.150:39866 - "POST /rpc HTTP/1.1" 200 OK
+[ 393] [2025-11-27 23:59:07] INFO:     172.31.62.150:39866 - "POST /rpc HTTP/1.1" 200 OK
+[ 394] [2025-11-27 23:59:08] Document à 'clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/notifications/onboarding_e3153c0e43474e4aaf' mis à jour avec succès.
+[ 395] [2025-11-27 23:59:08] INFO:     172.31.62.150:39866 - "POST /rpc HTTP/1.1" 200 OK
+[ 396] [2025-11-27 23:59:08] time=2025-11-27 22:59:08,564 level=INFO logger=listeners.manager message=notifications_change_triggered uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 changes_count=1
+[ 397] [2025-11-27 23:59:08] time=2025-11-27 22:59:08,564 level=INFO logger=listeners.manager message=notification_change uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 doc_id=onboarding_e3153c0e43474e4aaf type=REMOVED
+[ 398] [2025-11-27 23:59:08] time=2025-11-27 22:59:08,565 level=INFO logger=listeners.manager message=notifications_resync_start uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 399] [2025-11-27 23:59:08] time=2025-11-27 22:59:08,775 level=INFO logger=listeners.manager message=publish type=notif.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 400] [2025-11-27 23:59:08] time=2025-11-27 22:59:08,775 level=INFO logger=listeners.manager message=notif_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=3 sample_ids=['onboarding_e9d0821f8d5340a5ae', 'onboarding_5224fb7ef2764ffaa3', 'onboarding_45c9bc87cd7143e598']
+[ 401] [2025-11-27 23:59:08] time=2025-11-27 22:59:08,775 level=INFO logger=listeners.manager message=notifications_resync_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 402] [2025-11-27 23:59:08] time=2025-11-27 22:59:08,776 level=INFO logger=listeners.ws message=ws_broadcast uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=notif.sync channel= connections=3
+[ 403] [2025-11-27 23:59:09] Document à 'clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/notifications/onboarding_e9d0821f8d5340a5ae' mis à jour avec succès.
+[ 404] [2025-11-27 23:59:09] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 405] [2025-11-27 23:59:09] time=2025-11-27 22:59:09,397 level=INFO logger=listeners.manager message=notifications_change_triggered uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 changes_count=1
+[ 406] [2025-11-27 23:59:09] time=2025-11-27 22:59:09,397 level=INFO logger=listeners.manager message=notification_change uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 doc_id=onboarding_e9d0821f8d5340a5ae type=REMOVED
+[ 407] [2025-11-27 23:59:09] time=2025-11-27 22:59:09,397 level=INFO logger=listeners.manager message=notifications_resync_start uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 408] [2025-11-27 23:59:09] time=2025-11-27 22:59:09,604 level=INFO logger=listeners.manager message=publish type=notif.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 409] [2025-11-27 23:59:09] time=2025-11-27 22:59:09,604 level=INFO logger=listeners.manager message=notif_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=2 sample_ids=['onboarding_5224fb7ef2764ffaa3', 'onboarding_45c9bc87cd7143e598']
+[ 410] [2025-11-27 23:59:09] time=2025-11-27 22:59:09,604 level=INFO logger=listeners.manager message=notifications_resync_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 411] [2025-11-27 23:59:09] time=2025-11-27 22:59:09,605 level=INFO logger=listeners.ws message=ws_broadcast uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=notif.sync channel= connections=3
+[ 412] [2025-11-27 23:59:10] Document à 'clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/notifications/onboarding_5224fb7ef2764ffaa3' mis à jour avec succès.
+[ 413] [2025-11-27 23:59:10] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 414] [2025-11-27 23:59:10] time=2025-11-27 22:59:10,628 level=INFO logger=listeners.manager message=notifications_change_triggered uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 changes_count=1
+[ 415] [2025-11-27 23:59:10] time=2025-11-27 22:59:10,628 level=INFO logger=listeners.manager message=notification_change uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 doc_id=onboarding_5224fb7ef2764ffaa3 type=REMOVED
+[ 416] [2025-11-27 23:59:10] time=2025-11-27 22:59:10,628 level=INFO logger=listeners.manager message=notifications_resync_start uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 417] [2025-11-27 23:59:10] time=2025-11-27 22:59:10,834 level=INFO logger=listeners.manager message=publish type=notif.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 418] [2025-11-27 23:59:10] time=2025-11-27 22:59:10,834 level=INFO logger=listeners.manager message=notif_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=1 sample_ids=['onboarding_45c9bc87cd7143e598']
+[ 419] [2025-11-27 23:59:10] time=2025-11-27 22:59:10,834 level=INFO logger=listeners.manager message=notifications_resync_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 420] [2025-11-27 23:59:10] time=2025-11-27 22:59:10,835 level=INFO logger=listeners.ws message=ws_broadcast uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=notif.sync channel= connections=3
+[ 421] [2025-11-27 23:59:11] Document à 'clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/notifications/onboarding_45c9bc87cd7143e598' mis à jour avec succès.
+[ 422] [2025-11-27 23:59:11] INFO:     172.31.62.150:8880 - "POST /rpc HTTP/1.1" 200 OK
+[ 423] [2025-11-27 23:59:11] time=2025-11-27 22:59:11,771 level=INFO logger=listeners.manager message=notifications_change_triggered uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 changes_count=1
+[ 424] [2025-11-27 23:59:11] time=2025-11-27 22:59:11,771 level=INFO logger=listeners.manager message=notification_change uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 doc_id=onboarding_45c9bc87cd7143e598 type=REMOVED
+[ 425] [2025-11-27 23:59:11] time=2025-11-27 22:59:11,771 level=INFO logger=listeners.manager message=notifications_resync_start uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 426] [2025-11-27 23:59:11] time=2025-11-27 22:59:11,978 level=INFO logger=listeners.manager message=publish type=notif.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 427] [2025-11-27 23:59:11] time=2025-11-27 22:59:11,979 level=INFO logger=listeners.manager message=notif_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=0 sample_ids=[]
+[ 428] [2025-11-27 23:59:11] time=2025-11-27 22:59:11,979 level=INFO logger=listeners.manager message=notifications_resync_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 429] [2025-11-27 23:59:11] time=2025-11-27 22:59:11,979 level=INFO logger=listeners.ws message=ws_broadcast uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=notif.sync channel= connections=3
+[ 430] [2025-11-27 23:59:17] INFO:     172.31.41.136:55768 - "GET /healthz HTTP/1.1" 200 OK
+[ 431] [2025-11-27 23:59:17] INFO:     172.31.62.150:25232 - "GET /healthz HTTP/1.1" 200 OK
+[ 432] [2025-11-27 23:59:17] INFO:     172.31.11.113:38950 - "GET /healthz HTTP/1.1" 200 OK
+[ 433] [2025-11-27 23:59:18] Chargement du mandat depuis: clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN
+[ 434] [2025-11-27 23:59:18] Chemin vers workflow: clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN/setup/workflow_params
+[ 435] [2025-11-27 23:59:18] Workflow params not found for path: clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN/setup/workflow_params
+[ 436] [2025-11-27 23:59:19] Mandat chargé avec succès: Katalog Sarl
+[ 437] [2025-11-27 23:59:19] INFO:     172.31.62.150:25234 - "POST /rpc HTTP/1.1" 200 OK
+[ 438] [2025-11-27 23:59:19] time=2025-11-27 22:59:19,186 level=INFO logger=app.firebase_providers message=[TASKS] 0 tâches prêtes pour exécution
+[ 439] [2025-11-27 23:59:19] INFO:     172.31.62.150:25234 - "POST /rpc HTTP/1.1" 200 OK
+[ 440] [2025-11-27 23:59:19] INFO:     172.31.62.150:25238 - "POST /rpc HTTP/1.1" 200 OK
+[ 441] [2025-11-27 23:59:19] ✅ Données erp récupérées: 9 éléments
+[ 442] [2025-11-27 23:59:19] INFO:     172.31.62.150:25234 - "POST /rpc HTTP/1.1" 200 OK
+[ 443] [2025-11-27 23:59:19] INFO:     172.31.62.150:25246 - "POST /rpc HTTP/1.1" 200 OK
+[ 444] [2025-11-27 23:59:19] INFO:     172.31.62.150:25256 - "POST /rpc HTTP/1.1" 200 OK
+[ 445] [2025-11-27 23:59:19] Le document n'existe pas, tentative de création du document
+[ 446] [2025-11-27 23:59:20] Document créé avec succès: clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN/setup/function_table
+[ 447] [2025-11-27 23:59:20] INFO:     172.31.62.150:25238 - "POST /rpc HTTP/1.1" 200 OK
+[ 448] [2025-11-27 23:59:20] ✅ Données dms récupérées: 4 éléments
+[ 449] [2025-11-27 23:59:20] INFO:     172.31.62.150:25258 - "POST /rpc HTTP/1.1" 200 OK
+[ 450] [2025-11-27 23:59:20] ✅ 0 utilisateurs Telegram trouvés
+[ 451] [2025-11-27 23:59:20] INFO:     172.31.62.150:25270 - "POST /rpc HTTP/1.1" 200 OK
+[ 452] [2025-11-27 23:59:20] INFO:     172.31.62.150:25280 - "POST /rpc HTTP/1.1" 200 OK
+[ 453] [2025-11-27 23:59:20] INFO:     172.31.62.150:25258 - "POST /rpc HTTP/1.1" 200 OK
+[ 454] [2025-11-27 23:59:20] ✅ Données chat récupérées: 5 éléments
+[ 455] [2025-11-27 23:59:20] INFO:     172.31.62.150:25294 - "POST /rpc HTTP/1.1" 200 OK
+[ 456] [2025-11-27 23:59:20] ✅ Données communication récupérées: 3 éléments
+[ 457] [2025-11-27 23:59:20] INFO:     172.31.62.150:25308 - "POST /rpc HTTP/1.1" 200 OK
+[ 458] [2025-11-27 23:59:20] INFO:     172.31.62.150:25322 - "POST /rpc HTTP/1.1" 200 OK
+[ 459] [2025-11-27 23:59:21] INFO:     172.31.62.150:25258 - "POST /rpc HTTP/1.1" 200 OK
+[ 460] [2025-11-27 23:59:21] INFO:     172.31.62.150:25258 - "POST /rpc HTTP/1.1" 200 OK
+[ 461] [2025-11-27 23:59:24] Chargement du mandat depuis: clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN
+[ 462] [2025-11-27 23:59:24] Chemin vers workflow: clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN/setup/workflow_params
+[ 463] [2025-11-27 23:59:25] Workflow params not found for path: clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/bo_clients/4BHlZ7YMYMXicWIYRYsqEkXcnzL2/mandates/34wW3drQibD9jYslV5KN/setup/workflow_params
+[ 464] [2025-11-27 23:59:25] Mandat chargé avec succès: Katalog Sarl
+[ 465] [2025-11-27 23:59:25] INFO:     172.31.62.150:25238 - "POST /rpc HTTP/1.1" 200 OK
+[ 466] [2025-11-27 23:59:25] time=2025-11-27 22:59:25,620 level=INFO logger=llm_service.manager message=[LLM_INIT] 📥 Requête initialize_session
+[ 467] [2025-11-27 23:59:25] time=2025-11-27 22:59:25,620 level=INFO logger=llm_service.manager message=[LLM_INIT] Paramètres: user_id=4BHlZ7YMYMXicWIYRYsqEkXcnzL2, collection_name=klk_space_id_77a3bb, client_uuid=client_09683e99
+[ 468] [2025-11-27 23:59:25] time=2025-11-27 22:59:25,621 level=INFO logger=llm_service.manager message=[LLM_INIT] ✅ Session déjà initialisée (Redis + Mémoire): 4BHlZ7YMYMXicWIYRYsqEkXcnzL2:klk_space_id_77a3bb
+[ 469] [2025-11-27 23:59:25] INFO:     172.31.62.150:25258 - "POST /rpc HTTP/1.1" 200 OK
+[ 470] [2025-11-27 23:59:25] INFO:     172.31.62.150:25258 - "POST /rpc HTTP/1.1" 200 OK
+[ 471] [2025-11-27 23:59:26] time=2025-11-27 22:59:26,096 level=WARNING logger=listeners.app message=🔴 ws_disconnect uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 code=1000 reason= type=normal_closure
+[ 472] [2025-11-27 23:59:26] time=2025-11-27 22:59:26,097 level=INFO logger=listeners.ws message=ws_disconnect uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 total=2
+[ 473] [2025-11-27 23:59:26] INFO:     connection closed
+[ 474] [2025-11-27 23:59:26] INFO:     172.31.62.150:25238 - "POST /rpc HTTP/1.1" 200 OK
+[ 475] [2025-11-27 23:59:26] 📚 [FIREBASE] Récupération des expenses depuis: /working_doc/expenses_details
+[ 476] [2025-11-27 23:59:26] ❌ [FIREBASE] Erreur lors de la récupération des expenses: A document must have an even number of path elements
+[ 477] [2025-11-27 23:59:26] Traceback (most recent call last):
+[ 478] [2025-11-27 23:59:26]   File "/app/app/firebase_providers.py", line 1826, in fetch_expenses_by_mandate
+[ 479] [2025-11-27 23:59:26]     doc_ref = self.db.document(expenses_doc_path)
+[ 480] [2025-11-27 23:59:26]   File "/usr/local/lib/python3.10/site-packages/google/cloud/firestore_v1/client.py", line 197, in document
+[ 481] [2025-11-27 23:59:26]     return DocumentReference(
+[ 482] [2025-11-27 23:59:26]   File "/usr/local/lib/python3.10/site-packages/google/cloud/firestore_v1/document.py", line 64, in __init__
+[ 483] [2025-11-27 23:59:26]     super(DocumentReference, self).__init__(*path, **kwargs)
+[ 484] [2025-11-27 23:59:26]   File "/usr/local/lib/python3.10/site-packages/google/cloud/firestore_v1/base_document.py", line 69, in __init__
+[ 485] [2025-11-27 23:59:26]     _helpers.verify_path(path, is_collection=False)
+[ 486] [2025-11-27 23:59:26]   File "/usr/local/lib/python3.10/site-packages/google/cloud/firestore_v1/_helpers.py", line 153, in verify_path
+[ 487] [2025-11-27 23:59:26]     raise ValueError("A document must have an even number of path elements")
+[ 488] [2025-11-27 23:59:26] ValueError: A document must have an even number of path elements
+[ 489] [2025-11-27 23:59:26] INFO:     172.31.62.150:25258 - "POST /rpc HTTP/1.1" 200 OK
+[ 490] [2025-11-27 23:59:26] time=2025-11-27 22:59:26,130 level=WARNING logger=listeners.app message=🔴 ws_disconnect uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 code=1000 reason= type=normal_closure
+[ 491] [2025-11-27 23:59:26] time=2025-11-27 22:59:26,131 level=INFO logger=listeners.ws message=ws_disconnect uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 total=1
+[ 492] [2025-11-27 23:59:26] INFO:     connection closed
+[ 493] [2025-11-27 23:59:26] time=2025-11-27 22:59:26,216 level=INFO logger=listeners.manager message=registry_detach_trigger uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 reason=offline_or_expired
+[ 494] [2025-11-27 23:59:26] time=2025-11-27 22:59:26,216 level=INFO logger=listeners.manager message=user_detach_scheduled uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 reason=offline_or_expired listeners=2 workflow=0
+[ 495] [2025-11-27 23:59:26] time=2025-11-27 22:59:26,216 level=INFO logger=listeners.manager message=⏰ user_detach_delay_start uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 reason=offline_or_expired delay=5s
+[ 496] [2025-11-27 23:59:26] INFO:     172.31.62.150:25238 - "POST /rpc HTTP/1.1" 200 OK
+[ 497] [2025-11-27 23:59:26] time=2025-11-27 22:59:26,252 level=INFO logger=listeners.app message=🟡 ws_cleanup_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 498] [2025-11-27 23:59:26] time=2025-11-27 22:59:26,252 level=INFO logger=listeners.app message=🟡 ws_cleanup_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 499] [2025-11-27 23:59:26] time=2025-11-27 22:59:26,257 level=INFO logger=listeners.manager message=registry_detach_trigger uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 reason=offline_or_expired
+[ 500] [2025-11-27 23:59:26] Total documents pending récupérés: 0
+[ 501] [2025-11-27 23:59:26] INFO:     172.31.62.150:25258 - "POST /rpc HTTP/1.1" 200 OK
+[ 502] [2025-11-27 23:59:26] INFO:     172.31.62.150:25238 - "POST /rpc HTTP/1.1" 200 OK
+[ 503] [2025-11-27 23:59:26] time=2025-11-27 22:59:26,476 level=WARNING logger=listeners.app message=🔴 ws_disconnect uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 code=1000 reason= type=normal_closure
+[ 504] [2025-11-27 23:59:26] time=2025-11-27 22:59:26,476 level=INFO logger=listeners.ws message=ws_disconnect uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 total=0
+[ 505] [2025-11-27 23:59:26] INFO:     connection closed
+[ 506] [2025-11-27 23:59:26] Could not extract user_id from mandate_path
+[ 507] [2025-11-27 23:59:26] INFO:     172.31.62.150:25238 - "POST /rpc HTTP/1.1" 200 OK
+[ 508] [2025-11-27 23:59:26] time=2025-11-27 22:59:26,554 level=ERROR logger=listeners.app message=rpc_error code=INVALID_ARGS method=DMS.list_files_in_doc_to_do dt_ms=0 trace_id=0a0a803a-828d-46cc-b95b-f161392947a8 msg=DriveClientServiceSingleton.list_files_in_doc_to_do() missing 1 required positional argument: 'input_drive_doc_id'
+[ 509] [2025-11-27 23:59:26] INFO:     172.31.62.150:25258 - "POST /rpc HTTP/1.1" 200 OK
+[ 510] [2025-11-27 23:59:26] time=2025-11-27 22:59:26,591 level=INFO logger=listeners.manager message=registry_detach_trigger uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 reason=offline_or_expired
+[ 511] [2025-11-27 23:59:26] Total documents récupérés: 0
+[ 512] [2025-11-27 23:59:26] INFO:     172.31.62.150:25258 - "POST /rpc HTTP/1.1" 200 OK
+[ 513] [2025-11-27 23:59:26] time=2025-11-27 22:59:26,665 level=INFO logger=listeners.app message=🟡 ws_cleanup_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 514] [2025-11-27 23:59:26] INFO:     172.31.62.150:25258 - "POST /rpc HTTP/1.1" 200 OK
+[ 515] [2025-11-27 23:59:26] time=2025-11-27 22:59:26,937 level=INFO logger=app.erp_service message=🔍 [ERP] Cache miss, fetching credentials: :None:odoo
+[ 516] [2025-11-27 23:59:27] time=2025-11-27 22:59:27,042 level=ERROR logger=app.erp_service message=❌ [ERP] Error getting credentials: 400 Document name "projects/pinnokio-gpt/databases/(default)/documents/clients//bo_clients/" lacks a resource id at index 60. exc_info=Traceback (most recent call last):
+[ 517] [2025-11-27 23:59:27]   File "/app/app/erp_service.py", line 101, in _get_erp_credentials
+[ 518] [2025-11-27 23:59:27]     doc = doc_ref.get()
+[ 519] [2025-11-27 23:59:27]   File "/usr/local/lib/python3.10/site-packages/google/cloud/firestore_v1/document.py", line 403, in get
+[ 520] [2025-11-27 23:59:27]     response_iter = self._client._firestore_api.batch_get_documents(
+[ 521] [2025-11-27 23:59:27]   File "/usr/local/lib/python3.10/site-packages/google/cloud/firestore_v1/services/firestore/client.py", line 1203, in batch_get_documents
+[ 522] [2025-11-27 23:59:27]     response = rpc(
+[ 523] [2025-11-27 23:59:27]   File "/usr/local/lib/python3.10/site-packages/google/api_core/gapic_v1/method.py", line 131, in __call__
+[ 524] [2025-11-27 23:59:27]     return wrapped_func(*args, **kwargs)
+[ 525] [2025-11-27 23:59:27]   File "/usr/local/lib/python3.10/site-packages/google/api_core/retry/retry_unary.py", line 293, in retry_wrapped_func
+[ 526] [2025-11-27 23:59:27]     return retry_target(
+[ 527] [2025-11-27 23:59:27]   File "/usr/local/lib/python3.10/site-packages/google/api_core/retry/retry_unary.py", line 153, in retry_target
+[ 528] [2025-11-27 23:59:27]     _retry_error_helper(
+[ 529] [2025-11-27 23:59:27]   File "/usr/local/lib/python3.10/site-packages/google/api_core/retry/retry_base.py", line 212, in _retry_error_helper
+[ 530] [2025-11-27 23:59:27]     raise final_exc from source_exc
+[ 531] [2025-11-27 23:59:27]   File "/usr/local/lib/python3.10/site-packages/google/api_core/retry/retry_unary.py", line 144, in retry_target
+[ 532] [2025-11-27 23:59:27]     result = target()
+[ 533] [2025-11-27 23:59:27]   File "/usr/local/lib/python3.10/site-packages/google/api_core/timeout.py", line 120, in func_with_timeout
+[ 534] [2025-11-27 23:59:27]     return func(*args, **kwargs)
+[ 535] [2025-11-27 23:59:27]   File "/usr/local/lib/python3.10/site-packages/google/api_core/grpc_helpers.py", line 174, in error_remapped_callable
+[ 536] [2025-11-27 23:59:27]     raise exceptions.from_grpc_error(exc) from exc
+[ 537] [2025-11-27 23:59:27] google.api_core.exceptions.InvalidArgument: 400 Document name "projects/pinnokio-gpt/databases/(default)/documents/clients//bo_clients/" lacks a resource id at index 60.
+[ 538] [2025-11-27 23:59:27] INFO:     172.31.62.150:25238 - "POST /rpc HTTP/1.1" 200 OK
+[ 539] [2025-11-27 23:59:27] time=2025-11-27 22:59:27,044 level=ERROR logger=listeners.app message=rpc_error code=INTERNAL method=ERP.get_odoo_bank_statement_move_line_not_rec dt_ms=107 trace_id=59ae1615-007e-4b6f-93a0-9a2d30188f07 error=Exception('Failed to connect to ERP')
+[ 540] [2025-11-27 23:59:27] Erreur: L'ID utilisateur est requis pour accéder aux notifications
+[ 541] [2025-11-27 23:59:27] INFO:     172.31.62.150:25238 - "POST /rpc HTTP/1.1" 200 OK
+[ 542] [2025-11-27 23:59:31] time=2025-11-27 22:59:31,220 level=INFO logger=listeners.manager message=🧹 user_detach_executing uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 reason=offline_or_expired (no reconnection detected)
+[ 543] [2025-11-27 23:59:40] time=2025-11-27 22:59:40,955 level=INFO logger=listeners.manager message=user_attach_start uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 544] [2025-11-27 23:59:40] time=2025-11-27 22:59:40,955 level=INFO logger=listeners.manager message=user_attach_firebase_query uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 545] [2025-11-27 23:59:40] time=2025-11-27 22:59:40,955 level=INFO logger=listeners.manager message=user_attach_firebase_listener uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 546] [2025-11-27 23:59:40] time=2025-11-27 22:59:40,956 level=INFO logger=listeners.manager message=user_attach_notification_listener_attached uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 547] [2025-11-27 23:59:40] time=2025-11-27 22:59:40,956 level=INFO logger=listeners.manager message=user_attach_publish_sync_notifications uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 548] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,163 level=INFO logger=listeners.manager message=publish type=notif.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 549] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,164 level=INFO logger=listeners.manager message=notif_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=0 sample_ids=[]
+[ 550] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,164 level=INFO logger=listeners.manager message=user_attach_rtdb_messages uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 551] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,369 level=INFO logger=listeners.manager message=user_attach_message_listener_attached uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 552] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,550 level=INFO logger=listeners.manager message=notifications_change_triggered uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 changes_count=0
+[ 553] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,550 level=INFO logger=listeners.manager message=notifications_resync_start uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 554] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,579 level=INFO logger=listeners.manager message=publish type=msg.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 555] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,579 level=INFO logger=listeners.manager message=msg_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=0 sample_ids=[]
+[ 556] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,679 level=INFO logger=listeners.manager message=publish type=msg.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 557] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,679 level=INFO logger=listeners.manager message=msg_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=0 sample_ids=[]
+[ 558] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,679 level=INFO logger=listeners.manager message=user_attach_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 listeners_count=2
+[ 559] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,680 level=INFO logger=listeners.manager message=🔵 REGISTRY_START enregistrement des listeners pour uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 560] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,680 level=INFO logger=listeners.manager message=🔵 REGISTRY_INSTANCE récupérée pour uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 561] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,758 level=INFO logger=listeners.manager message=publish type=notif.sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 channel=user:4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 562] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,758 level=INFO logger=listeners.manager message=notif_sync uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 count=0 sample_ids=[]
+[ 563] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,759 level=INFO logger=listeners.manager message=notifications_resync_complete uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2
+[ 564] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,780 level=WARNING logger=registry.listeners message=listener_already_exists uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=notif space=None thread=None
+[ 565] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,781 level=INFO logger=listeners.manager message=🔵 REGISTRY_NOTIF uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 success=False
+[ 566] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,884 level=WARNING logger=registry.listeners message=listener_already_exists uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 type=msg space=None thread=None
+[ 567] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,884 level=INFO logger=listeners.manager message=🔵 REGISTRY_MSG uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 success=False
+[ 568] [2025-11-27 23:59:41] time=2025-11-27 22:59:41,884 level=INFO logger=listeners.manager message=🟢 REGISTRY_COMPLETE uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 enregistrement terminé
+[ 569] [2025-11-27 23:59:47] time=2025-11-27 22:59:47,185 level=INFO logger=listeners.manager message=🔵 REGISTRY_CLEANUP_START nettoyage pour uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 reason=offline_or_expired
+[ 570] [2025-11-27 23:59:47] time=2025-11-27 22:59:47,291 level=INFO logger=listeners.manager message=🟢 REGISTRY_CLEANUP_SUCCESS uid=4BHlZ7YMYMXicWIYRYsqEkXcnzL2 cleaned=0
+[ 571] [2025-11-27 23:59:47] INFO:     172.31.41.136:12724 - "GET /healthz HTTP/1.1" 200 OK
+[ 572] [2025-11-27 23:59:47] INFO:     172.31.62.150:58508 - "GET /healthz HTTP/1.1" 200 OK
+[ 573] [2025-11-27 23:59:47] INFO:     172.31.11.113:17114 - "GET /healthz HTTP/1.1" 200 OK

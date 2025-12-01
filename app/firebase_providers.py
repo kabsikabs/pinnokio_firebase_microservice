@@ -9099,7 +9099,7 @@ class FirebaseRealtimeChat:
                     is_unread = not event.data.get('read', True)
                     
                     # ✅ Inclure tous les types de messages gérés par le handler
-                    if (message_type in ['MESSAGE', 'CARD', 'TOOL', 'CMMD', 'FOLLOW_MESSAGE', 'WAITING_MESSAGE', 'WORKFLOW', 'CLOSE_INTERMEDIATION', 'CARD_CLICKED_PINNOKIO'] and 
+                    if (message_type in ['MESSAGE', 'CARD', 'FOLLOW_CARD', 'TOOL', 'CMMD', 'FOLLOW_MESSAGE', 'WAITING_MESSAGE', 'WORKFLOW', 'CLOSE_INTERMEDIATION', 'CARD_CLICKED_PINNOKIO'] and 
                         is_unread):
                         self.processed_messages.add(message_id)
                         message_data = {

@@ -699,6 +699,46 @@ class PinnokioBrain:
                 logger.error(f"[UPDATE_STEP] Erreur: {e}", exc_info=True)
                 return {"type": "error", "message": str(e)}
 
+        # Outil GET_CURRENT_DATETIME
+        get_current_datetime_tool = {
+            "name": "GET_CURRENT_DATETIME",
+            "description": """⏰ **Obtenir la date et l'heure actuelles**
+
+**Utilisez cet outil pour** :
+- Connaître la date et l'heure précises en ce moment
+- Calculer des délais relatifs (dans X heures, demain, etc.)
+- Vérifier l'heure avant de planifier une tâche
+- Obtenir la date du jour pour des requêtes utilisateur
+
+**Fuseau horaire** :
+- Par défaut : Utilise la timezone configurée pour la société
+- Vous pouvez spécifier une autre timezone IANA (ex: 'America/New_York')
+
+**Formats de sortie** :
+- ISO : Format ISO 8601 (ex: 2025-11-30T14:30:00+01:00)
+- READABLE : Format lisible français (ex: "samedi 30 novembre 2025 à 14:30")
+- BOTH : Les deux formats""",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "timezone": {
+                        "type": "string",
+                        "description": "Timezone IANA optionnelle (ex: 'Europe/Paris'). Si non fournie, utilise la timezone de la société."
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["ISO", "READABLE", "BOTH"],
+                        "description": "Format de sortie souhaité (défaut: BOTH)"
+                    }
+                },
+                "required": []
+            }
+        }
+        
+        # Handler GET_CURRENT_DATETIME
+        def handle_get_current_datetime(timezone: str = None, format: str = "BOTH"):
+            return self._get_current_datetime(timezone, format)
+        
         # Outil TERMINATE_TASK
         terminate_tool = {
             "name": "TERMINATE_TASK",
@@ -719,7 +759,7 @@ class PinnokioBrain:
             }
         }
         
-        # Combiner tous les outils (avec les 3 outils jobs + 4 outils context + VIEW_DRIVE_DOCUMENT + CREATE_TASK + checklist)
+        # Combiner tous les outils (avec les 3 outils jobs + 4 outils context + VIEW_DRIVE_DOCUMENT + CREATE_TASK + checklist + datetime)
         tool_set = [
             get_apbookeeper_jobs_def,
             get_router_jobs_def,
@@ -731,7 +771,8 @@ class PinnokioBrain:
             view_drive_document_def,  # ⭐ Outil de vision Drive
             create_task_def,
             create_checklist_tool,
-            update_step_tool
+            update_step_tool,
+            get_current_datetime_tool  # ⏰ Outil date/heure actuelle
         ] + spt_tools_list + lpt_tools_list + [terminate_tool]
 
         tool_mapping = {
@@ -746,158 +787,10 @@ class PinnokioBrain:
             "CREATE_TASK": handle_create_task,
             "CREATE_CHECKLIST": handle_create_checklist,
             "UPDATE_STEP": handle_update_step,
+            "GET_CURRENT_DATETIME": handle_get_current_datetime,  # ⏰ Handler date/heure
+            "TERMINATE_TASK": self._handle_terminate_task,  # 🏁 Handler terminaison
             **spt_tools_mapping,
             **lpt_tools_mapping
-        }
-        
-        # Ancienne définition en dur - CONSERVÉE CI-DESSOUS POUR COMPATIBILITÉ (à supprimer plus tard)
-        old_tool_set = [
-            # ═══════════════════════════════════════════════════════
-            # SPT TOOLS - Outils rapides (<30s)
-            # ═══════════════════════════════════════════════════════
-            {
-                "name": "READ_FIREBASE_DOCUMENT",
-                "description": "📄 [SPT] Lire un document Firebase. Temps < 5 secondes.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "collection_path": {
-                            "type": "string",
-                            "description": "Chemin de la collection (ex: 'invoices', 'clients')"
-                        },
-                        "document_id": {
-                            "type": "string",
-                            "description": "ID du document"
-                        }
-                    },
-                    "required": ["collection_path", "document_id"]
-                }
-            },
-            {
-                "name": "SEARCH_CHROMADB",
-                "description": "🔍 [SPT] Recherche vectorielle dans ChromaDB. Temps < 10 secondes.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Question ou requête de recherche"
-                        },
-                        "n_results": {
-                            "type": "integer",
-                            "description": "Nombre de résultats (défaut: 5)"
-                        }
-                    },
-                    "required": ["query"]
-                }
-            },
-            
-            # ═══════════════════════════════════════════════════════
-            # LPT TOOLS - Tâches longues (>30s)
-            # ═══════════════════════════════════════════════════════
-            {
-                "name": "CALL_FILE_MANAGER_AGENT",
-                "description": """📂 [LPT] Appeler l'Agent File Manager pour des tâches de gestion documentaire complexes.
-                
-                Utilisez cet outil pour :
-                - Accéder à des dossiers dans Drive
-                - Rechercher des documents spécifiques
-                - Analyser et extraire des informations de documents
-                - Traiter des lots de fichiers
-                
-                ⚠️ Tâche asynchrone : Vous serez notifié quand terminé, restez disponible pour l'utilisateur.""",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "description": "Action à effectuer (ex: 'search_and_analyze_document')"
-                        },
-                        "params": {
-                            "type": "object",
-                            "description": "Paramètres de l'action"
-                        },
-                        "task_title": {
-                            "type": "string",
-                            "description": "Titre descriptif de la tâche"
-                        }
-                    },
-                    "required": ["action", "params", "task_title"]
-                }
-            },
-            {
-                "name": "CALL_ACCOUNTING_AGENT",
-                "description": """🧾 [LPT] Appeler l'Agent Comptable pour des tâches de saisie et traitement comptable.
-                
-                Utilisez cet outil pour :
-                - Saisir des factures fournisseurs en lot
-                - Effectuer des rapprochements bancaires
-                - Générer des écritures comptables
-                - Traiter des paiements
-                
-                ⚠️ Tâche asynchrone : Vous serez notifié quand terminé, restez disponible pour l'utilisateur.""",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "description": "Action comptable (ex: 'batch_invoice_entry')"
-                        },
-                        "params": {
-                            "type": "object",
-                            "description": "Paramètres de l'action"
-                        },
-                        "task_title": {
-                            "type": "string",
-                            "description": "Titre descriptif de la tâche"
-                        }
-                    },
-                    "required": ["action", "params", "task_title"]
-                }
-            },
-            
-            # ═══════════════════════════════════════════════════════
-            # TOOL DE TERMINAISON
-            # ═══════════════════════════════════════════════════════
-            {
-                "name": "TERMINATE_TASK",
-                "description": """🎯 Terminer la tâche quand TOUTES les actions sont complétées.
-                
-                Utilisez cet outil UNIQUEMENT quand :
-                - Tous les SPT sont exécutés
-                - Tous les LPT ont reçu leurs callbacks
-                - Toutes les informations sont collectées
-                - La mission est accomplie OU impossible à terminer
-                
-                Ne terminez PAS s'il y a encore des LPT en cours d'exécution !""",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "reason": {
-                            "type": "string",
-                            "description": "Raison de la terminaison"
-                        },
-                        "conclusion": {
-                            "type": "string",
-                            "description": "Rapport final complet avec résumé de toutes les actions"
-                        },
-                        "tasks_completed": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Liste des IDs de tâches complétées"
-                        }
-                    },
-                    "required": ["reason", "conclusion"]
-                }
-            }
-        ]
-        
-        # Tool mapping (les fonctions seront implémentées dans TaskExecutor)
-        old_tool_map = {
-            "READ_FIREBASE_DOCUMENT": lambda **kwargs: self._spt_read_firebase(**kwargs),
-            "SEARCH_CHROMADB": lambda **kwargs: self._spt_search_chromadb(**kwargs),
-            "CALL_FILE_MANAGER_AGENT": lambda **kwargs: self._lpt_file_manager(thread_key, **kwargs),
-            "CALL_ACCOUNTING_AGENT": lambda **kwargs: self._lpt_accounting(thread_key, **kwargs)
         }
         
         # ⭐ RETOURNER LES NOUVEAUX OUTILS (SPT + LPT simplifiés)
@@ -935,10 +828,16 @@ class PinnokioBrain:
 
         return self.onboarding_data
     
-    async def load_job_data(self, job_id: str) -> Dict[str, Any]:
-        """Charge les données de job depuis notifications/{job_id}."""
+    async def load_job_data(self, job_id: str, force_reload: bool = False) -> Dict[str, Any]:
+        """
+        Charge les données de job depuis notifications/{job_id}.
         
-        if self.job_data is not None and self.job_data.get("job_id") == job_id:
+        Args:
+            job_id: ID du job à charger
+            force_reload: Si True, force le rechargement depuis Firestore même si déjà en cache
+        """
+        
+        if not force_reload and self.job_data is not None and self.job_data.get("job_id") == job_id:
             return self.job_data
         
         try:
@@ -1167,6 +1066,107 @@ class PinnokioBrain:
         except Exception as e:
             logger.error(f"Erreur démarrage LPT Accounting: {e}")
             return {'type': 'error', 'message': str(e)}
+    
+    async def _handle_terminate_task(
+        self, 
+        reason: str, 
+        conclusion: str, 
+        **kwargs
+    ) -> Dict:
+        """
+        Handler pour l'outil TERMINATE_TASK.
+        
+        Cette méthode est appelée automatiquement par le workflow pour générer
+        un résultat d'outil (tool_result) qui sera ajouté au chat_history.
+        
+        Args:
+            reason: Raison de la terminaison
+            conclusion: Rapport final complet
+            **kwargs: Paramètres additionnels ignorés
+            
+        Returns:
+            Dict avec le résultat de la terminaison
+        """
+        logger.info(f"[TERMINATE_TASK] 🏁 Terminaison demandée - raison: {reason}")
+        
+        return {
+            "success": True,
+            "reason": reason,
+            "conclusion": conclusion,
+            "status": "terminated",
+            "message": "Task terminated successfully"
+        }
+    
+    def _get_current_datetime(self, timezone: str = None, format: str = "BOTH") -> Dict:
+        """
+        Obtient la date et l'heure actuelles dans un fuseau horaire spécifique.
+        
+        Args:
+            timezone: Timezone IANA optionnelle (ex: 'Europe/Paris').
+                     Si None, utilise la timezone configurée pour la société.
+            format: Format de sortie ("ISO", "READABLE", ou "BOTH")
+            
+        Returns:
+            Dict contenant la date/heure dans le format demandé
+        """
+        from datetime import datetime
+        import pytz
+        
+        try:
+            # Utiliser la timezone du mandat si non fournie
+            if not timezone:
+                timezone = self.user_context.get("timezone", "UTC") if self.user_context else "UTC"
+            
+            logger.info(f"[GET_CURRENT_DATETIME] Timezone: {timezone}, Format: {format}")
+            
+            # Obtenir l'heure actuelle dans la timezone
+            tz = pytz.timezone(timezone)
+            now = datetime.now(tz)
+            
+            result = {
+                "success": True,
+                "timezone": timezone
+            }
+            
+            # Format ISO
+            if format in ["ISO", "BOTH"]:
+                result["iso_format"] = now.isoformat()
+                result["date_iso"] = now.date().isoformat()
+                result["time_iso"] = now.time().isoformat()
+            
+            # Format lisible
+            if format in ["READABLE", "BOTH"]:
+                # Noms des jours et mois en français
+                days_fr = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+                months_fr = ["janvier", "février", "mars", "avril", "mai", "juin", 
+                            "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
+                
+                day_name = days_fr[now.weekday()]
+                month_name = months_fr[now.month - 1]
+                
+                result["readable_date"] = f"{day_name} {now.day} {month_name} {now.year}"
+                result["readable_time"] = now.strftime("%H:%M:%S")
+                result["readable_full"] = f"{day_name} {now.day} {month_name} {now.year} à {now.strftime('%H:%M:%S')}"
+            
+            # Informations additionnelles utiles
+            result["day_of_week"] = now.weekday() + 1  # 1 = lundi, 7 = dimanche
+            result["day_of_month"] = now.day
+            result["month"] = now.month
+            result["year"] = now.year
+            result["hour"] = now.hour
+            result["minute"] = now.minute
+            
+            logger.info(f"[GET_CURRENT_DATETIME] ✅ Résultat: {result.get('readable_full', result.get('iso_format'))}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"[GET_CURRENT_DATETIME] ❌ Erreur: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": f"Erreur lors de l'obtention de la date/heure: {str(e)}",
+                "timezone": timezone or "UTC"
+            }
     
     def has_active_lpt_tasks(self, thread_key: str) -> bool:
         """Vérifie si des tâches LPT sont en cours pour ce thread"""
