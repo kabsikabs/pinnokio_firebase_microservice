@@ -362,9 +362,69 @@ def _build_task_execution_prompt(brain: "PinnokioBrain", jobs_metrics: Optional[
     base_prompt = _build_general_prompt(brain, jobs_metrics, "general_chat")
     base_prompt += """
 
-        ⚙️ MODE EXÉCUTION AUTOMATIQUE :
-        Vous exécutez de manière autonome une mission planifiée. Respectez strictement le plan,
-        mettez à jour la checklist (CREATE_CHECKLIST / UPDATE_STEP) et concluez avec TERMINATE_TASK.
+        ═══════════════════════════════════════════════════════════════════════════════
+        ⚙️ MODE EXÉCUTION AUTOMATIQUE DE TÂCHE
+        ═══════════════════════════════════════════════════════════════════════════════
+
+        Vous exécutez de manière autonome une mission planifiée. 
+
+        📋 **WORKFLOW OBLIGATOIRE** :
+        1. **CREATE_CHECKLIST** au début (étapes basées sur le plan)
+        2. Pour chaque étape :
+           - **UPDATE_STEP** status="in_progress" avant de commencer
+           - Exécuter l'outil ou l'action
+           - **UPDATE_STEP** status="completed" (ou "error")
+        3. **TERMINATE_TASK** à la fin avec rapport détaillé (UNIQUEMENT si toutes les étapes sont "completed")
+
+        ⚠️ **RÈGLE CRITIQUE : CLÔTURE DU WORKFLOW**
+
+        En mode task_execution, le workflow NE peut être clôturé QUE par :
+        - ✅ **TERMINATE_TASK** : Clôture définitive (toutes les étapes doivent être "completed")
+        - ✅ **WAIT_ON_LPT** : Mise en pause en attente d'un callback LPT
+
+        ❌ **INTERDICTIONS** :
+        - ❌ NE PAS terminer avec du texte simple sans outils
+        - ❌ NE PAS considérer qu'une mission est terminée après avoir généré du texte
+        - ❌ Le workflow continuera jusqu'à TERMINATE_TASK ou WAIT_ON_LPT
+
+        ⏳ **OUTIL WAIT_ON_LPT** :
+
+        Utilisez cet outil si et SEULEMENT si :
+        1. Vous avez lancé un LPT (ex: LPT_APBookkeeper, LPT_Router, etc.)
+        2. Ce LPT n'a PAS encore retourné son résultat (pas de callback reçu)
+        3. La suite de votre workflow DÉPEND du résultat de ce LPT
+
+        **Format d'appel :**
+        ```json
+        {{
+            "reason": "Attente du retour de LPT_APBookkeeper pour la saisie des 5 factures",
+            "expected_lpt": "LPT_APBookkeeper",
+            "step_waiting": "STEP_2_SAISIE_FACTURES",
+            "task_ids": ["file_abc123", "file_def456"]
+        }}
+        ```
+
+        **CE QUI SE PASSE :**
+        - Le workflow se met en pause proprement
+        - Quand le LPT terminera, vous serez automatiquement réactivé
+        - Vous recevrez le résultat du LPT et pourrez continuer votre checklist
+
+        🏁 **OUTIL TERMINATE_TASK** :
+
+        Utilisez cet outil UNIQUEMENT quand :
+        1. ✅ TOUTES les étapes de votre checklist sont "completed"
+        2. ✅ Aucun LPT n'est en attente de callback
+        3. ✅ L'objectif de la mission est atteint
+
+        ⚠️ **Si des étapes ne sont pas "completed" :**
+        - ❌ L'appel à TERMINATE_TASK sera REFUSÉ
+        - → Vous devrez d'abord terminer ou mettre à jour les étapes restantes avec UPDATE_STEP
+        - → Ensuite, rappelez TERMINATE_TASK
+
+        🔧 **Outils disponibles** : CREATE_CHECKLIST, UPDATE_STEP, WAIT_ON_LPT, TERMINATE_TASK + tous vos outils habituels
+        ⚡ **Autonomie** : Prenez des décisions basées sur le plan et les résultats
+
+        Commencez maintenant l'exécution.
         """
     return base_prompt
 
@@ -378,8 +438,9 @@ def _build_general_tools(
     thread_key: str,
     session: Optional["LLMSession"],
     chat_mode: str,
+    mode: str = "UI",  # ⭐ NOUVEAU : Mode UI ou BACKEND pour rechargement Redis
     ) -> Tuple[List[Dict], Dict]:
-    return brain._build_general_chat_tools(thread_key=thread_key, session=session)
+    return brain._build_general_chat_tools(thread_key=thread_key, session=session, mode=mode)
 
 
 def _build_specialized_tools(
@@ -387,6 +448,7 @@ def _build_specialized_tools(
     thread_key: str,
     session: Optional["LLMSession"],
     chat_mode: str,
+    mode: str = "UI",  # ⭐ NOUVEAU : Mode UI ou BACKEND pour rechargement Redis
     ) -> Tuple[List[Dict], Dict]:
     """Builder d'outils vide pour les agents spécialisés (pas d'outils pour l'instant)."""
     return [], {}

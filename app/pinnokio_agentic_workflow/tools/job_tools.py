@@ -16,48 +16,23 @@ class APBookkeeperJobTools:
     Outil GET_APBOOKEEPER_JOBS pour rechercher les factures fournisseur.
     
     Output enrichi avec drive_file_id pour permettre à l'agent de voir les documents.
+    
+    ⭐ NOUVEAU : Recharge depuis Redis à chaque appel (mode UI) pour données à jour
     """
     
-    def __init__(self, jobs_data: Dict):
-        self.ap_data = jobs_data.get("APBOOKEEPER", {})
-        logger.info(f"[APBOOKEEPER_TOOLS] Initialisé avec {len(self.ap_data.get('to_do', []))} factures to_do")
+    def __init__(self, jobs_data: Dict, user_id: str = None, company_id: str = None, user_context: Dict = None, mode: str = "UI"):
+        self.ap_data = jobs_data.get("APBOOKEEPER", {})  # Données initiales (fallback)
+        self.user_id = user_id
+        self.company_id = company_id
+        self.user_context = user_context or {}
+        self.mode = mode
+        logger.info(f"[APBOOKEEPER_TOOLS] Initialisé avec {len(self.ap_data.get('to_do', []))} factures to_do (mode={mode})")
     
     def get_tool_definition(self) -> Dict:
-        """Définition de l'outil GET_APBOOKEEPER_JOBS."""
+        """Définition COURTE de l'outil GET_APBOOKEEPER_JOBS (pour l'API)."""
         return {
             "name": "GET_APBOOKEEPER_JOBS",
-            "description": """📋 **Recherche des factures fournisseur (APBookkeeper)**
-
-**Utilisez cet outil pour** :
-- Lister les factures fournisseur à traiter
-- Filtrer par statut (to_do, in_process, pending, processed)
-- Rechercher par nom de fichier
-
-**OUTPUT ENRICHI** :
-- `job_id` : ID unique du job (pour payload LPT)
-- `drive_file_id` : ID Google Drive (permet à l'agent de voir le document) 🔍
-- `uri_drive_link` : Lien direct vers le document
-- `file_name` : Nom du fichier
-- `status` : Statut actuel
-- `timestamp` : Date de création
-
-**CAS D'USAGE** :
-1. **Lister toutes les factures à traiter** :
-   ```json
-   {"status": "to_do"}
-   ```
-
-2. **Rechercher une facture spécifique** :
-   ```json
-   {"file_name_contains": "facture_orange", "status": "all"}
-   ```
-
-3. **Voir les factures en cours de traitement** :
-   ```json
-   {"status": "in_process"}
-   ```
-
-⚠️ **IMPORTANT** : Si l'utilisateur demande à "voir le document", utilisez `drive_file_id` pour l'afficher.""",
+            "description": "📋 Recherche les factures fournisseur par statut/nom. Retourne job_id, drive_file_id, file_name, status. Utilisez GET_TOOL_HELP pour plus de détails.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -86,22 +61,44 @@ class APBookkeeperJobTools:
         file_name_contains: str = None,
         limit: int = 50
     ) -> Dict:
-        """Recherche les factures APBookkeeper."""
+        """
+        Recherche les factures APBookkeeper.
+        
+        ⭐ NOUVEAU : Recharge depuis Redis à chaque appel (mode UI) pour données à jour
+        """
         try:
             logger.info(f"[GET_APBOOKEEPER_JOBS] Recherche - status={status}, file_name={file_name_contains}, limit={limit}")
+            
+            # ⭐ Recharger depuis Redis si mode UI (données à jour)
+            ap_data = self.ap_data  # Fallback vers données initiales
+            if self.mode == "UI" and self.user_id and self.company_id:
+                try:
+                    from ..tools.job_loader import JobLoader
+                    loader = JobLoader(
+                        user_id=self.user_id,
+                        company_id=self.company_id,
+                        client_uuid=self.user_context.get("client_uuid")
+                    )
+                    # Recharger uniquement APBookkeeper depuis Redis
+                    fresh_ap_data = await loader.load_apbookeeper_jobs(mode="UI")
+                    if fresh_ap_data:
+                        ap_data = fresh_ap_data
+                        logger.info(f"[GET_APBOOKEEPER_JOBS] ✅ Données rechargées depuis Redis - {len(ap_data.get('to_do', []))} factures to_do")
+                except Exception as e:
+                    logger.warning(f"[GET_APBOOKEEPER_JOBS] ⚠️ Erreur rechargement Redis: {e} - Utilisation données initiales")
             
             limit = min(limit, 200)
             
             # Récupérer les jobs selon le statut
             if status == "all":
                 all_jobs = []
-                all_jobs.extend(self.ap_data.get("to_do", []))
-                all_jobs.extend(self.ap_data.get("in_process", []))
-                all_jobs.extend(self.ap_data.get("pending", []))
-                all_jobs.extend(self.ap_data.get("processed", []))
+                all_jobs.extend(ap_data.get("to_do", []))  # ✅ Utiliser données rechargées
+                all_jobs.extend(ap_data.get("in_process", []))
+                all_jobs.extend(ap_data.get("pending", []))
+                all_jobs.extend(ap_data.get("processed", []))
             else:
                 status_key = "processed" if status == "completed" else status
-                all_jobs = self.ap_data.get(status_key, [])
+                all_jobs = ap_data.get(status_key, [])
             
             # Filtrer par nom de fichier
             filtered_jobs = all_jobs
@@ -154,47 +151,23 @@ class RouterJobTools:
     Outil GET_ROUTER_JOBS pour rechercher les documents à router.
     
     Output enrichi avec drive_file_id et router_drive_view_link pour visualisation.
+    
+    ⭐ NOUVEAU : Recharge depuis Redis à chaque appel (mode UI) pour données à jour
     """
     
-    def __init__(self, jobs_data: Dict):
-        self.router_data = jobs_data.get("ROUTER", {})
-        logger.info(f"[ROUTER_TOOLS] Initialisé avec {len(self.router_data.get('to_process', []))} documents to_process")
+    def __init__(self, jobs_data: Dict, user_id: str = None, company_id: str = None, user_context: Dict = None, mode: str = "UI"):
+        self.router_data = jobs_data.get("ROUTER", {})  # Données initiales (fallback)
+        self.user_id = user_id
+        self.company_id = company_id
+        self.user_context = user_context or {}
+        self.mode = mode
+        logger.info(f"[ROUTER_TOOLS] Initialisé avec {len(self.router_data.get('to_process', []))} documents to_process (mode={mode})")
     
     def get_tool_definition(self) -> Dict:
-        """Définition de l'outil GET_ROUTER_JOBS."""
+        """Définition COURTE de l'outil GET_ROUTER_JOBS (pour l'API)."""
         return {
             "name": "GET_ROUTER_JOBS",
-            "description": """🗂️ **Recherche des documents à router (Router)**
-
-**Utilisez cet outil pour** :
-- Lister les documents à router depuis le Drive
-- Filtrer par statut (to_process, in_process)
-- Rechercher par nom de fichier
-
-**OUTPUT ENRICHI** :
-- `drive_file_id` : ID Google Drive (permet à l'agent de voir le document) 🔍
-- `router_drive_view_link` : Lien direct vers le document
-- `file_name` : Nom du fichier
-- `status` : Statut actuel
-- `created_time` : Date de création
-
-**CAS D'USAGE** :
-1. **Lister tous les documents à router** :
-   ```json
-   {"status": "to_process"}
-   ```
-
-2. **Rechercher un document spécifique** :
-   ```json
-   {"file_name_contains": "contrat", "status": "all"}
-   ```
-
-3. **Voir les documents en cours de routage** :
-   ```json
-   {"status": "in_process"}
-   ```
-
-⚠️ **IMPORTANT** : Si l'utilisateur demande à "voir le document", utilisez `drive_file_id` ou `router_drive_view_link`.""",
+            "description": "🗂️ Recherche les documents à router par statut/nom. Retourne drive_file_id, file_name, status. Utilisez GET_TOOL_HELP pour plus de détails.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -223,9 +196,31 @@ class RouterJobTools:
         file_name_contains: str = None,
         limit: int = 50
     ) -> Dict:
-        """Recherche les documents Router."""
+        """
+        Recherche les documents Router.
+        
+        ⭐ NOUVEAU : Recharge depuis Redis à chaque appel (mode UI) pour données à jour
+        """
         try:
             logger.info(f"[GET_ROUTER_JOBS] Recherche - status={status}, file_name={file_name_contains}, limit={limit}")
+            
+            # ⭐ Recharger depuis Redis si mode UI (données à jour)
+            router_data = self.router_data  # Fallback vers données initiales
+            if self.mode == "UI" and self.user_id and self.company_id:
+                try:
+                    from ..tools.job_loader import JobLoader
+                    loader = JobLoader(
+                        user_id=self.user_id,
+                        company_id=self.company_id,
+                        client_uuid=self.user_context.get("client_uuid")
+                    )
+                    # Recharger uniquement Router depuis Redis
+                    fresh_router_data = await loader.load_router_jobs(mode="UI", user_context=self.user_context)
+                    if fresh_router_data:
+                        router_data = fresh_router_data
+                        logger.info(f"[GET_ROUTER_JOBS] ✅ Données rechargées depuis Redis - {len(router_data.get('to_process', []))} documents to_process")
+                except Exception as e:
+                    logger.warning(f"[GET_ROUTER_JOBS] ⚠️ Erreur rechargement Redis: {e} - Utilisation données initiales")
             
             limit = min(limit, 200)
             
@@ -239,12 +234,12 @@ class RouterJobTools:
             # Récupérer les jobs selon le statut (format Reflex)
             if status == "all":
                 all_jobs = []
-                all_jobs.extend(self.router_data.get("to_process", []))  # ✅ Corrigé
-                all_jobs.extend(self.router_data.get("in_process", []))
-                all_jobs.extend(self.router_data.get("processed", []))
+                all_jobs.extend(router_data.get("to_process", []))  # ✅ Utiliser données rechargées
+                all_jobs.extend(router_data.get("in_process", []))
+                all_jobs.extend(router_data.get("processed", []))
             else:
                 reflex_status = status_mapping.get(status, status)
-                all_jobs = self.router_data.get(reflex_status, [])
+                all_jobs = router_data.get(reflex_status, [])
             
             # Filtrer par nom de fichier (format Reflex utilise "name")
             filtered_jobs = all_jobs
@@ -294,77 +289,23 @@ class BankJobTools:
     Outil GET_BANK_TRANSACTIONS pour rechercher les transactions bancaires.
     
     Output complet avec tous les détails des transactions pour analyse approfondie.
+    
+    ⭐ NOUVEAU : Recharge depuis Redis à chaque appel (mode UI) pour données à jour
     """
     
-    def __init__(self, jobs_data: Dict):
-        self.bank_data = jobs_data.get("BANK", {})
-        logger.info(f"[BANK_TOOLS] Initialisé avec {len(self.bank_data.get('to_reconcile', []))} transactions to_reconcile")
+    def __init__(self, jobs_data: Dict, user_id: str = None, company_id: str = None, user_context: Dict = None, mode: str = "UI"):
+        self.bank_data = jobs_data.get("BANK", {})  # Données initiales (fallback)
+        self.user_id = user_id
+        self.company_id = company_id
+        self.user_context = user_context or {}
+        self.mode = mode
+        logger.info(f"[BANK_TOOLS] Initialisé avec {len(self.bank_data.get('to_reconcile', []))} transactions to_reconcile (mode={mode})")
     
     def get_tool_definition(self) -> Dict:
-        """Définition de l'outil GET_BANK_TRANSACTIONS."""
+        """Définition COURTE de l'outil GET_BANK_TRANSACTIONS (pour l'API)."""
         return {
             "name": "GET_BANK_TRANSACTIONS",
-            "description": """🏦 **Recherche des transactions bancaires (Bank)**
-
-**Utilisez cet outil pour** :
-- Lister les transactions bancaires à réconcilier
-- Filtrer par statut, compte bancaire, montant, date, partenaire
-- Obtenir des détails complets pour analyse
-
-**OUTPUT COMPLET** :
-- `transaction_id` : ID de la transaction (pour payload LPT)
-- `journal_id` : Compte bancaire
-- `date` : Date de la transaction
-- `amount` : Montant
-- `partner_name` : Nom du partenaire
-- `partner_id` : ID du partenaire
-- `payment_ref` : Référence de paiement
-- `ref` : Référence interne
-- `transaction_type` : Type (inbound/outbound)
-- `currency_id` : Devise
-- `amount_residual` : Montant résiduel
-- `is_reconciled` : Réconcilié ou non
-- `display_name` : Nom d'affichage
-- `state` : État
-
-**FILTRES AVANCÉS** :
-- **Par statut** : to_reconcile, in_process, pending
-- **Par compte** : Filtrer par journal_id (compte bancaire)
-- **Par montant** : amount_min, amount_max
-- **Par date** : date_from, date_to
-- **Par partenaire** : partner_name_contains
-
-**CAS D'USAGE** :
-1. **Toutes les transactions à réconcilier** :
-   ```json
-   {"status": "to_reconcile"}
-   ```
-
-2. **Transactions > 1000€ sur un compte spécifique** :
-   ```json
-   {
-     "status": "to_reconcile",
-     "journal_id": "BNK1",
-     "amount_min": 1000
-   }
-   ```
-
-3. **Transactions d'un partenaire** :
-   ```json
-   {
-     "status": "to_reconcile",
-     "partner_name_contains": "Orange"
-   }
-   ```
-
-4. **Transactions sur une période** :
-   ```json
-   {
-     "status": "to_reconcile",
-     "date_from": "2025-01-01",
-     "date_to": "2025-01-31"
-   }
-   ```""",
+            "description": "🏦 Recherche les transactions bancaires par statut/compte/montant/date. Retourne transaction_id, journal_id, amount, date, partner. Utilisez GET_TOOL_HELP pour plus de détails.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -418,20 +359,42 @@ class BankJobTools:
         partner_name_contains: str = None,
         limit: int = 50
     ) -> Dict:
-        """Recherche les transactions bancaires."""
+        """
+        Recherche les transactions bancaires.
+        
+        ⭐ NOUVEAU : Recharge depuis Redis à chaque appel (mode UI) pour données à jour
+        """
         try:
             logger.info(f"[GET_BANK_TRANSACTIONS] Recherche - status={status}, journal={journal_id}, limit={limit}")
+            
+            # ⭐ Recharger depuis Redis si mode UI (données à jour)
+            bank_data = self.bank_data  # Fallback vers données initiales
+            if self.mode == "UI" and self.user_id and self.company_id:
+                try:
+                    from ..tools.job_loader import JobLoader
+                    loader = JobLoader(
+                        user_id=self.user_id,
+                        company_id=self.company_id,
+                        client_uuid=self.user_context.get("client_uuid")
+                    )
+                    # Recharger uniquement Bank depuis Redis
+                    fresh_bank_data = await loader.load_bank_transactions(mode="UI", user_context=self.user_context)
+                    if fresh_bank_data:
+                        bank_data = fresh_bank_data
+                        logger.info(f"[GET_BANK_TRANSACTIONS] ✅ Données rechargées depuis Redis - {len(bank_data.get('to_reconcile', []))} transactions to_reconcile")
+                except Exception as e:
+                    logger.warning(f"[GET_BANK_TRANSACTIONS] ⚠️ Erreur rechargement Redis: {e} - Utilisation données initiales")
             
             limit = min(limit, 200)
             
             # Récupérer les transactions selon le statut
             if status == "all":
                 all_txs = []
-                all_txs.extend(self.bank_data.get("to_reconcile", []))
-                all_txs.extend(self.bank_data.get("pending", []))
-                all_txs.extend(self.bank_data.get("in_process", []))
+                all_txs.extend(bank_data.get("to_reconcile", []))  # ✅ Utiliser données rechargées
+                all_txs.extend(bank_data.get("pending", []))
+                all_txs.extend(bank_data.get("in_process", []))
             else:
-                all_txs = self.bank_data.get(status, [])
+                all_txs = bank_data.get(status, [])
             
             if not all_txs:
                 return {
@@ -578,37 +541,10 @@ class ContextTools:
     # ═══════════════════════════════════════════════════════════════
     
     def get_router_prompt_definition(self) -> Dict:
-        """Définition de l'outil ROUTER_PROMPT."""
+        """Définition COURTE de l'outil ROUTER_PROMPT (pour l'API)."""
         return {
             "name": "ROUTER_PROMPT",
-            "description": """🗂️ **Accès aux règles de classification des documents par service**
-
-**Utilisez cet outil pour** :
-- Consulter les critères de routage d'un service spécifique
-- Comprendre comment les documents sont classifiés
-- Obtenir les règles de reconnaissance des documents
-
-**SERVICES DISPONIBLES** :
-- `hr` : Ressources humaines (contrats, congés, salaires)
-- `banks_cash` : Banques et trésorerie  
-- `taxes` : Fiscalité et déclarations
-- `contrats` : Contrats commerciaux et juridiques
-- `expenses` : Notes de frais
-- `invoices` : Factures
-- `letters` : Courriers et correspondances
-- `financial_statement` : États financiers
-
-**SORTIE** :
-- Prompt de routage complet pour le service demandé
-- Critères de classification détaillés
-- Mots-clés et patterns de reconnaissance
-
-**EXEMPLE** :
-```json
-{"service": "hr"}
-```
-
-Retourne les règles complètes pour identifier les documents RH.""",
+            "description": "🗂️ Règles de classification par service (hr, invoices, expenses, banks_cash, taxes, contrats, letters, financial_statement). Utilisez GET_TOOL_HELP pour plus de détails.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -680,36 +616,10 @@ Retourne les règles complètes pour identifier les documents RH.""",
             }
     
     def get_apbookeeper_context_definition(self) -> Dict:
-        """Définition de l'outil APBOOKEEPER_CONTEXT."""
+        """Définition COURTE de l'outil APBOOKEEPER_CONTEXT (pour l'API)."""
         return {
             "name": "APBOOKEEPER_CONTEXT",
-            "description": """📊 **Accès au contexte comptable complet (Accounting Context)**
-
-**Utilisez cet outil pour** :
-- Consulter les règles comptables de l'entreprise
-- Comprendre la méthode de classification des charges
-- Obtenir les règles de TVA, immobilisations, etc.
-- Accéder au plan comptable et aux workflows
-
-**CONTENU** :
-- Règles de comptabilisation
-- Classification des charges (directes/indirectes)
-- Traitement de la TVA
-- Règles d'immobilisation
-- Plan comptable
-- Workflows de validation
-
-**SORTIE** :
-- Contexte comptable complet
-- Date de dernière mise à jour
-- Règles détaillées par catégorie
-
-**EXEMPLE** :
-```json
-{}
-```
-
-Retourne le contexte comptable complet de l'entreprise.""",
+            "description": "📊 Contexte comptable complet : règles comptables, TVA, plan comptable, workflows. Utilisez GET_TOOL_HELP pour plus de détails.",
             "input_schema": {
                 "type": "object",
                 "properties": {},
@@ -769,36 +679,10 @@ Retourne le contexte comptable complet de l'entreprise.""",
             }
     
     def get_company_context_definition(self) -> Dict:
-        """Définition de l'outil COMPANY_CONTEXT."""
+        """Définition COURTE de l'outil COMPANY_CONTEXT (pour l'API)."""
         return {
             "name": "COMPANY_CONTEXT",
-            "description": """🏢 **Accès au profil complet de l'entreprise (General Context)**
-
-**Utilisez cet outil pour** :
-- Consulter le profil de l'entreprise cliente
-- Obtenir les informations sur l'activité
-- Comprendre le contexte métier
-- Accéder aux informations organisationnelles
-
-**CONTENU** :
-- Nom et forme juridique de l'entreprise
-- Secteur d'activité
-- Prestations et services offerts
-- Structure organisationnelle
-- Contexte métier spécifique
-- Particularités du client
-
-**SORTIE** :
-- Profil complet de l'entreprise
-- Date de dernière mise à jour
-- Informations contextuelles détaillées
-
-**EXEMPLE** :
-```json
-{}
-```
-
-Retourne le profil complet de l'entreprise cliente.""",
+            "description": "🏢 Profil complet de l'entreprise : informations légales, activité, structure. Utilisez GET_TOOL_HELP pour plus de détails.",
             "input_schema": {
                 "type": "object",
                 "properties": {},
@@ -940,80 +824,10 @@ Retourne le profil complet de l'entreprise cliente.""",
             return {"success": False, "error": str(e)}
     
     def get_update_context_definition(self) -> Dict:
-        """Définition de l'outil UPDATE_CONTEXT."""
+        """Définition COURTE de l'outil UPDATE_CONTEXT (pour l'API)."""
         return {
             "name": "UPDATE_CONTEXT",
-            "description": """✏️ **Mise à jour atomique d'un contexte (Router, Accounting, Company)**
-
-            **Utilisez cet outil pour** :
-            - Appliquer des modifications à un contexte existant
-            - Mettre à jour les règles de routage d'un service
-            - Modifier le contexte comptable
-            - Actualiser le profil de l'entreprise
-
-            **WORKFLOW ATOMIQUE** (tout en une fois) :
-            1. Vous générez une liste d'opérations (add, replace, delete)
-            2. Vous appelez cet outil avec les opérations
-            3. 🃏 Une carte d'approbation est envoyée automatiquement
-            4. ⏳ L'outil attend la réponse de l'utilisateur (jusqu'à 15 minutes)
-            5. ✅ Si approuvé → Sauvegarde automatique dans Firebase
-            6. ❌ Si refusé → Aucune sauvegarde, commentaire enregistré
-
-            **TYPES D'OPÉRATIONS** :
-            Chaque opération doit contenir :
-            - `section_type` : "beg" (début), "mid" (milieu), ou "end" (fin)
-            - `operation` : "add", "replace", ou "delete"
-            - `new_content` : Le nouveau contenu (pour add/replace)
-            - `context` : Texte exact à trouver (requis pour "mid", optionnel pour "beg"/"end")
-
-            **EXEMPLE 1 - Ajouter à la fin** :
-            ```json
-            {
-            "context_type": "router",
-            "service_name": "hr",
-            "operations": [
-                {
-                "section_type": "end",
-                "operation": "add",
-                "new_content": "\\n- Avenants aux contrats de travail"
-                }
-            ]
-            }
-            ```
-
-            **EXEMPLE 2 - Remplacer au milieu** :
-            ```json
-            {
-            "context_type": "accounting",
-            "operations": [
-                {
-                "section_type": "mid",
-                "operation": "replace",
-                "context": "TVA à 20%",
-                "new_content": "TVA à 20% (standard) ou 5.5% (taux réduit)"
-                }
-            ]
-            }
-            ```
-
-            **STATUTS DE SORTIE** :
-            - `"published"` : ✅ Modification approuvée et sauvegardée dans Firebase
-            - `"rejected"` : ❌ Modification refusée (avec commentaire utilisateur)
-            - `"timeout"` : ⏰ Aucune réponse après 15 minutes
-            - `"approved_but_save_failed"` : ⚠️ Approuvé mais erreur de sauvegarde
-
-            **GESTION DU COMMENTAIRE DE REFUS** :
-            Si l'utilisateur rejette, son commentaire est automatiquement enregistré :
-            ```json
-            {
-            "success": false,
-            "status": "rejected",
-            "rejection_reason": "Commentaire de l'utilisateur",
-            "rejected_at": "2025-10-21T..."
-            }
-            ```
-
-            ⚠️ **IMPORTANT** : Cet outil est ATOMIQUE - il fait tout en une seule fois (modification + approbation + sauvegarde). Aucun outil supplémentaire n'est nécessaire.""",
+            "description": "✏️ Mise à jour atomique d'un contexte (router/accounting/company). Opérations: add, replace, delete. Demande approbation automatique. Utilisez GET_TOOL_HELP pour plus de détails.",
             "input_schema": {
                 "type": "object",
                 "properties": {

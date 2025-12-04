@@ -4794,6 +4794,54 @@ class FirebaseManagement:
         """Alias pour delete_items_by_job_id pour compatibilité RPC."""
         return self.delete_items_by_job_id(user_id, job_ids)
 
+    def delete_task_executions_collection(self, user_id: str, mandate_path: str, thread_key: str) -> bool:
+        """
+        Supprime la collection 'executions' d'une tâche dans Firestore.
+        
+        Args:
+            user_id: ID de l'utilisateur Firebase (obligatoire)
+            mandate_path: Chemin du mandat (ex: "clients/user_id/bo_clients/doc_id/mandates/mandate_id")
+            thread_key: Clé du thread (ID de la tâche)
+            
+        Returns:
+            bool: True si la suppression a réussi, False sinon
+        """
+        try:
+            if not user_id or not mandate_path or not thread_key:
+                print(f"⚠️ user_id, mandate_path ou thread_key manquant (user_id: {user_id}, mandate_path: {mandate_path}, thread_key: {thread_key})")
+                return False
+            
+            # Construire la référence au document task
+            # mandate_path est au format: clients/user_id/bo_clients/doc_id/mandates/mandate_id
+            # On doit accéder à: mandate_path/tasks/thread_key/executions
+            mandate_ref = self.db.document(mandate_path)
+            task_ref = mandate_ref.collection('tasks').document(thread_key)
+            
+            # Supprimer tous les documents de la sous-collection executions
+            executions_ref = task_ref.collection('executions')
+            executions_docs = executions_ref.stream()
+            
+            deleted_count = 0
+            for doc in executions_docs:
+                doc.reference.delete()
+                deleted_count += 1
+            
+            if deleted_count > 0:
+                print(f"✅ {deleted_count} document(s) supprimé(s) de la collection executions")
+            else:
+                print(f"ℹ️ Aucun document trouvé dans la collection executions")
+            
+            return True
+            
+        except Exception as e:
+            print(f"⚠️ Erreur lors de la suppression de la collection executions: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+
+
+
     def delete_document_recursive(self, doc_path: str, batch_size: int = 100) -> bool:
         try:
             doc_ref = self.db.document(doc_path)
@@ -7891,26 +7939,63 @@ class FirebaseManagement:
             # Construire les mises à jour pour le scheduler
             scheduler_updates = {}
             
-            # Si le schedule a été modifié
-            if "schedule" in updates:
-                schedule = updates["schedule"]
-                if "next_execution_utc" in schedule:
-                    scheduler_updates["next_execution_utc"] = schedule["next_execution_utc"]
-                if "next_execution_local_time" in schedule:
-                    scheduler_updates["next_execution_local_time"] = schedule["next_execution_local_time"]
-                if "cron_expression" in schedule:
-                    scheduler_updates["cron_expression"] = schedule["cron_expression"]
-                if "timezone" in schedule:
-                    scheduler_updates["timezone"] = schedule["timezone"]
+            # Récupérer les données actuelles du scheduler pour comparaison
+            current_scheduler_data = scheduler_doc.to_dict() or {}
+            
+            # ⭐ CORRECTION CRITIQUE : Synchroniser le schedule depuis task_data
+            # Si next_execution_utc n'est pas dans task_data, utiliser la valeur actuelle du scheduler
+            schedule = task_data.get("schedule", {})
+            
+            # 🔍 DEBUG: Afficher ce que contient schedule pour diagnostiquer
+            logger.info(f"[TASKS] 🔍 DEBUG schedule keys: {list(schedule.keys()) if schedule else 'EMPTY'}")
+            logger.info(f"[TASKS] 🔍 DEBUG next_execution_utc in schedule: {schedule.get('next_execution_utc', 'NOT_FOUND')}")
+            
+            # Synchroniser les champs de schedule
+            # Priorité: updates["schedule"] > task_data["schedule"] > current_scheduler_data
+            updates_schedule = updates.get("schedule", {}) if isinstance(updates.get("schedule"), dict) else {}
+            
+            # next_execution_utc
+            if "next_execution_utc" in updates_schedule:
+                scheduler_updates["next_execution_utc"] = updates_schedule["next_execution_utc"]
+                logger.info(f"[TASKS] 📝 next_execution_utc mis à jour depuis updates: {updates_schedule['next_execution_utc']}")
+            elif "next_execution_utc" in schedule and schedule["next_execution_utc"]:
+                scheduler_updates["next_execution_utc"] = schedule["next_execution_utc"]
+            # Sinon, on garde la valeur actuelle (pas dans scheduler_updates = pas de modification)
+            
+            # next_execution_local_time
+            if "next_execution_local_time" in updates_schedule:
+                scheduler_updates["next_execution_local_time"] = updates_schedule["next_execution_local_time"]
+                logger.info(f"[TASKS] 📝 next_execution_local_time mis à jour depuis updates: {updates_schedule['next_execution_local_time']}")
+            elif "next_execution_local_time" in schedule and schedule["next_execution_local_time"]:
+                scheduler_updates["next_execution_local_time"] = schedule["next_execution_local_time"]
+            
+            # cron_expression
+            if "cron_expression" in updates_schedule:
+                scheduler_updates["cron_expression"] = updates_schedule["cron_expression"]
+            elif "cron_expression" in schedule:
+                scheduler_updates["cron_expression"] = schedule["cron_expression"]
+            
+            # timezone
+            if "timezone" in updates_schedule:
+                scheduler_updates["timezone"] = updates_schedule["timezone"]
+            elif "timezone" in schedule:
+                scheduler_updates["timezone"] = schedule["timezone"]
             
             # Si enabled a été modifié
             if "enabled" in updates:
                 scheduler_updates["enabled"] = updates["enabled"]
+            elif "enabled" in task_data:
+                # Sinon prendre la valeur actuelle pour garantir la cohérence
+                scheduler_updates["enabled"] = task_data["enabled"]
             
             # Si mission.title a été modifié
             if "mission" in updates and isinstance(updates["mission"], dict):
                 if "title" in updates["mission"]:
                     scheduler_updates["mission_title"] = updates["mission"]["title"]
+            elif "mission" in task_data and isinstance(task_data["mission"], dict):
+                # Sinon prendre la valeur actuelle
+                if "title" in task_data["mission"]:
+                    scheduler_updates["mission_title"] = task_data["mission"]["title"]
             
             # Si des mises à jour sont nécessaires
             if scheduler_updates:
@@ -7996,7 +8081,7 @@ class FirebaseManagement:
         Actions:
             1. Sauvegarder final_report dans task_id.last_execution_report
             2. Incrémenter execution_count
-            3. Supprimer le document d'exécution
+            3. Marquer l'exécution comme "completed" (sans supprimer pour permettre les callbacks LPT)
         """
         try:
             # 1. Sauvegarder rapport dans la tâche
@@ -8013,11 +8098,15 @@ class FirebaseManagement:
                     "updated_at": datetime.now(timezone.utc).isoformat()
                 })
 
-            # 2. Supprimer le document d'exécution
+            # 2. Marquer l'exécution comme "completed" (sans supprimer pour permettre les callbacks LPT)
             exec_ref = self.db.document(f"{mandate_path}/tasks/{task_id}/executions/{execution_id}")
-            exec_ref.delete()
+            exec_ref.update({
+                "status": final_report.get("status", "completed"),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "final_report": final_report
+            })
 
-            logger.info(f"[TASKS] Exécution finalisée: {execution_id}")
+            logger.info(f"[TASKS] Exécution finalisée: {execution_id} (conservée pour callbacks LPT)")
             return True
 
         except Exception as e:

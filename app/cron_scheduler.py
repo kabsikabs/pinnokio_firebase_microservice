@@ -10,6 +10,10 @@ Fonctionnement:
        c. Lancer _execute_scheduled_task()
        d. Mettre à jour next_execution (si SCHEDULED)
        e. Désactiver tâche (si ONE_TIME)
+
+⭐ Architecture Multi-Instance:
+    - Lock Redis distribué pour éviter les exécutions en double
+    - Seule une instance peut exécuter une tâche à la fois
 """
 
 import asyncio
@@ -22,9 +26,139 @@ from google.cloud import firestore
 logger = logging.getLogger("cron_scheduler")
 
 
+class DistributedLock:
+    """
+    Lock distribué utilisant Redis pour coordonner les instances.
+    
+    Utilise SET NX EX (atomic) pour garantir l'exclusivité.
+    """
+    
+    # Préfixe pour les clés de lock
+    KEY_PREFIX = "lock:cron"
+    
+    # TTL par défaut: 5 minutes (pour éviter les locks orphelins)
+    DEFAULT_TTL = 300
+    
+    def __init__(self, redis_client=None):
+        self._redis = redis_client
+    
+    @property
+    def redis(self):
+        """Lazy loading du client Redis."""
+        if self._redis is None:
+            from .redis_client import get_redis
+            self._redis = get_redis()
+        return self._redis
+    
+    def acquire(self, task_id: str, instance_id: str, ttl: int = None) -> bool:
+        """
+        Tente d'acquérir un lock sur une tâche.
+        
+        Args:
+            task_id: ID de la tâche à verrouiller
+            instance_id: ID unique de cette instance
+            ttl: TTL du lock en secondes (défaut: 5 min)
+            
+        Returns:
+            True si lock acquis, False si déjà verrouillé
+        """
+        try:
+            key = f"{self.KEY_PREFIX}:{task_id}"
+            ttl_seconds = ttl or self.DEFAULT_TTL
+            
+            # SET NX EX = atomic "set if not exists" avec TTL
+            result = self.redis.set(key, instance_id, nx=True, ex=ttl_seconds)
+            
+            if result:
+                logger.debug(f"[LOCK] ✅ Lock acquis: {task_id} (instance={instance_id})")
+                return True
+            else:
+                # Lock déjà pris, voir par qui
+                current_holder = self.redis.get(key)
+                if isinstance(current_holder, bytes):
+                    current_holder = current_holder.decode('utf-8')
+                logger.debug(f"[LOCK] ❌ Lock occupé: {task_id} (holder={current_holder})")
+                return False
+                
+        except Exception as e:
+            logger.error(f"[LOCK] Erreur acquire: {e}")
+            return False
+    
+    def release(self, task_id: str, instance_id: str) -> bool:
+        """
+        Libère un lock (seulement si cette instance le détient).
+        
+        Args:
+            task_id: ID de la tâche
+            instance_id: ID de cette instance
+            
+        Returns:
+            True si lock libéré, False sinon
+        """
+        try:
+            key = f"{self.KEY_PREFIX}:{task_id}"
+            
+            # Vérifier que c'est bien nous qui détenons le lock
+            current_holder = self.redis.get(key)
+            if isinstance(current_holder, bytes):
+                current_holder = current_holder.decode('utf-8')
+            
+            if current_holder == instance_id:
+                self.redis.delete(key)
+                logger.debug(f"[LOCK] 🔓 Lock libéré: {task_id}")
+                return True
+            else:
+                logger.warning(f"[LOCK] Tentative de libérer un lock non détenu: {task_id}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"[LOCK] Erreur release: {e}")
+            return False
+    
+    def extend(self, task_id: str, instance_id: str, ttl: int = None) -> bool:
+        """
+        Prolonge le TTL d'un lock (seulement si cette instance le détient).
+        
+        Args:
+            task_id: ID de la tâche
+            instance_id: ID de cette instance
+            ttl: Nouveau TTL en secondes
+            
+        Returns:
+            True si TTL prolongé, False sinon
+        """
+        try:
+            key = f"{self.KEY_PREFIX}:{task_id}"
+            ttl_seconds = ttl or self.DEFAULT_TTL
+            
+            # Vérifier que c'est bien nous
+            current_holder = self.redis.get(key)
+            if isinstance(current_holder, bytes):
+                current_holder = current_holder.decode('utf-8')
+            
+            if current_holder == instance_id:
+                self.redis.expire(key, ttl_seconds)
+                logger.debug(f"[LOCK] ⏰ TTL prolongé: {task_id} ({ttl_seconds}s)")
+                return True
+            else:
+                return False
+                
+        except Exception as e:
+            logger.error(f"[LOCK] Erreur extend: {e}")
+            return False
+    
+    def is_locked(self, task_id: str) -> bool:
+        """Vérifie si une tâche est verrouillée."""
+        key = f"{self.KEY_PREFIX}:{task_id}"
+        return bool(self.redis.exists(key))
+
+
 class CronScheduler:
     """
     Scheduler CRON pour l'exécution automatique des tâches.
+    
+    ⭐ Multi-Instance: Utilise un lock Redis distribué pour éviter
+    que plusieurs instances exécutent la même tâche.
     """
 
     def __init__(self, check_interval: int = 60):
@@ -37,8 +171,12 @@ class CronScheduler:
         self.check_interval = check_interval
         self.running = False
         self._task: Optional[asyncio.Task] = None
+        
+        # ⭐ Multi-Instance: Lock distribué + ID unique par instance
+        self._lock = DistributedLock()
+        self._instance_id = f"cron_{uuid.uuid4().hex[:8]}"
 
-        logger.info(f"[CRON] Scheduler initialisé (intervalle: {check_interval}s)")
+        logger.info(f"[CRON] Scheduler initialisé (intervalle: {check_interval}s, instance={self._instance_id})")
 
     async def start(self):
         """Démarre le scheduler."""
@@ -123,7 +261,10 @@ class CronScheduler:
         """
         Exécute une tâche.
 
+        ⭐ Multi-Instance: Utilise un lock Redis pour éviter les exécutions en double.
+
         Steps:
+            0. Acquérir lock distribué (skip si déjà pris)
             1. Générer execution_id et thread_key
             2. Créer document d'exécution (firebase.create_task_execution)
             3. Créer chat RTDB (firebase_realtime.create_chat)
@@ -131,6 +272,7 @@ class CronScheduler:
             5. Mettre à jour next_execution:
                - SCHEDULED: Calculer prochaine occurrence
                - ONE_TIME: Désactiver la tâche
+            6. Libérer le lock
         """
         try:
             task_id = task_data["task_id"]
@@ -138,8 +280,13 @@ class CronScheduler:
             company_id = task_data["company_id"]
             mandate_path = task_data["mandate_path"]
             execution_plan = task_data["execution_plan"]
+            
+            # ⭐ STEP 0: Acquérir le lock distribué
+            if not self._lock.acquire(task_id, self._instance_id):
+                logger.info(f"[CRON] ⏭️ Tâche ignorée (déjà en cours sur autre instance): {task_id}")
+                return
 
-            logger.info(f"[CRON] 🚀 Exécution tâche: {task_id} (user={user_id}, company={company_id})")
+            logger.info(f"[CRON] 🚀 Exécution tâche: {task_id} (user={user_id}, company={company_id}, instance={self._instance_id})")
 
             # 1. Générer IDs
             execution_id = f"exec_{uuid.uuid4().hex[:12]}"
@@ -224,6 +371,11 @@ class CronScheduler:
 
         except Exception as e:
             logger.error(f"[CRON] Erreur _execute_task: {e}", exc_info=True)
+        
+        finally:
+            # ⭐ STEP 6: Libérer le lock (toujours, même en cas d'erreur)
+            task_id = task_data.get("task_id", "unknown")
+            self._lock.release(task_id, self._instance_id)
 
     async def _update_scheduled_task(self, fbm, task_data: dict, triggered_at: datetime):
         """

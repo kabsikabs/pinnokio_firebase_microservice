@@ -30,6 +30,14 @@ import tiktoken
 from google import genai
 from google.genai import types
 
+# ✅ Import global de pdf2image - si non disponible, l'erreur sera levée au démarrage
+try:
+    from pdf2image import convert_from_path, convert_from_bytes
+except ImportError:
+    # pdf2image n'est pas disponible - l'erreur sera levée lors de l'utilisation
+    convert_from_path = None
+    convert_from_bytes = None
+
 # Logger pour klk_agents
 logger = logging.getLogger(__name__)
 
@@ -675,7 +683,14 @@ class BaseAIAgent:
             return ext.lower() in acceptable_extensions
         
         def convert_local_file_to_images(file_path, conversion_index=0):
-                from pdf2image import convert_from_path
+                if convert_from_path is None:
+                    raise ImportError(
+                        "Le module 'pdf2image' n'est pas disponible. "
+                        "Installez-le avec: pip install pdf2image. "
+                        "Sur Windows, vous devez aussi installer poppler: "
+                        "https://github.com/oschwartz10612/poppler-windows/releases/"
+                    )
+                
                 import mimetypes
                 
                 # Déterminer le format de sortie en fonction de conversion_index
@@ -804,6 +819,7 @@ class BaseAIAgent:
                 
         # Traitement des images
         all_images = []
+        drive_errors = []  # ✅ Collecter les erreurs pour un message plus clair
 
         # 1. Traitement des images depuis Google Drive
         if drive_files_ids:
@@ -814,7 +830,9 @@ class BaseAIAgent:
                 for file_id in drive_files_ids:
                     try:
                         if not self.firebase_user_id:
-                             print(f"Erreur: firebase_user_id manquant pour le fichier {file_id}")
+                             error_msg = f"firebase_user_id manquant pour le fichier {file_id}"
+                             print(f"Erreur: {error_msg}")
+                             drive_errors.append(f"Fichier {file_id}: {error_msg}")
                              continue
 
                         print(f"Traitement du fichier {file_id} via convert_pdf_to_png...")    
@@ -822,7 +840,9 @@ class BaseAIAgent:
                         images = self.dms_system.convert_pdf_to_png(self.firebase_user_id, file_id, conversion_index=1)
                         
                         if not images:
-                            print(f"Aucune image obtenue pour le fichier {file_id} (Type non supporté ou erreur)")
+                            error_msg = f"Aucune image obtenue pour le fichier {file_id} (Type non supporté ou erreur)"
+                            print(error_msg)
+                            drive_errors.append(f"Fichier {file_id}: Type non supporté ou erreur de conversion")
                             continue
 
                         print(f"Nombre d'images obtenues après conversion: {len(images)}")
@@ -830,8 +850,18 @@ class BaseAIAgent:
                             img_size = get_image_size(img)
                             processed_img = process_image_if_needed(img, img_size)
                             all_images.append((processed_img, get_image_size(processed_img)))
+                    except ImportError as e:
+                        # ✅ Propager les erreurs d'import de pdf2image
+                        raise
+                    except FileNotFoundError as e:
+                        # ✅ Gérer spécifiquement les erreurs 404 (fichier non trouvé)
+                        error_msg = str(e)
+                        print(f"Erreur lors du traitement du fichier Drive {file_id}: {error_msg}")
+                        drive_errors.append(f"Fichier {file_id}: {error_msg}")
                     except Exception as e:
-                        print(f"Erreur lors du traitement du fichier Drive {file_id}: {e}")
+                        error_msg = f"Erreur lors du traitement du fichier Drive {file_id}: {e}"
+                        print(error_msg)
+                        drive_errors.append(f"Fichier {file_id}: {str(e)}")
 
         # 2. Traitement des fichiers à télécharger
         if files_to_download:
@@ -862,6 +892,22 @@ class BaseAIAgent:
                 except Exception as e:
                     print(f"Erreur lors du traitement du fichier local {file_path}: {e}")
 
+        # ✅ Vérifier si toutes les sources d'images ont échoué
+        if not all_images:
+            error_details = []
+            if drive_errors:
+                error_details.append(f"Erreurs Google Drive: {', '.join(drive_errors)}")
+            if not drive_files_ids and not files_to_download and not local_files:
+                error_details.append("Aucune source d'image fournie")
+            
+            error_message = "Aucune image n'a pu être générée. "
+            if error_details:
+                error_message += " ".join(error_details)
+            else:
+                error_message += "Vérifiez que les fichiers existent et sont accessibles."
+            
+            raise ValueError(error_message)
+
         # Traitement par lots ou individuel
         all_responses = {}
         if method == 'batch':
@@ -871,7 +917,7 @@ class BaseAIAgent:
             print(f"Vérification des lots : {len(image_batches)} lots créés")
             if not image_batches:
                 print("Attention : Aucun lot d'images n'a été créé")
-                return []
+                raise ValueError("Aucun lot d'images n'a pu être créé après le traitement des fichiers.")
             for batch_index, batch in enumerate(image_batches):
                 try:
                     batch_content = []
@@ -2016,15 +2062,24 @@ class BaseAIAgent:
         
             
 
-        content=self._transforme_image_for_provider(provider=provider,drive_files_ids=file_ids,files_to_download=files_to_download,
-                                                local_files=local_files,text=text,method=method)
+        try:
+            content=self._transforme_image_for_provider(provider=provider,drive_files_ids=file_ids,files_to_download=files_to_download,
+                                                    local_files=local_files,text=text,method=method)
+        except (ImportError, ValueError) as e:
+            # ✅ Propager les erreurs spécifiques (ImportError pour pdf2image, ValueError pour autres erreurs)
+            raise e
+        except Exception as e:
+            # ✅ Gérer les autres erreurs
+            error_msg = str(e)
+            raise ValueError(
+                f"Aucun contenu d'image n'a pu être généré. Erreur: {error_msg}"
+            ) from e
         
-        # Vérifier que le contenu n'est pas vide (erreur de conversion PDF, etc.)
+        # Vérifier que le contenu n'est pas vide (sécurité supplémentaire)
         if not content or (isinstance(content, list) and len(content) == 0):
             raise ValueError(
-                "Aucun contenu d'image n'a pu être généré. "
-                "Vérifiez que pdf2image est installé (pip install pdf2image) "
-                "et que poppler est disponible sur votre système."
+                "Aucun contenu d'image n'a pu être généré après le traitement. "
+                "Vérifiez que les fichiers existent et sont accessibles."
             )
         
         if provider == ModelProvider.ANTHROPIC:
@@ -2745,6 +2800,11 @@ class BaseAIAgent:
         num_tokens = 0
         
         for message in messages:
+            # ⭐ FIX: Vérifier que le message est un dict avant d'itérer
+            if not isinstance(message, dict):
+                logging.warning(f"[TOKENS] Message non-dict ignoré: {type(message)}")
+                continue
+            
             num_tokens += tokens_per_message
             
             for key, value in message.items():
@@ -4150,7 +4210,14 @@ class NEW_Anthropic_Agent:
         return ext.lower() in acceptable_extensions
     
     def convert_local_file_to_images(self,file_path, conversion_index=0):
-            from pdf2image import convert_from_path
+            if convert_from_path is None:
+                raise ImportError(
+                    "Le module 'pdf2image' n'est pas disponible. "
+                    "Installez-le avec: pip install pdf2image. "
+                    "Sur Windows, vous devez aussi installer poppler: "
+                    "https://github.com/oschwartz10612/poppler-windows/releases/"
+                )
+            
             import mimetypes
             
             # Déterminer le format de sortie en fonction de conversion_index

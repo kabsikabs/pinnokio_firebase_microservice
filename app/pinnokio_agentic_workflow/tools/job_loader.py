@@ -60,8 +60,14 @@ class JobLoader:
         """
         Charge tous les jobs de tous les départements.
         
+        ⭐ SOURCE DE VÉRITÉ UNIQUE : Utilise cache:* (format uniforme)
+        - Mode UI : Cache Redis → Fallback sources → Mise en cache
+          (Utilisateur connecté, données mises à jour en temps réel)
+        - Mode BACKEND : Toujours sources directes → Mise en cache
+          (Utilisateur déconnecté, cache peut être obsolète)
+        
         Args:
-            mode: "UI" (avec cache) ou "BACKEND" (sans cache)
+            mode: "UI" (cache prioritaire) ou "BACKEND" (cache aussi utilisé)
             user_context: Contexte utilisateur avec mandate_path, bank_erp, etc.
         
         Returns:
@@ -177,7 +183,7 @@ class JobLoader:
         try:
             logger.info(f"[JOB_LOADER] Chargement APBookkeeper jobs...")
             
-            # Mode UI : Vérifier cache Redis
+            # Mode UI : Vérifier cache Redis (utilisateur connecté, données à jour)
             if mode == "UI":
                 cached_data = await self._get_from_cache("APBOOKEEPER")
                 if cached_data:
@@ -194,13 +200,18 @@ class JobLoader:
                     else:
                         logger.warning(f"[JOB_LOADER] ⚠️ Cache APBookkeeper VIDE (0 documents) - Fallback vers Firebase")
                         # Ne pas retourner → continue vers fallback Firebase
+                else:
+                    logger.info(f"[JOB_LOADER] ❌ CACHE MISS APBookkeeper - Fallback vers Firebase")
             
-            # Fallback ou mode BACKEND : Fetch depuis Firebase
+            # Mode BACKEND : Toujours aller à la source (cache peut être obsolète)
+            # Fallback mode UI : Si cache miss ou vide
             logger.info(f"[JOB_LOADER] Fetch APBookkeeper depuis Firebase...")
             data = await self._fetch_apbookeeper_from_firebase()
             
-            # Mettre en cache si mode UI
-            if mode == "UI" and data:
+            # ⭐ Mettre en cache dans tous les modes (format uniforme cache:*)
+            # Mode UI : Pour prochains appels
+            # Mode BACKEND : Pour que le prochain mode UI en bénéficie
+            if data:
                 await self._set_to_cache("APBOOKEEPER", data)
             
             return data
@@ -222,7 +233,7 @@ class JobLoader:
         try:
             logger.info(f"[JOB_LOADER] Chargement Router jobs...")
             
-            # Mode UI : Vérifier cache Redis
+            # Mode UI : Vérifier cache Redis (utilisateur connecté, données à jour)
             if mode == "UI":
                 cached_data = await self._get_from_cache("ROUTER")
                 if cached_data:
@@ -239,13 +250,18 @@ class JobLoader:
                     else:
                         logger.warning(f"[JOB_LOADER] ⚠️ Cache Router VIDE (0 documents) - Fallback vers Drive+Firebase")
                         # Ne pas retourner → continue vers fallback Drive
+                else:
+                    logger.info(f"[JOB_LOADER] ❌ CACHE MISS Router - Fallback vers Drive+Firebase")
             
-            # Fallback ou mode BACKEND : Fetch depuis Drive + Firebase
+            # Mode BACKEND : Toujours aller à la source (cache peut être obsolète)
+            # Fallback mode UI : Si cache miss ou vide
             logger.info(f"[JOB_LOADER] Fetch Router depuis Drive + Firebase...")
             data = await self._fetch_router_from_drive_firebase(user_context)
             
-            # Mettre en cache si mode UI
-            if mode == "UI" and data:
+            # ⭐ Mettre en cache dans tous les modes (format uniforme cache:*)
+            # Mode UI : Pour prochains appels
+            # Mode BACKEND : Pour que le prochain mode UI en bénéficie
+            if data:
                 await self._set_to_cache("ROUTER", data)
             
             return data
@@ -278,7 +294,7 @@ class JobLoader:
                 logger.info(f"[JOB_LOADER] ERP non-Odoo ({mandate_bank_erp}), pas de transactions bancaires")
                 return {"to_reconcile": [], "pending": [], "in_process": [], "in_process_batches": []}
             
-            # Mode UI : Vérifier cache Redis
+            # Mode UI : Vérifier cache Redis (utilisateur connecté, données à jour)
             if mode == "UI":
                 cached_data = await self._get_from_cache("BANK")
                 if cached_data:
@@ -295,13 +311,18 @@ class JobLoader:
                     else:
                         logger.warning(f"[JOB_LOADER] ⚠️ Cache Bank VIDE (0 transactions) - Fallback vers ERP Odoo")
                         # Ne pas retourner → continue vers fallback ERP
+                else:
+                    logger.info(f"[JOB_LOADER] ❌ CACHE MISS Bank - Fallback vers ERP Odoo")
             
-            # Fallback ou mode BACKEND : Fetch depuis ERP Odoo
+            # Mode BACKEND : Toujours aller à la source (cache peut être obsolète)
+            # Fallback mode UI : Si cache miss ou vide
             logger.info(f"[JOB_LOADER] Fetch Bank depuis ERP Odoo...")
             data = await self._fetch_bank_from_erp(user_context)
             
-            # Mettre en cache si mode UI
-            if mode == "UI" and data:
+            # ⭐ Mettre en cache dans tous les modes (format uniforme cache:*)
+            # Mode UI : Pour prochains appels
+            # Mode BACKEND : Pour que le prochain mode UI en bénéficie
+            if data:
                 await self._set_to_cache("BANK", data)
             
             return data

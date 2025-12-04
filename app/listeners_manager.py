@@ -321,42 +321,107 @@ class ListenersManager:
         evt_type = str(payload.get("type", ""))
         
         # ⭐ Événements workflow : UNIQUEMENT WebSocket (pas de Redis)
+        # ⭐ MODE BACKEND : Vérifier si user est sur ce thread avant de broadcaster
         if evt_type.startswith("workflow"):
             job_id = payload.get("job_id")
             space_code = payload.get("space_code")
+            thread_key = payload.get("payload", {}).get("thread_key")
             
-            self.logger.debug("workflow_wss_publish_start uid=%s type=%s job_id=%s space_code=%s",
-                            uid, evt_type, job_id, space_code)
+            self.logger.debug("workflow_wss_publish_start uid=%s type=%s job_id=%s space_code=%s thread_key=%s",
+                            uid, evt_type, job_id, space_code, thread_key)
             
-            try:
-                hub.broadcast_threadsafe(uid, payload)
-                self.logger.info("workflow_wss_success uid=%s type=%s job_id=%s space_code=%s", 
-                               uid, evt_type, job_id, space_code)
-            except Exception as e:
-                self.logger.error("workflow_wss_error uid=%s type=%s job_id=%s error=%s", 
-                                uid, evt_type, job_id, repr(e), exc_info=True)
+            # ⭐ Vérifier si user est sur ce thread (comme pour chat*)
+            should_broadcast_ws = True
+            if space_code and thread_key:
+                try:
+                    from .llm_service.session_state_manager import SessionStateManager
+                    state_manager = SessionStateManager()
+                    user_on_thread = state_manager.is_user_on_thread(uid, space_code, thread_key)
+                    
+                    if not user_on_thread:
+                        # Mode BACKEND : pas de broadcast WebSocket
+                        should_broadcast_ws = False
+                        self.logger.debug(
+                            "workflow_backend_mode uid=%s type=%s space=%s thread=%s (no_ws_broadcast)",
+                            uid, evt_type, space_code, thread_key
+                        )
+                    else:
+                        # Mode UI : broadcast activé
+                        self.logger.debug(
+                            "workflow_ui_mode uid=%s type=%s space=%s thread=%s (ws_broadcast_enabled)",
+                            uid, evt_type, space_code, thread_key
+                        )
+                except Exception as e:
+                    # En cas d'erreur, broadcaster par défaut (comportement conservateur)
+                    self.logger.warning(
+                        "workflow_mode_check_error uid=%s error=%s (broadcasting anyway)",
+                        uid, repr(e)
+                    )
+            
+            if should_broadcast_ws:
+                try:
+                    hub.broadcast_threadsafe(uid, payload)
+                    self.logger.info("workflow_wss_success uid=%s type=%s job_id=%s space_code=%s", 
+                                   uid, evt_type, job_id, space_code)
+                except Exception as e:
+                    self.logger.error("workflow_wss_error uid=%s type=%s job_id=%s error=%s", 
+                                    uid, evt_type, job_id, repr(e), exc_info=True)
+            else:
+                self.logger.debug("workflow_wss_skipped_backend_mode uid=%s type=%s", uid, evt_type)
             return  # Sortie anticipée, pas de Redis pour workflow
         
         # Pour autres types : Redis + WebSocket (comportement existant)
         channel = f"{self.settings.channel_prefix}{uid}"
         
         # Canal dédié pour chat si configuré
+        should_broadcast_ws = True  # Par défaut, broadcaster
         if evt_type.startswith("chat"):
             chat_prefix = os.getenv("LISTENERS_CHAT_CHANNEL_PREFIX", "chat:")
             sc = payload.get("payload", {}).get("space_code")
             tk = payload.get("payload", {}).get("thread_key")
             if sc and tk:
                 channel = f"{chat_prefix}{uid}:{sc}:{tk}"
+                
+                # ⭐ MODE BACKEND : Vérifier si user est sur ce thread avant de broadcaster
+                # Si l'utilisateur n'est pas sur ce thread, on est en mode BACKEND
+                # → Ne pas broadcaster WebSocket (économie ressources)
+                try:
+                    from .llm_service.session_state_manager import SessionStateManager
+                    state_manager = SessionStateManager()
+                    user_on_thread = state_manager.is_user_on_thread(uid, sc, tk)
+                    
+                    if not user_on_thread:
+                        # Mode BACKEND : pas de broadcast WebSocket
+                        should_broadcast_ws = False
+                        self.logger.debug(
+                            "chat_message_backend_mode uid=%s space=%s thread=%s (no_ws_broadcast)",
+                            uid, sc, tk
+                        )
+                    else:
+                        # Mode UI : broadcast activé
+                        self.logger.debug(
+                            "chat_message_ui_mode uid=%s space=%s thread=%s (ws_broadcast_enabled)",
+                            uid, sc, tk
+                        )
+                except Exception as e:
+                    # En cas d'erreur, broadcaster par défaut (comportement conservateur)
+                    self.logger.warning(
+                        "chat_message_mode_check_error uid=%s error=%s (broadcasting anyway)",
+                        uid, repr(e)
+                    )
         
         try:
             self.redis.publish(channel, json.dumps(payload))
         except Exception as e:
             self.logger.error("redis_publish_error uid=%s error=%s", uid, repr(e))
-        # WS (best-effort): utiliser une diffusion thread-safe vers la loop serveur
-        try:
-            hub.broadcast_threadsafe(uid, payload)
-        except Exception as e:
-            self.logger.error("ws_broadcast_error uid=%s error=%s", uid, repr(e))
+        # WS (best-effort): broadcaster UNIQUEMENT si mode UI
+        if should_broadcast_ws:
+            try:
+                hub.broadcast_threadsafe(uid, payload)
+            except Exception as e:
+                self.logger.error("ws_broadcast_error uid=%s error=%s", uid, repr(e))
+        else:
+            self.logger.debug("ws_broadcast_skipped_backend_mode uid=%s type=%s", uid, evt_type)
         self.logger.info("publish type=%s uid=%s channel=%s", payload.get("type"), uid, channel)
 
     def _publish_notifications_sync(self, uid: str) -> None:

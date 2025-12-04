@@ -5,10 +5,18 @@ import threading
 from typing import Optional
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from .tools.g_cred import get_secret
 from .firebase_providers import FirebaseManagement
+
+# ✅ Import global de pdf2image - si non disponible, l'erreur sera levée au démarrage
+try:
+    from pdf2image import convert_from_bytes
+except ImportError:
+    # pdf2image n'est pas disponible - l'erreur sera levée lors de l'utilisation
+    convert_from_bytes = None
 
 
 class DriveClientServiceSingleton:
@@ -1007,7 +1015,14 @@ class DriveClientServiceSingleton:
 
                 import io
                 from googleapiclient.http import MediaIoBaseDownload
-                from pdf2image import convert_from_bytes
+                
+                if convert_from_bytes is None:
+                    raise ImportError(
+                        "Le module 'pdf2image' n'est pas disponible. "
+                        "Installez-le avec: pip install pdf2image. "
+                        "Sur Windows, vous devez aussi installer poppler: "
+                        "https://github.com/oschwartz10612/poppler-windows/releases/"
+                    )
 
                 fh = io.BytesIO()
                 downloader = MediaIoBaseDownload(fh, request, chunksize=204800)
@@ -1031,8 +1046,14 @@ class DriveClientServiceSingleton:
                 raise ValueError("Unsupported file type")
 
         except Exception as e:
-            print(f"Erreur convert_pdf_to_png: {e}")
-            return None
+            # ✅ Détecter spécifiquement les erreurs 404 (fichier non trouvé)
+            if isinstance(e, HttpError) and e.resp.status == 404:
+                error_msg = f"Fichier Google Drive non trouvé (404): {drive_file_id}. Le fichier a peut-être été supprimé ou déplacé, ou vous n'avez pas les permissions nécessaires."
+                print(f"Erreur convert_pdf_to_png: {error_msg}")
+                raise FileNotFoundError(error_msg) from e
+            else:
+                print(f"Erreur convert_pdf_to_png: {e}")
+                return None
 
     
     def update_folder_description(self,user_id:str, folder_id: str, new_description: str):

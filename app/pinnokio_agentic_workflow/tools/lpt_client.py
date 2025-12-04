@@ -164,31 +164,11 @@ class LPTClient:
             session: LLMSession (optionnel) pour cache contexte thread
             brain: PinnokioBrain (optionnel) pour accès au contexte utilisateur déjà chargé
         """
-        # Définitions d'outils SIMPLIFIÉES pour l'agent
+        # Définitions d'outils COURTES pour l'API (doc détaillée via GET_TOOL_HELP)
         tools_list = [
             {
                 "name": "LPT_APBookkeeper",
-                "description": """📋 Saisie automatique de factures fournisseur (AP Bookkeeper).
-                
-Utilisez cet outil pour traiter et saisir des factures fournisseur dans l'ERP.
-
-INSTRUCTIONS POUR L'AGENT :
-- Fournissez UNIQUEMENT les IDs des fichiers (job_ids) à traiter
-- Ajoutez des instructions spécifiques si nécessaire (optionnel)
-- Tout le reste (collection, user, settings, approbations) est automatique
-
-⚙️ PARAMÈTRES AUTOMATIQUES (configurés dans les paramètres système) :
-- approval_required : Configuré dans workflow_params
-- approval_contact_creation : Configuré dans workflow_params
-
-EXEMPLE D'UTILISATION :
-{
-    "job_ids": ["file_abc123", "file_def456"],
-    "general_instructions": "Vérifier les montants HT/TTC",
-    "file_instructions": {
-        "file_abc123": "Facture urgente, prioriser"
-    }
-}""",
+                "description": "📋 Saisie automatique de factures fournisseur. Fournir job_ids (depuis GET_APBOOKEEPER_JOBS). Paramètres d'approbation automatiques. GET_TOOL_HELP pour détails.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -211,24 +191,7 @@ EXEMPLE D'UTILISATION :
             },
             {
                 "name": "LPT_Router",
-                "description": """🗂️ Routage automatique de documents (Router).
-                
-Utilisez cet outil pour router et classifier des documents automatiquement.
-
-INSTRUCTIONS POUR L'AGENT :
-- Fournissez l'ID du fichier Drive à router
-- Ajoutez des instructions si nécessaire (optionnel)
-- Tout le reste (approbations, workflows) est automatique
-
-⚙️ PARAMÈTRES AUTOMATIQUES (configurés dans les paramètres système) :
-- approval_required : Configuré dans workflow_params
-- automated_workflow : Configuré dans workflow_params
-
-EXEMPLE D'UTILISATION :
-{
-    "drive_file_id": "file_xyz789",
-    "instructions": "Router vers le dossier Factures"
-}""",
+                "description": "🗂️ Routage automatique de documents. Fournir drive_file_id. Workflow automatisé selon config. GET_TOOL_HELP pour détails.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -246,32 +209,7 @@ EXEMPLE D'UTILISATION :
             },
             {
                 "name": "LPT_Banker",
-                "description": """🏦 Réconciliation bancaire automatique (Banker).
-                
-Utilisez cet outil pour réconcilier des transactions bancaires avec l'ERP.
-
-INSTRUCTIONS POUR L'AGENT :
-- Fournissez le compte bancaire et les IDs de transactions
-- Ajoutez des instructions si nécessaire (optionnel)
-
-📝 TYPES D'INSTRUCTIONS :
-- `instructions` : Instructions spécifiques pour ce job (placées dans jobs_data[].instructions)
-- `start_instructions` : Instructions générales pour tout le batch (placées au niveau racine du payload)
-- `transaction_instructions` : Instructions par transaction {transaction_id: instructions} (optionnel)
-
-⚙️ PARAMÈTRES AUTOMATIQUES (configurés dans les paramètres système) :
-- approval_required : Configuré dans workflow_params
-
-EXEMPLE D'UTILISATION :
-{
-    "bank_account": "FR76 1234 5678 9012 3456",
-    "transaction_ids": ["tx_001", "tx_002", "tx_003"],
-    "instructions": "Vérifier les doublons",
-    "start_instructions": "Instructions générales pour tout le batch",
-    "transaction_instructions": {
-        "tx_001": "Transaction urgente à traiter en priorité"
-    }
-}""",
+                "description": "🏦 Réconciliation bancaire automatique. Fournir bank_account et transaction_ids. GET_TOOL_HELP pour détails.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -303,12 +241,7 @@ EXEMPLE D'UTILISATION :
             },
             {
                 "name": "LPT_APBookkeeper_ALL",
-                "description": """🚀 Traitement complet des factures fournisseur disponibles.
-                
-Utilisez cet outil pour lancer automatiquement *toutes* les factures prêtes dans APBookkeeper (statut `to_do`).
-L'outil construit le payload complet (job_ids, instructions, paramètres système) sans intervention.
-
-⚠️ Si aucune facture n'est disponible, l'outil retourne une alerte sans lancer de traitement.""",
+                "description": "🚀 Traite TOUTES les factures en statut to_do. Aucun paramètre requis.",
                 "input_schema": {
                     "type": "object",
                     "properties": {},
@@ -317,12 +250,7 @@ L'outil construit le payload complet (job_ids, instructions, paramètres systèm
             },
             {
                 "name": "LPT_Router_ALL",
-                "description": """🚀 Routage automatique de tous les documents disponibles.
-                
-Utilisez cet outil pour router *tous* les documents en attente (statut `to_process`).
-Le payload complet est généré automatiquement avec instructions et paramètres workflow.
-
-⚠️ Aucun paramètre requis. Si aucun document n'est disponible, l'outil retourne une alerte.""",
+                "description": "🚀 Route TOUS les documents en statut to_process. Aucun paramètre requis.",
                 "input_schema": {
                     "type": "object",
                     "properties": {},
@@ -331,17 +259,7 @@ Le payload complet est généré automatiquement avec instructions et paramètre
             },
             {
                 "name": "LPT_Banker_ALL",
-                "description": """🚀 Réconciliation bancaire globale.
-                
-Lance automatiquement la réconciliation de toutes les transactions disponibles.
-- Sans argument → toutes les banques
-- Avec `bank_account` → uniquement la banque ciblée (journal_id ou nom)
-
-📝 INSTRUCTIONS :
-- `start_instructions` : Instructions générales pour tout le batch (placées au niveau racine) - optionnel
-
-Le payload respecte le format notifications Banker (transactions regroupées par compte).
-⚠️ Si aucune transaction à traiter, l'outil retourne une alerte.""",
+                "description": "🚀 Réconcilie TOUTES les transactions to_reconcile. Optionnel: bank_account pour cibler un compte.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -524,8 +442,31 @@ Le payload respecte le format notifications Banker (transactions regroupées par
             context = brain.get_user_context()
             mandate_path = context.get('mandate_path')
             
-            # 🔍 Compter le nombre de factures à traiter
-            apbookeeper_jobs = ((brain.jobs_data or {}).get("APBOOKEEPER", {}) if brain else {}).get("to_do", []) or []
+            # ⭐ NOUVEAU : Recharger depuis Redis si mode UI (données à jour)
+            apbookeeper_jobs = []
+            mode = "UI" if context else "BACKEND"
+            
+            if mode == "UI" and brain and brain.user_context:
+                try:
+                    from ..tools.job_loader import JobLoader
+                    loader = JobLoader(
+                        user_id=user_id,
+                        company_id=company_id,
+                        client_uuid=context.get("client_uuid")
+                    )
+                    fresh_ap_data = await loader.load_apbookeeper_jobs(mode="UI")
+                    if fresh_ap_data:
+                        apbookeeper_jobs = fresh_ap_data.get('to_do', [])
+                        logger.info(f"[LPT_APBookkeeper_ALL] ✅ Données rechargées depuis Redis - {len(apbookeeper_jobs)} factures to_do")
+                except Exception as e:
+                    logger.warning(f"[LPT_APBookkeeper_ALL] ⚠️ Erreur rechargement Redis: {e} - Fallback vers brain.jobs_data")
+            
+            # Fallback vers brain.jobs_data si pas de données Redis ou mode BACKEND
+            if not apbookeeper_jobs:
+                apbookeeper_jobs = ((brain.jobs_data or {}).get("APBOOKEEPER", {}) if brain else {}).get("to_do", []) or []
+                if apbookeeper_jobs:
+                    logger.info(f"[LPT_APBookkeeper_ALL] 🔄 Utilisation données statiques brain.jobs_data - {len(apbookeeper_jobs)} factures")
+            
             nb_invoices = len(apbookeeper_jobs)
             
             # 🛡️ VÉRIFICATION DU SOLDE AVANT L'ENVOI
@@ -564,8 +505,8 @@ Le payload respecte le format notifications Banker (transactions regroupées par
                 f"pour {nb_invoices} factures"
             )
             
-            ap_jobs = (brain.jobs_data or {}).get("APBOOKEEPER", {}) if brain else {}
-            to_do_jobs = ap_jobs.get("to_do", []) or []
+            # ⭐ apbookeeper_jobs déjà rechargé depuis Redis ci-dessus (ou fallback brain.jobs_data)
+            to_do_jobs = apbookeeper_jobs
             
             job_ids: List[str] = []
             file_instructions: Dict[str, str] = {}
@@ -690,9 +631,32 @@ Le payload respecte le format notifications Banker (transactions regroupées par
                 f"approval_contact_creation={approval_contact_creation}"
             )
             
-            # ⭐ RÉSOLUTION DES FILE_NAMES depuis le cache APBookkeeper
-            # Chercher les job_ids dans brain.jobs_data['APBOOKEEPER']
-            apbookeeper_jobs = (brain.jobs_data or {}).get("APBOOKEEPER", {}) if brain else {}
+            # ⭐ RÉSOLUTION DES FILE_NAMES depuis Redis (données à jour) ou jobs_data (fallback)
+            # ⭐ NOUVEAU : Recharger depuis Redis si mode UI (même logique que GET_APBOOKEEPER_JOBS)
+            apbookeeper_jobs = {}
+            mode = "UI" if context else "BACKEND"
+            
+            # ⭐ Recharger depuis Redis si mode UI (données à jour)
+            if mode == "UI" and brain and brain.user_context:
+                try:
+                    from ..tools.job_loader import JobLoader
+                    loader = JobLoader(
+                        user_id=user_id,
+                        company_id=company_id,
+                        client_uuid=context.get("client_uuid")
+                    )
+                    fresh_ap_data = await loader.load_apbookeeper_jobs(mode="UI")
+                    if fresh_ap_data:
+                        apbookeeper_jobs = fresh_ap_data
+                        logger.info(f"[LPT_APBookkeeper] ✅ Données rechargées depuis Redis")
+                except Exception as e:
+                    logger.warning(f"[LPT_APBookkeeper] ⚠️ Erreur rechargement Redis: {e} - Fallback vers brain.jobs_data")
+            
+            # Fallback vers brain.jobs_data si pas de données Redis ou mode BACKEND
+            if not apbookeeper_jobs:
+                apbookeeper_jobs = (brain.jobs_data or {}).get("APBOOKEEPER", {}) if brain else {}
+                if apbookeeper_jobs:
+                    logger.info(f"[LPT_APBookkeeper] 🔄 Utilisation données statiques brain.jobs_data")
             
             # Agréger toutes les listes possibles
             aggregated_ap_jobs = []
@@ -945,8 +909,31 @@ Le payload respecte le format notifications Banker (transactions regroupées par
             context = brain.get_user_context()
             mandate_path = context.get('mandate_path')
             
-            # 🔍 Compter le nombre de documents à router
-            router_jobs = ((brain.jobs_data or {}).get("ROUTER", {}) if brain else {}).get("to_process", []) or []
+            # ⭐ NOUVEAU : Recharger depuis Redis si mode UI (données à jour)
+            router_jobs = []
+            mode = "UI" if context else "BACKEND"
+            
+            if mode == "UI" and brain and brain.user_context:
+                try:
+                    from ..tools.job_loader import JobLoader
+                    loader = JobLoader(
+                        user_id=user_id,
+                        company_id=company_id,
+                        client_uuid=context.get("client_uuid")
+                    )
+                    fresh_router_data = await loader.load_router_jobs(mode="UI", user_context=context)
+                    if fresh_router_data:
+                        router_jobs = fresh_router_data.get('to_process', [])
+                        logger.info(f"[LPT_Router_ALL] ✅ Données rechargées depuis Redis - {len(router_jobs)} documents to_process")
+                except Exception as e:
+                    logger.warning(f"[LPT_Router_ALL] ⚠️ Erreur rechargement Redis: {e} - Fallback vers brain.jobs_data")
+            
+            # Fallback vers brain.jobs_data si pas de données Redis ou mode BACKEND
+            if not router_jobs:
+                router_jobs = ((brain.jobs_data or {}).get("ROUTER", {}) if brain else {}).get("to_process", []) or []
+                if router_jobs:
+                    logger.info(f"[LPT_Router_ALL] 🔄 Utilisation données statiques brain.jobs_data - {len(router_jobs)} documents")
+            
             nb_documents = len(router_jobs)
             
             # 🛡️ VÉRIFICATION DU SOLDE AVANT L'ENVOI
@@ -992,7 +979,7 @@ Le payload respecte le format notifications Banker (transactions regroupées par
             approval_required = router_params.get('router_approval_required', False)
             automated_workflow = router_params.get('router_automated_workflow', True)
             
-            router_jobs = ((brain.jobs_data or {}).get("ROUTER", {}) if brain else {}).get("to_process", []) or []
+            # ⭐ router_jobs déjà rechargé depuis Redis ci-dessus (ou fallback brain.jobs_data)
             
             documents_to_route: List[Dict[str, Any]] = []
             for job in router_jobs:
@@ -1091,7 +1078,8 @@ Le payload respecte le format notifications Banker (transactions regroupées par
                                     drive_file_id=doc["drive_file_id"],
                                     file_name=doc["file_name"],
                                     pub_sub_id=pub_sub_id,
-                                    instructions=doc["instructions"]
+                                    instructions=doc["instructions"],
+                                    user_context=context  # ✅ Pour mise à jour Redis
                                 )
                             
                             return {
@@ -1220,23 +1208,45 @@ Le payload respecte le format notifications Banker (transactions regroupées par
             execution_id = execution_id or (brain.active_task_data.get("execution_id") if brain and brain.active_task_data else None)
             execution_plan = execution_plan or (brain.active_task_data.get("execution_plan") if brain and brain.active_task_data else None)
 
-            # ⭐ RÉSOLUTION DU FILE_NAME depuis le cache jobs_data
-            # Chercher le job correspondant au drive_file_id dans brain.jobs_data['ROUTER']
+            # ⭐ RÉSOLUTION DU FILE_NAME depuis Redis (données à jour) ou jobs_data (fallback)
+            # ⭐ NOUVEAU : Recharger depuis Redis si mode UI (même logique que GET_ROUTER_JOBS)
             resolved_file_name = drive_file_id  # Fallback par défaut
+            router_jobs = []
             
-            # 🔍 DEBUG: Afficher la structure complète de ROUTER
+            # Déterminer le mode (UI si user_context existe, BACKEND sinon)
+            mode = "UI" if context else "BACKEND"
+            
+            # ⭐ Recharger depuis Redis si mode UI (données à jour)
+            if mode == "UI" and brain and brain.user_context:
+                try:
+                    from ..tools.job_loader import JobLoader
+                    loader = JobLoader(
+                        user_id=user_id,
+                        company_id=company_id,
+                        client_uuid=context.get("client_uuid")
+                    )
+                    # Recharger uniquement Router depuis Redis
+                    fresh_router_data = await loader.load_router_jobs(mode="UI", user_context=context)
+                    if fresh_router_data:
+                        router_jobs = fresh_router_data.get('to_process', [])
+                        logger.info(f"[LPT_Router] ✅ Données rechargées depuis Redis - {len(router_jobs)} documents to_process")
+                    else:
+                        logger.warning(f"[LPT_Router] ⚠️ Aucune donnée Router depuis Redis - Fallback vers brain.jobs_data")
+                except Exception as e:
+                    logger.warning(f"[LPT_Router] ⚠️ Erreur rechargement Redis: {e} - Fallback vers brain.jobs_data")
+            
+            # Fallback vers brain.jobs_data si pas de données Redis ou mode BACKEND
+            if not router_jobs and brain and brain.jobs_data and 'ROUTER' in brain.jobs_data:
+                router_jobs = brain.jobs_data['ROUTER'].get('to_process', [])
+                logger.info(f"[LPT_Router] 🔄 Utilisation données statiques brain.jobs_data - {len(router_jobs)} documents")
+            
+            # 🔍 DEBUG: Afficher la structure
             if brain and brain.jobs_data:
                 logger.info(f"[LPT_Router] 🔍 DEBUG brain.jobs_data keys: {list(brain.jobs_data.keys())}")
                 if 'ROUTER' in brain.jobs_data:
                     logger.info(f"[LPT_Router] 🔍 DEBUG brain.jobs_data['ROUTER'] keys: {list(brain.jobs_data['ROUTER'].keys())}")
-                else:
-                    logger.warning(f"[LPT_Router] ⚠️ brain.jobs_data existe MAIS pas de clé 'ROUTER'")
-            else:
-                logger.warning(f"[LPT_Router] ⚠️ brain.jobs_data est None ou vide")
             
-            if brain and brain.jobs_data and 'ROUTER' in brain.jobs_data:
-                # ✅ Correction: c'est 'to_process' et non 'unprocessed'
-                router_jobs = brain.jobs_data['ROUTER'].get('to_process', [])
+            if router_jobs:
                 
                 # 🔍 DEBUG: Afficher la structure
                 logger.info(f"[LPT_Router] 🔍 DEBUG - Nombre de jobs to_process: {len(router_jobs)}")
@@ -1389,7 +1399,8 @@ Le payload respecte le format notifications Banker (transactions regroupées par
                                 drive_file_id=drive_file_id,
                                 file_name=resolved_file_name,  # ⭐ NOUVEAU: Passer le vrai nom du fichier
                                 pub_sub_id=pub_sub_id,
-                                instructions=instructions
+                                instructions=instructions,
+                                user_context=context  # ✅ Pour mise à jour Redis
                             )
                             
                             return {
@@ -1681,9 +1692,33 @@ Le payload respecte le format notifications Banker (transactions regroupées par
             context = brain.get_user_context()
             mandate_path = context.get('mandate_path')
             
-            # 🔍 Compter le nombre de transactions à traiter
-            bank_data = (brain.jobs_data or {}).get("BANK", {}) if brain else {}
-            unprocessed_transactions = bank_data.get("unprocessed", []) or []
+            # ⭐ NOUVEAU : Recharger depuis Redis si mode UI (données à jour)
+            bank_data = {}
+            mode = "UI" if context else "BACKEND"
+            
+            if mode == "UI" and brain and brain.user_context:
+                try:
+                    from ..tools.job_loader import JobLoader
+                    loader = JobLoader(
+                        user_id=user_id,
+                        company_id=company_id,
+                        client_uuid=context.get("client_uuid")
+                    )
+                    fresh_bank_data = await loader.load_bank_transactions(mode="UI", user_context=context)
+                    if fresh_bank_data:
+                        bank_data = fresh_bank_data
+                        logger.info(f"[LPT_Banker_ALL] ✅ Données rechargées depuis Redis")
+                except Exception as e:
+                    logger.warning(f"[LPT_Banker_ALL] ⚠️ Erreur rechargement Redis: {e} - Fallback vers brain.jobs_data")
+            
+            # Fallback vers brain.jobs_data si pas de données Redis ou mode BACKEND
+            if not bank_data:
+                bank_data = (brain.jobs_data or {}).get("BANK", {}) if brain else {}
+                if bank_data:
+                    logger.info(f"[LPT_Banker_ALL] 🔄 Utilisation données statiques brain.jobs_data")
+            
+            # ✅ Correction: utiliser 'to_reconcile' (format Reflex) au lieu de 'unprocessed'
+            unprocessed_transactions = bank_data.get("to_reconcile", []) or []
             nb_transactions = len(unprocessed_transactions)
             
             # 🛡️ VÉRIFICATION DU SOLDE AVANT L'ENVOI
@@ -1727,10 +1762,10 @@ Le payload respecte le format notifications Banker (transactions regroupées par
             approval_required = banker_params.get('banker_approval_required', False)
             approval_threshold = banker_params.get('banker_approval_thresholdworkflow', '95')
             
-            bank_jobs = (brain.jobs_data or {}).get("BANK", {}) if brain else {}
+            # ⭐ bank_data déjà rechargé depuis Redis ci-dessus (ou fallback brain.jobs_data)
             aggregated_transactions: List[Dict[str, Any]] = []
             for key in ["to_reconcile", "pending", "in_process"]:
-                tx_list = bank_jobs.get(key)
+                tx_list = bank_data.get(key)
                 if isinstance(tx_list, list):
                     aggregated_transactions.extend(tx_list)
             
@@ -1921,7 +1956,8 @@ Le payload respecte le format notifications Banker (transactions regroupées par
                                     batch_id=batch_id,
                                     job_id=notif["job_id"],
                                     bank_account=notif["bank_account"],
-                                    transactions=notif["transactions"]
+                                    transactions=notif["transactions"],
+                                    user_context=context  # ✅ Pour mise à jour Redis
                                 )
                             
                             return {
@@ -2044,9 +2080,32 @@ Le payload respecte le format notifications Banker (transactions regroupées par
                 f"approval_required={approval_required}"
             )
             
-            # ⭐ RÉSOLUTION DES TRANSACTIONS depuis le cache BANK
-            # Chercher les transaction_ids dans brain.jobs_data['BANK']
-            bank_jobs = (brain.jobs_data or {}).get("BANK", {}) if brain else {}
+            # ⭐ RÉSOLUTION DES TRANSACTIONS depuis Redis (données à jour) ou jobs_data (fallback)
+            # ⭐ NOUVEAU : Recharger depuis Redis si mode UI (même logique que GET_BANK_TRANSACTIONS)
+            bank_jobs = {}
+            mode = "UI" if context else "BACKEND"
+            
+            # ⭐ Recharger depuis Redis si mode UI (données à jour)
+            if mode == "UI" and brain and brain.user_context:
+                try:
+                    from ..tools.job_loader import JobLoader
+                    loader = JobLoader(
+                        user_id=user_id,
+                        company_id=company_id,
+                        client_uuid=context.get("client_uuid")
+                    )
+                    fresh_bank_data = await loader.load_bank_transactions(mode="UI", user_context=context)
+                    if fresh_bank_data:
+                        bank_jobs = fresh_bank_data
+                        logger.info(f"[LPT_Banker] ✅ Données rechargées depuis Redis")
+                except Exception as e:
+                    logger.warning(f"[LPT_Banker] ⚠️ Erreur rechargement Redis: {e} - Fallback vers brain.jobs_data")
+            
+            # Fallback vers brain.jobs_data si pas de données Redis ou mode BACKEND
+            if not bank_jobs:
+                bank_jobs = (brain.jobs_data or {}).get("BANK", {}) if brain else {}
+                if bank_jobs:
+                    logger.info(f"[LPT_Banker] 🔄 Utilisation données statiques brain.jobs_data")
             
             # Agréger toutes les listes possibles
             all_transactions = []
@@ -2259,7 +2318,8 @@ Le payload respecte le format notifications Banker (transactions regroupées par
                                 batch_id=batch_id,
                                 job_id=batch_id,
                                 bank_account=bank_account,
-                                transactions=valid_transactions
+                                transactions=valid_transactions,
+                                user_context=context  # ✅ Pour mise à jour Redis
                             )
                             
                             # Message de retour avec warning si certaines transactions invalides
@@ -2501,6 +2561,104 @@ Le payload respecte le format notifications Banker (transactions regroupées par
         except Exception as e:
             logger.error(f"Erreur mise à jour statut tâche Firebase: {e}", exc_info=True)
     
+    async def _update_redis_cache_after_apbookeeper_notification(
+        self,
+        user_id: str,
+        company_id: str,
+        jobs_data: List[Dict[str, Any]]
+    ):
+        """Met à jour le cache Redis après création de notifications APBookkeeper.
+        
+        Cette fonction est appelée après chaque création de notification pour maintenir
+        la cohérence du cache Redis avec l'état Firebase.
+        """
+        try:
+            from ..tools.job_loader import JobLoader
+            
+            # Créer un JobLoader pour accéder aux méthodes de cache
+            loader = JobLoader(user_id=user_id, company_id=company_id)
+            
+            # Recharger les données actuelles depuis Redis ou Firebase
+            current_data = await loader.load_apbookeeper_jobs(mode="UI")
+            
+            if not current_data:
+                logger.warning("[LPT_APBookkeeper] ⚠️ Impossible de recharger les données pour mise à jour Redis")
+                return
+            
+            # Extraire les job_ids qui ont été déplacés vers in_queue
+            moved_job_ids = {job['job_id'] for job in jobs_data}
+            
+            # Mettre à jour les listes : déplacer de to_do/pending vers in_process
+            updated_to_do = [
+                item for item in current_data.get('to_do', [])
+                if item.get('job_id') not in moved_job_ids
+            ]
+            updated_pending = [
+                item for item in current_data.get('pending', [])
+                if item.get('job_id') not in moved_job_ids
+            ]
+            
+            # Créer les items pour in_process avec le statut 'in_queue'
+            new_in_process_items = []
+            for job in jobs_data:
+                # Trouver l'item original dans to_do ou pending
+                original_item = None
+                for item in current_data.get('to_do', []):
+                    if item.get('job_id') == job['job_id']:
+                        original_item = item.copy()
+                        break
+                if not original_item:
+                    for item in current_data.get('pending', []):
+                        if item.get('job_id') == job['job_id']:
+                            original_item = item.copy()
+                            break
+                
+                # Créer un nouvel item avec le statut mis à jour
+                if original_item:
+                    new_item = original_item.copy()
+                    new_item['status'] = 'in_queue'
+                    new_in_process_items.append(new_item)
+                else:
+                    # Si l'item n'est pas trouvé, créer un item minimal
+                    new_item = {
+                        'job_id': job['job_id'],
+                        'file_name': job.get('file_name', f"document_{job['job_id']}"),
+                        'status': 'in_queue',
+                        'timestamp': datetime.now(timezone.utc).isoformat()
+                    }
+                    new_in_process_items.append(new_item)
+            
+            # Ajouter les nouveaux items à in_process (éviter les doublons)
+            existing_in_process = current_data.get('in_process', [])
+            existing_job_ids = {item.get('job_id') for item in existing_in_process}
+            for new_item in new_in_process_items:
+                if new_item.get('job_id') not in existing_job_ids:
+                    existing_in_process.append(new_item)
+            
+            # Préparer les données mises à jour
+            updated_data = {
+                'to_do': updated_to_do,
+                'in_process': existing_in_process,
+                'pending': updated_pending,
+                'processed': current_data.get('processed', [])
+            }
+            
+            # Sauvegarder dans Redis avec le même format que JobLoader
+            await loader._set_to_cache("APBOOKEEPER", updated_data, ttl=1800)
+            
+            logger.info(
+                f"[LPT_APBookkeeper] ✅ Cache Redis mis à jour: "
+                f"{len(updated_data['to_do'])} to_do, "
+                f"{len(updated_data['in_process'])} in_process, "
+                f"{len(updated_data['pending'])} pending"
+            )
+            
+        except Exception as e:
+            # Ne pas bloquer si Redis est indisponible
+            logger.warning(f"[LPT_APBookkeeper] ⚠️ Erreur mise à jour Redis (non bloquant): {e}")
+            import traceback
+            traceback.print_exc()
+    
     async def _create_apbookeeper_notifications(
         self,
         user_id: str,
@@ -2539,9 +2697,96 @@ Le payload respecte le format notifications Banker (transactions regroupées par
                 firebase_service.add_or_update_job_by_file_id(notification_path, notification_data)
                 
             logger.info(f"Notifications APBookkeeper créées: {len(jobs_data)} notifications")
+            
+            # ✅ Mise à jour Redis après création des notifications
+            await self._update_redis_cache_after_apbookeeper_notification(
+                user_id=user_id,
+                company_id=company_id,
+                jobs_data=jobs_data
+            )
         
         except Exception as e:
             logger.error(f"Erreur création notifications APBookkeeper: {e}", exc_info=True)
+    
+    async def _update_redis_cache_after_router_notification(
+        self,
+        user_id: str,
+        company_id: str,
+        drive_file_id: str,
+        user_context: Optional[Dict] = None
+    ):
+        """Met à jour le cache Redis après création de notification Router.
+        
+        Cette fonction est appelée après chaque création de notification pour maintenir
+        la cohérence du cache Redis avec l'état Firebase.
+        """
+        try:
+            from ..tools.job_loader import JobLoader
+            
+            # Créer un JobLoader pour accéder aux méthodes de cache
+            loader = JobLoader(user_id=user_id, company_id=company_id)
+            
+            # Recharger les données actuelles depuis Redis ou Firebase
+            current_data = await loader.load_router_jobs(mode="UI", user_context=user_context or {})
+            
+            if not current_data:
+                logger.warning("[LPT_Router] ⚠️ Impossible de recharger les données pour mise à jour Redis")
+                return
+            
+            # Mettre à jour les listes : déplacer de to_process vers in_process
+            updated_to_process = [
+                item for item in current_data.get('to_process', [])
+                if item.get('drive_file_id') != drive_file_id
+            ]
+            
+            # Trouver l'item original dans to_process
+            original_item = None
+            for item in current_data.get('to_process', []):
+                if item.get('drive_file_id') == drive_file_id:
+                    original_item = item.copy()
+                    break
+            
+            # Créer un nouvel item pour in_process avec le statut 'in_queue'
+            new_in_process_item = None
+            if original_item:
+                new_in_process_item = original_item.copy()
+                new_in_process_item['status'] = 'in_queue'
+            else:
+                # Si l'item n'est pas trouvé, créer un item minimal
+                new_in_process_item = {
+                    'drive_file_id': drive_file_id,
+                    'status': 'in_queue',
+                    'timestamp': datetime.now(timezone.utc).isoformat()
+                }
+            
+            # Ajouter à in_process (éviter les doublons)
+            existing_in_process = current_data.get('in_process', [])
+            existing_file_ids = {item.get('drive_file_id') for item in existing_in_process}
+            
+            if new_in_process_item and new_in_process_item.get('drive_file_id') not in existing_file_ids:
+                existing_in_process.append(new_in_process_item)
+            
+            # Préparer les données mises à jour
+            updated_data = {
+                'to_process': updated_to_process,
+                'in_process': existing_in_process,
+                'processed': current_data.get('processed', [])
+            }
+            
+            # Sauvegarder dans Redis avec le même format que JobLoader
+            await loader._set_to_cache("ROUTER", updated_data, ttl=1800)
+            
+            logger.info(
+                f"[LPT_Router] ✅ Cache Redis mis à jour: "
+                f"{len(updated_data['to_process'])} to_process, "
+                f"{len(updated_data['in_process'])} in_process"
+            )
+            
+        except Exception as e:
+            # Ne pas bloquer si Redis est indisponible
+            logger.warning(f"[LPT_Router] ⚠️ Erreur mise à jour Redis (non bloquant): {e}")
+            import traceback
+            traceback.print_exc()
     
     async def _create_router_notification(
         self,
@@ -2551,7 +2796,8 @@ Le payload respecte le format notifications Banker (transactions regroupées par
         drive_file_id: str,
         file_name: str,  # ⭐ NOUVEAU: Nom du fichier résolu
         pub_sub_id: str,
-        instructions: Optional[str]
+        instructions: Optional[str],
+        user_context: Optional[Dict] = None  # ⭐ NOUVEAU: Contexte pour mise à jour Redis
     ):
         """Crée la notification Firebase pour Router."""
         try:
@@ -2577,9 +2823,93 @@ Le payload respecte le format notifications Banker (transactions regroupées par
             
             firebase_service.add_or_update_job_by_file_id(notification_path, notification_data)
             logger.info(f"Notification Router créée: {drive_file_id}")
+            
+            # ✅ Mise à jour Redis après création de la notification
+            await self._update_redis_cache_after_router_notification(
+                user_id=user_id,
+                company_id=company_id,
+                drive_file_id=drive_file_id,
+                user_context=user_context
+            )
         
         except Exception as e:
             logger.error(f"Erreur création notification Router: {e}", exc_info=True)
+    
+    async def _update_redis_cache_after_banker_notification(
+        self,
+        user_id: str,
+        company_id: str,
+        transaction_ids: List[str],
+        user_context: Optional[Dict] = None
+    ):
+        """Met à jour le cache Redis après création de notification Banker.
+        
+        Cette fonction est appelée après chaque création de notification pour maintenir
+        la cohérence du cache Redis avec l'état Firebase.
+        """
+        try:
+            from ..tools.job_loader import JobLoader
+            
+            # Créer un JobLoader pour accéder aux méthodes de cache
+            loader = JobLoader(user_id=user_id, company_id=company_id)
+            
+            # Recharger les données actuelles depuis Redis ou Firebase
+            current_data = await loader.load_bank_transactions(mode="UI", user_context=user_context or {})
+            
+            if not current_data:
+                logger.warning("[LPT_Banker] ⚠️ Impossible de recharger les données pour mise à jour Redis")
+                return
+            
+            # Normaliser les IDs en string pour la comparaison
+            transaction_ids_set = {str(tx_id) for tx_id in transaction_ids}
+            
+            # Mettre à jour to_reconcile : retirer les transactions déplacées
+            updated_to_reconcile = [
+                tx for tx in current_data.get('to_reconcile', [])
+                if str(tx.get('transaction_id', '')) not in transaction_ids_set
+            ]
+            
+            # Trouver les transactions originales et les déplacer vers in_process
+            moved_transactions = []
+            for tx in current_data.get('to_reconcile', []):
+                if str(tx.get('transaction_id', '')) in transaction_ids_set:
+                    new_tx = tx.copy()
+                    new_tx['status'] = 'in_queue'
+                    moved_transactions.append(new_tx)
+            
+            # Ajouter à in_process (éviter les doublons)
+            existing_in_process = current_data.get('in_process', [])
+            existing_tx_ids = {str(tx.get('transaction_id', '')) for tx in existing_in_process}
+            
+            for new_tx in moved_transactions:
+                tx_id_str = str(new_tx.get('transaction_id', ''))
+                if tx_id_str not in existing_tx_ids:
+                    existing_in_process.append(new_tx)
+            
+            # Préparer les données mises à jour
+            updated_data = {
+                'to_reconcile': updated_to_reconcile,
+                'pending': current_data.get('pending', []),
+                'in_process': existing_in_process,
+                'in_process_batches': current_data.get('in_process_batches', []),
+                'bank_accounts': current_data.get('bank_accounts', []),
+                'selected_bank_account': current_data.get('selected_bank_account', '')
+            }
+            
+            # Sauvegarder dans Redis avec le même format que JobLoader
+            await loader._set_to_cache("BANK", updated_data, ttl=1800)
+            
+            logger.info(
+                f"[LPT_Banker] ✅ Cache Redis mis à jour: "
+                f"{len(updated_data['to_reconcile'])} to_reconcile, "
+                f"{len(updated_data['in_process'])} in_process"
+            )
+            
+        except Exception as e:
+            # Ne pas bloquer si Redis est indisponible
+            logger.warning(f"[LPT_Banker] ⚠️ Erreur mise à jour Redis (non bloquant): {e}")
+            import traceback
+            traceback.print_exc()
     
     async def _create_banker_notification(
         self,
@@ -2589,7 +2919,8 @@ Le payload respecte le format notifications Banker (transactions regroupées par
         batch_id: str,
         job_id: str,
         bank_account: str,
-        transactions: List[Dict[str, Any]]
+        transactions: List[Dict[str, Any]],
+        user_context: Optional[Dict] = None  # ⭐ NOUVEAU: Contexte pour mise à jour Redis
     ):
         """Crée la notification Firebase pour Banker."""
         try:
@@ -2613,6 +2944,17 @@ Le payload respecte le format notifications Banker (transactions regroupées par
             
             firebase_service.add_or_update_job_by_job_id(notification_path, notification_data)
             logger.info(f"Notification Banker créée: {batch_id}")
+            
+            # ✅ Mise à jour Redis après création de la notification
+            # Extraire les transaction_ids depuis la liste des transactions
+            transaction_ids = [tx.get('transaction_id', '') for tx in transactions if tx.get('transaction_id')]
+            if transaction_ids:
+                await self._update_redis_cache_after_banker_notification(
+                    user_id=user_id,
+                    company_id=company_id,
+                    transaction_ids=transaction_ids,
+                    user_context=user_context
+                )
         
         except Exception as e:
             logger.error(f"Erreur création notification Banker: {e}", exc_info=True)

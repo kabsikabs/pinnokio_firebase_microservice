@@ -191,7 +191,7 @@ Résultat inattendu : Seulement 30/50 factures traitées (20 rejets)
 ### {task_type}
 - Statut : ✅ Succès
 - Items traités : {processed_items}
-- Détails : {détails pertinents}
+- Détails : {{détails pertinents}}
 
 ## Statut Global
 ✅ Succès complet

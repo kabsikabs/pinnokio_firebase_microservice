@@ -15,6 +15,7 @@ from datetime import datetime, timezone, timedelta
 from ..llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize
 from .llm_context import LLMContext
 from .rtdb_message_formatter import RTDBMessageFormatter
+from .session_state_manager import SessionStateManager, get_session_state_manager
 
 logger = logging.getLogger("llm_service.manager")
 
@@ -288,7 +289,12 @@ class StreamingController:
             logger.info(f"Stream enregistré: {session_key}:{thread_key}")
     
     async def stop_stream(self, session_key: str, thread_key: str) -> bool:
-        """Arrête un stream spécifique."""
+        """
+        Arrête un stream spécifique.
+        
+        Returns:
+            True si le stream a été arrêté ou était déjà terminé, False si introuvable.
+        """
         with self._lock:
             if session_key not in self.active_streams:
                 return False
@@ -298,14 +304,21 @@ class StreamingController:
             
             stream_info = self.active_streams[session_key][thread_key]
             
-            # Arrêter la tâche
+            # Arrêter la tâche si elle n'est pas déjà terminée
             if not stream_info["task"].done():
                 stream_info["task"].cancel()
                 logger.info(f"Stream arrêté: {session_key}:{thread_key}")
+            else:
+                logger.info(f"Stream déjà terminé: {session_key}:{thread_key}")
             
-            # Marquer comme interrompu
+            # Marquer comme interrompu et désenregistrer immédiatement
             stream_info["status"] = "interrupted"
             stream_info["interrupted_at"] = datetime.now(timezone.utc)
+            
+            # Désenregistrer immédiatement si interrompu manuellement
+            del self.active_streams[session_key][thread_key]
+            if not self.active_streams[session_key]:
+                del self.active_streams[session_key]
             
             return True
     
@@ -326,14 +339,36 @@ class StreamingController:
             logger.info(f"Tous les streams arrêtés pour {session_key}: {stopped_count}")
             return stopped_count
     
-    async def unregister_stream(self, session_key: str, thread_key: str):
-        """Désenregistre un stream terminé."""
+    async def unregister_stream(self, session_key: str, thread_key: str, delay_seconds: float = 10.0):
+        """
+        Désenregistre un stream terminé après un délai (fenêtre de grâce pour stop).
+        
+        Args:
+            session_key: Clé de session
+            thread_key: Clé du thread
+            delay_seconds: Délai avant désenregistrement (défaut: 10s pour permettre stop utilisateur)
+        """
+        # Note: asyncio est déjà importé au niveau du module
+        # Attendre le délai avant de désenregistrer (fenêtre de grâce)
+        await asyncio.sleep(delay_seconds)
+        
         with self._lock:
+            # Vérifier que le stream existe toujours (peut avoir été désenregistré manuellement)
             if session_key in self.active_streams and thread_key in self.active_streams[session_key]:
-                del self.active_streams[session_key][thread_key]
-                if not self.active_streams[session_key]:
-                    del self.active_streams[session_key]
-                logger.info(f"Stream désenregistré: {session_key}:{thread_key}")
+                stream_info = self.active_streams[session_key][thread_key]
+                
+                # Ne désenregistrer que si le stream est terminé et n'a pas été interrompu
+                if stream_info.get("status") != "interrupted" and stream_info["task"].done():
+                    del self.active_streams[session_key][thread_key]
+                    if not self.active_streams[session_key]:
+                        del self.active_streams[session_key]
+                    logger.info(f"Stream désenregistré (auto): {session_key}:{thread_key}")
+                elif stream_info.get("status") == "interrupted":
+                    # Stream déjà interrompu, désenregistrer immédiatement
+                    del self.active_streams[session_key][thread_key]
+                    if not self.active_streams[session_key]:
+                        del self.active_streams[session_key]
+                    logger.info(f"Stream désenregistré (interrompu): {session_key}:{thread_key}")
     
     async def get_active_streams(self, session_key: str) -> Dict[str, Any]:
         """Retourne les streams actifs d'une session."""
@@ -346,6 +381,22 @@ class LLMSession:
     
     Gère l'agent BaseAIAgent et l'historique des conversations pour tous les threads
     de cet utilisateur dans cette société.
+    
+    ⭐ ARCHITECTURE STATELESS (Multi-Instance Ready):
+    L'état de la session est externalisé dans Redis via SessionStateManager.
+    Cela permet le scaling horizontal : n'importe quelle instance peut reprendre
+    une session créée par une autre instance.
+    
+    État externalisé dans Redis (session:{user_id}:{company_id}:state):
+    - user_context, jobs_data, jobs_metrics
+    - is_on_chat_page, current_active_thread
+    - thread_states, active_tasks, intermediation_mode
+    - last_activity, thread_contexts
+    
+    État local (non externalisé - recréé à la demande):
+    - active_brains (recréés dynamiquement, chat history via ChatHistoryManager)
+    - _callback_loop/_callback_thread (infrastructure locale)
+    - onboarding_listeners (listeners locaux)
     """
     
     def __init__(self, session_key: str, context: LLMContext):
@@ -355,48 +406,123 @@ class LLMSession:
         # Lock pour cette session spécifique (pas de conflit entre utilisateurs)
         self._lock = threading.Lock()
         
-        # ⭐ NOUVELLE ARCHITECTURE: Données permanentes (chargées une fois)
+        # ⭐ GESTIONNAIRE D'ÉTAT REDIS (scaling horizontal)
+        self._state_manager: SessionStateManager = get_session_state_manager()
+        self._state_loaded_from_redis: bool = False
+        
+        # ═══════════════════════════════════════════════════════════════
+        # ÉTAT HYBRIDE: Copie locale (cache) + Persistance Redis
+        # - Lecture: D'abord Redis, puis cache local
+        # - Écriture: D'abord local, puis Redis (async)
+        # ═══════════════════════════════════════════════════════════════
+        
+        # ⭐ DONNÉES PERMANENTES (externalisées dans Redis)
         self.user_context: Optional[Dict] = None  # Métadonnées company (mandate_path, client_uuid, etc.)
         self.jobs_data: Optional[Dict] = None     # Jobs APBookkeeper, Router, Bank
         self.jobs_metrics: Optional[Dict] = None  # Métriques pour system prompt
         
-        # ⭐ BRAINS ACTIFS: 1 brain par thread/chat (isolation complète)
+        # ⭐ BRAINS ACTIFS: 1 brain par thread/chat (PAS externalisé - recréé à la demande)
+        # Note: Le chat_history sera externalisé via ChatHistoryManager (Phase 2)
         self.active_brains: Dict[str, Any] = {}  # {thread_key: PinnokioBrain}
         self._brain_locks: Dict[str, asyncio.Lock] = {}  # {thread_key: Lock}
         
-        # Tâches actives par thread (pour tracking)
+        # ⭐ ÉTAT PAR THREAD (externalisé dans Redis)
         self.active_tasks: Dict[str, list] = {}
-        
-        # État par thread
         self.thread_states: Dict[str, str] = {}
         
-        # ⭐ Cache contexte LPT par thread (pour éviter requêtes Firebase redondantes)
+        # ⭐ Cache contexte LPT par thread (externalisé dans Redis)
         self.thread_contexts: Dict[str, Tuple[Dict[str, Any], float]] = {}  # {thread_key: (context, timestamp)}
         self.context_cache_ttl = 300  # 5 minutes
         
-        # ⭐ TRACKING PRÉSENCE UTILISATEUR (pour Mode UI vs BACKEND)
+        # ⭐ TRACKING PRÉSENCE UTILISATEUR (externalisé dans Redis)
         self.is_on_chat_page: bool = False  # Est-il actuellement sur la PAGE de chat?
         self.current_active_thread: Optional[str] = None  # Sur QUEL thread précis?
         
-        # Métriques
+        # Métriques (partiellement externalisé)
         self.created_at = datetime.now(timezone.utc)
         self.last_activity: Dict[str, datetime] = {}
         self.response_times: Dict[str, list] = {}
 
-        # ⭐ LISTENERS ONBOARDING (RTDB follow-up)
+        # ⭐ LISTENERS ONBOARDING (locaux - non externalisés)
         self.onboarding_listeners: Dict[str, Dict[str, Any]] = {}
         self.onboarding_processed_ids: Dict[str, Set[str]] = {}
         
-        # ⭐ MODE INTERMÉDIATION (FOLLOW_MESSAGE)
-        # Gère la communication directe métier-utilisateur sans agent LLM
+        # ⭐ MODE INTERMÉDIATION (externalisé dans Redis)
         self.intermediation_mode: Dict[str, bool] = {}  # {thread_key: True/False}
 
-        # ⭐ Boucle asyncio dédiée pour les callbacks RTDB (isolation session)
+        # ⭐ Boucle asyncio dédiée pour les callbacks RTDB (local)
         self._callback_loop: Optional[asyncio.AbstractEventLoop] = None
         self._callback_thread: Optional[threading.Thread] = None
         self._callback_loop_lock = threading.Lock()
         
-        logger.info(f"[SESSION_INIT] 📦 LLMSession créée: {session_key}")
+        # ═══════════════════════════════════════════════════════════════
+        # TENTATIVE DE RÉCUPÉRATION D'ÉTAT EXISTANT (Multi-Instance)
+        # ═══════════════════════════════════════════════════════════════
+        self._try_restore_from_redis()
+        
+        logger.info(f"[SESSION_INIT] 📦 LLMSession créée: {session_key} (restored_from_redis={self._state_loaded_from_redis})")
+    
+    def _try_restore_from_redis(self):
+        """
+        Tente de restaurer l'état depuis Redis (pour reprise multi-instance).
+        
+        Appelé dans __init__ pour récupérer une session créée par une autre instance.
+        """
+        try:
+            user_id = self.context.user_id
+            company_id = self.context.collection_name
+            
+            state = self._state_manager.load_session_state(user_id, company_id)
+            
+            if state:
+                # Restaurer l'état depuis Redis
+                self.user_context = state.get("user_context")
+                self.jobs_data = state.get("jobs_data")
+                self.jobs_metrics = state.get("jobs_metrics")
+                self.is_on_chat_page = state.get("is_on_chat_page", False)
+                self.current_active_thread = state.get("current_active_thread")
+                self.thread_states = state.get("thread_states", {})
+                self.active_tasks = state.get("active_tasks", {})
+                self.intermediation_mode = state.get("intermediation_mode", {})
+                self.last_activity = state.get("last_activity", {})
+                self.thread_contexts = state.get("thread_contexts", {})
+                
+                self._state_loaded_from_redis = True
+                
+                logger.info(
+                    f"[SESSION_RESTORE] ✅ État restauré depuis Redis: {self.session_key} "
+                    f"(company={self.user_context.get('company_name') if self.user_context else 'N/A'})"
+                )
+            else:
+                logger.debug(f"[SESSION_RESTORE] Pas d'état existant dans Redis: {self.session_key}")
+                
+        except Exception as e:
+            logger.warning(f"[SESSION_RESTORE] Erreur restauration Redis: {e}")
+    
+    def _sync_to_redis(self):
+        """
+        Synchronise l'état local vers Redis (non-bloquant).
+        
+        Appelé après chaque modification d'état pour assurer la durabilité.
+        """
+        try:
+            self._state_manager.save_session_state(
+                user_id=self.context.user_id,
+                company_id=self.context.collection_name,
+                user_context=self.user_context,
+                jobs_data=self.jobs_data,
+                jobs_metrics=self.jobs_metrics,
+                is_on_chat_page=self.is_on_chat_page,
+                current_active_thread=self.current_active_thread,
+                thread_states=self.thread_states,
+                active_tasks=self.active_tasks,
+                intermediation_mode=self.intermediation_mode,
+                last_activity=self.last_activity,
+                thread_contexts=self.thread_contexts,
+                active_threads=list(self.active_brains.keys())
+            )
+        except Exception as e:
+            logger.warning(f"[SESSION_SYNC] ⚠️ Erreur sync Redis: {e}")
     
     def ensure_callback_loop(self) -> asyncio.AbstractEventLoop:
         """Garantit qu'une boucle asyncio dédiée à la session est disponible."""
@@ -669,7 +795,10 @@ class LLMSession:
                 f"Bank: {self.jobs_metrics.get('BANK', {}).get('to_reconcile', 0)} to_reconcile"
             )
             
-            logger.info(f"[SESSION_DATA] 🎉 Données session initialisées (SANS brain - créés par chat)")
+            # ═══ ÉTAPE 4 : Synchroniser vers Redis (Multi-Instance Ready) ═══
+            self._sync_to_redis()
+            
+            logger.info(f"[SESSION_DATA] 🎉 Données session initialisées + synchronisées Redis (SANS brain - créés par chat)")
             
         except Exception as e:
             logger.error(f"[SESSION_DATA] ❌ Erreur chargement données: {e}", exc_info=True)
@@ -789,12 +918,22 @@ class LLMSession:
         Marque que l'utilisateur vient d'envoyer un message sur ce thread.
         Appelé automatiquement par send_message().
         
+        ⭐ Multi-Instance: Synchronise l'état avec Redis.
+        
         Args:
             thread_key: Thread sur lequel l'utilisateur est actif
         """
         self.is_on_chat_page = True
         self.current_active_thread = thread_key
         self.last_activity[thread_key] = datetime.now(timezone.utc)
+        
+        # ⭐ Sync Redis (multi-instance)
+        self._state_manager.update_presence(
+            self.context.user_id,
+            self.context.collection_name,
+            is_on_chat_page=True,
+            current_active_thread=thread_key
+        )
         
         logger.info(
             f"[SESSION_TRACKING] 👤 User ENTRÉ sur chat - "
@@ -806,12 +945,22 @@ class LLMSession:
         Marque que l'utilisateur change de thread (toujours sur la page chat).
         Appelé par load_chat_history() quand user change de conversation.
         
+        ⭐ Multi-Instance: Synchronise l'état avec Redis.
+        
         Args:
             new_thread_key: Nouveau thread actif
         """
         old_thread = self.current_active_thread
         self.current_active_thread = new_thread_key
         self.last_activity[new_thread_key] = datetime.now(timezone.utc)
+        
+        # ⭐ Sync Redis (multi-instance)
+        self._state_manager.update_presence(
+            self.context.user_id,
+            self.context.collection_name,
+            is_on_chat_page=True,
+            current_active_thread=new_thread_key
+        )
         
         logger.info(
             f"[SESSION_TRACKING] 🔄 User SWITCH thread - "
@@ -823,20 +972,32 @@ class LLMSession:
         Marque que l'utilisateur quitte la page chat.
         Appelé par signal RPC depuis Reflex (unmount, navigation).
         
+        ⭐ Multi-Instance: Synchronise l'état avec Redis.
+        
         Note: On conserve current_active_thread pour historique.
         """
         old_thread = self.current_active_thread
         self.is_on_chat_page = False
         # ⚠️ NE PAS effacer current_active_thread (utile pour logs/debug)
         
+        # ⭐ Sync Redis (multi-instance)
+        self._state_manager.update_presence(
+            self.context.user_id,
+            self.context.collection_name,
+            is_on_chat_page=False,
+            current_active_thread=old_thread
+        )
+        
         logger.info(
             f"[SESSION_TRACKING] 👋 User QUITTÉ chat - "
             f"session={self.session_key}, était sur thread={old_thread}"
         )
     
-    def is_user_on_specific_thread(self, thread_key: str) -> bool:
+    def is_user_on_specific_thread(self, thread_key: str, check_redis: bool = False) -> bool:
         """
         Vérifie si l'utilisateur est ACTUELLEMENT actif sur ce thread précis.
+        
+        ⭐ Multi-Instance: Peut vérifier dans Redis pour cross-instance.
         
         Logique:
         - is_on_chat_page = False → False (pas sur la page)
@@ -845,10 +1006,24 @@ class LLMSession:
         
         Args:
             thread_key: Thread à vérifier
+            check_redis: Si True, vérifie dans Redis (pour callbacks cross-instance)
             
         Returns:
             True si user est sur la page chat ET sur ce thread précis
         """
+        # ⭐ Mode cross-instance: Lire directement depuis Redis
+        if check_redis:
+            is_on = self._state_manager.is_user_on_thread(
+                self.context.user_id,
+                self.context.collection_name,
+                thread_key
+            )
+            logger.debug(
+                f"[SESSION_TRACKING] Check user on thread={thread_key} (REDIS): {is_on}"
+            )
+            return is_on
+        
+        # Mode local (performance)
         is_on = self.is_on_chat_page and self.current_active_thread == thread_key
         
         logger.debug(
@@ -2102,6 +2277,99 @@ class LLMManager:
                 )
             
             # ═══════════════════════════════════════════════════════════
+            # ÉTAPE 1.6 : VÉRIFIER SI WORKFLOW ACTIF SUR CE THREAD
+            # ═══════════════════════════════════════════════════════════
+            # Si un workflow (tâche planifiée) est en cours, gérer l'interaction
+            from .workflow_state_manager import get_workflow_state_manager
+            workflow_manager = get_workflow_state_manager()
+            
+            if workflow_manager.is_workflow_running(user_id, collection_name, thread_key):
+                logger.info(
+                    f"[SEND_MESSAGE] 🔄 Workflow actif détecté sur thread={thread_key}"
+                )
+                
+                # Queue le message et détermine l'action
+                queue_result = workflow_manager.queue_user_message(
+                    user_id, collection_name, thread_key, message
+                )
+                
+                if queue_result.get("is_terminate"):
+                    # TERMINATE : Le workflow reprendra avec le pré-prompt
+                    # On ne fait rien ici, le workflow verra le pending_message
+                    logger.info(
+                        f"[SEND_MESSAGE] 🔄 TERMINATE détecté - workflow reprendra"
+                    )
+                    
+                    # Envoyer signal WebSocket au frontend
+                    from ..ws_hub import hub
+                    ws_channel = f"chat:{user_id}:{collection_name}:{thread_key}"
+                    await hub.broadcast(user_id, {
+                        "type": "WORKFLOW_RESUMING",
+                        "channel": ws_channel,
+                        "payload": {
+                            "thread_key": thread_key,
+                            "message": "Reprise du workflow en cours..."
+                        }
+                    })
+                    
+                    return {
+                        "success": True,
+                        "status": "workflow_resuming",
+                        "message": "Reprise du workflow en cours...",
+                        "thread_key": thread_key
+                    }
+                else:
+                    # Message normal : Workflow pausé, conversation normale
+                    # ⭐ BASCULER chat_mode de "task_execution" à "general_chat" pour conversation normale
+                    if session.context.chat_mode == "task_execution":
+                        logger.info(
+                            f"[SEND_MESSAGE] 🔄 Basculement chat_mode: task_execution → general_chat "
+                            f"(workflow pausé, conversation utilisateur)"
+                        )
+                        # Mettre à jour le chat_mode dans la session
+                        session.context.chat_mode = "general_chat"
+                        # Mettre à jour le brain si nécessaire
+                        if thread_key in session.active_brains:
+                            brain = session.active_brains[thread_key]
+                            # Réinitialiser le system prompt avec le nouveau chat_mode
+                            brain.initialize_system_prompt(chat_mode="general_chat")
+                            logger.info(
+                                f"[SEND_MESSAGE] 🔄 Brain mis à jour avec chat_mode=general_chat"
+                            )
+                    
+                    # Envoyer signal WebSocket au frontend
+                    from ..ws_hub import hub
+                    ws_channel = f"chat:{user_id}:{collection_name}:{thread_key}"
+                    await hub.broadcast(user_id, {
+                        "type": "WORKFLOW_PAUSED",
+                        "channel": ws_channel,
+                        "payload": {
+                            "thread_key": thread_key,
+                            "message": "Workflow en pause - Conversation active"
+                        }
+                    })
+                    
+                    logger.info(
+                        f"[SEND_MESSAGE] ⏸️ Workflow pausé - conversation normale (chat_mode={session.context.chat_mode})"
+                    )
+                    # On continue avec le flux normal de send_message ci-dessous
+            else:
+                # ⭐ IMPORTANT: Pas de workflow actif
+                # Si thread task_* mais chat_mode=task_execution → basculer vers general_chat
+                if thread_key.startswith("task_") and session.context.chat_mode == "task_execution":
+                    logger.info(
+                        f"[SEND_MESSAGE] 🔄 Thread task_* sans workflow actif - "
+                        f"Basculement chat_mode: task_execution → general_chat"
+                    )
+                    session.context.chat_mode = "general_chat"
+                    
+                    # Mettre à jour le brain si nécessaire
+                    if thread_key in session.active_brains:
+                        brain = session.active_brains[thread_key]
+                        brain.initialize_system_prompt(chat_mode="general_chat")
+                        logger.info(f"[SEND_MESSAGE] ✅ Brain mis à jour avec chat_mode=general_chat")
+            
+            # ═══════════════════════════════════════════════════════════
             # ÉTAPE 2 : VÉRIFIER QUE LE BRAIN EXISTE
             # ═══════════════════════════════════════════════════════════
             # Note: Le brain doit avoir été créé par LLM.enter_chat() avant l'envoi du message
@@ -2174,6 +2442,9 @@ class LLMManager:
             # ═══════════════════════════════════════════════════════════
             # ÉTAPE 4 : LANCER WORKFLOW UNIFIÉ EN ARRIÈRE-PLAN
             # ═══════════════════════════════════════════════════════════
+            # ⭐ Utiliser le chat_mode de la session (peut avoir changé si workflow pausé)
+            effective_chat_mode = session.context.chat_mode
+            
             task = asyncio.create_task(
                 self._process_unified_workflow(
                     session=session,
@@ -2184,7 +2455,7 @@ class LLMManager:
                     assistant_message_id=assistant_message_id,
                     assistant_timestamp=assistant_timestamp,
                     enable_streaming=True,  # ← MODE UI : Streaming WebSocket activé
-                    chat_mode=session.context.chat_mode,
+                    chat_mode=effective_chat_mode,  # ⭐ Utilise le chat_mode actuel de la session
                     system_prompt=system_prompt
                 )
             )
@@ -2754,14 +3025,17 @@ class LLMManager:
                         "thread_key": thread_key
                     }
                 else:
-                    logger.warning(
-                        f"[STOP_STREAMING] ⚠️ Thread non trouvé ou déjà arrêté - "
+                    # Stream introuvable - peut être déjà terminé et désenregistré
+                    # Retourner un succès avec message informatif plutôt qu'une erreur
+                    logger.info(
+                        f"[STOP_STREAMING] ℹ️ Thread non trouvé (probablement déjà terminé) - "
                         f"thread={thread_key}, active_streams={list(active_streams.keys())}"
                     )
                     return {
-                        "success": False,
-                        "error": "Thread non trouvé ou déjà arrêté",
-                        "message": f"Thread {thread_key} non trouvé dans les streams actifs"
+                        "success": True,
+                        "message": f"Thread {thread_key} non trouvé (probablement déjà terminé)",
+                        "thread_key": thread_key,
+                        "already_completed": True
                     }
             else:
                 # Arrêter tous les threads de la session
@@ -2916,6 +3190,51 @@ class LLMManager:
                         f"thread={thread_key}, job_id={brain.onboarding_data.get('job_id') if brain.onboarding_data else None}"
                     )
             
+            # ═══════════════════════════════════════════════════════════
+            # ÉTAPE 4 : VÉRIFIER SI WORKFLOW ACTIF ET BASCULER EN MODE UI
+            # ═══════════════════════════════════════════════════════════
+            from .workflow_state_manager import get_workflow_state_manager
+            from ..ws_hub import hub
+            
+            workflow_manager = get_workflow_state_manager()
+            workflow_switch = workflow_manager.user_entered(user_id, collection_name, thread_key)
+            
+            workflow_active = workflow_switch.get("workflow_active", False)
+            
+            # ⭐ IMPORTANT: Si thread task_* mais workflow NON actif → basculer vers general_chat
+            # Cela permet une conversation normale sur un thread de tâche terminée
+            if thread_key.startswith("task_") and not workflow_active:
+                if session.context.chat_mode == "task_execution":
+                    logger.info(
+                        f"[ENTER_CHAT] 🔄 Thread task_* sans workflow actif - "
+                        f"Basculement chat_mode: task_execution → general_chat"
+                    )
+                    session.update_context(chat_mode="general_chat")
+                    
+                    # Mettre à jour le brain si nécessaire
+                    if thread_key in session.active_brains:
+                        brain = session.active_brains[thread_key]
+                        brain.initialize_system_prompt(chat_mode="general_chat")
+                        logger.info(f"[ENTER_CHAT] ✅ Brain mis à jour avec chat_mode=general_chat")
+            
+            if workflow_switch.get("changed"):
+                logger.info(
+                    f"[ENTER_CHAT] 🔄 Bascule workflow BACKEND → UI pour thread={thread_key}"
+                )
+                
+                # Envoyer signal au frontend
+                ws_channel = f"chat:{user_id}:{collection_name}:{thread_key}"
+                await hub.broadcast(user_id, {
+                    "type": "WORKFLOW_USER_JOINED",
+                    "channel": ws_channel,
+                    "payload": {
+                        "thread_key": thread_key,
+                        "workflow_active": True,
+                        "workflow_paused": workflow_switch.get("workflow_paused", False),
+                        "message": "Vous avez rejoint un workflow en cours. Vous pouvez interagir."
+                    }
+                })
+            
             return {
                 "success": True,
                 "message": "User marked as entered chat, brain ready",
@@ -2923,7 +3242,9 @@ class LLMManager:
                 "is_on_chat_page": session.is_on_chat_page,
                 "current_active_thread": session.current_active_thread,
                 "session_key": base_session_key,
-                "brain_ready": True
+                "brain_ready": True,
+                "workflow_active": workflow_active,
+                "workflow_switch": workflow_switch
             }
             
         except Exception as e:
@@ -2990,12 +3311,32 @@ class LLMManager:
                 f"was_on_thread={was_on_thread}"
             )
             
+            # ═══════════════════════════════════════════════════════════
+            # VÉRIFIER SI WORKFLOW ACTIF ET REPRENDRE SI PAUSÉ
+            # ═══════════════════════════════════════════════════════════
+            workflow_resumed = False
+            if was_on_thread:
+                from .workflow_state_manager import get_workflow_state_manager
+                workflow_manager = get_workflow_state_manager()
+                
+                leave_result = workflow_manager.user_left(user_id, collection_name, was_on_thread)
+                
+                if leave_result.get("needs_resume"):
+                    logger.info(
+                        f"[LEAVE_CHAT] 🔄 Workflow pausé détecté - "
+                        f"marqué pour reprise automatique thread={was_on_thread}"
+                    )
+                    workflow_resumed = True
+                    # Note: Le workflow verra "user_left" comme pause_reason 
+                    # au prochain check dans la boucle et reprendra
+            
             return {
                 "success": True,
                 "message": "User marked as left chat",
                 "was_on_chat_page": was_on_chat_page,
                 "was_on_thread": was_on_thread,
-                "session_key": base_session_key
+                "session_key": base_session_key,
+                "workflow_resumed": workflow_resumed
             }
             
         except Exception as e:
@@ -3142,32 +3483,70 @@ class LLMManager:
 
                 Commence maintenant l'exécution."""
 
-            # 6. Déterminer mode (UI/BACKEND)
-            from ..registry.unified_registry import get_unified_registry
-            registry = get_unified_registry()
-            user_connected = registry.is_user_connected(user_id)
+            # 6. Déterminer mode (UI/BACKEND) - Vérifier si user est sur ce thread spécifique
+            # ⭐ CORRECTION : Utiliser is_user_on_specific_thread comme dans le callback LPT
+            # Logique:
+            # - is_on_chat_page = False → Mode BACKEND (user pas sur la page)
+            # - is_on_chat_page = True + current_active_thread = thread_key → Mode UI
+            # - is_on_chat_page = True + current_active_thread ≠ thread_key → Mode BACKEND
+            user_on_active_chat = session.is_user_on_specific_thread(thread_key)
 
-            mode = "UI" if user_connected else "BACKEND"
+            mode = "UI" if user_on_active_chat else "BACKEND"
 
-            logger.info(f"[TASK_EXEC] Démarrage workflow - mode={mode}")
+            logger.info(
+                f"[TASK_EXEC] Démarrage workflow - mode={mode} "
+                f"user_on_active_chat={user_on_active_chat} is_on_chat_page={session.is_on_chat_page} "
+                f"current_active_thread={session.current_active_thread} thread={thread_key}"
+            )
 
             # 7. Préparer assistant_message_id
             assistant_message_id = f"task_{execution_id}"
             assistant_timestamp = datetime.now(timezone.utc).isoformat()
 
-            # 8. Exécuter le workflow
-            await self._process_unified_workflow(
-                session=session,
+            # ═══════════════════════════════════════════════════════════
+            # 7.5 INITIALISER L'ÉTAT WORKFLOW DANS REDIS
+            # ═══════════════════════════════════════════════════════════
+            # Permet le basculement dynamique UI ↔ BACKEND si l'utilisateur
+            # entre/quitte le thread pendant l'exécution
+            from .workflow_state_manager import get_workflow_state_manager
+            workflow_manager = get_workflow_state_manager()
+            workflow_manager.start_workflow(
                 user_id=user_id,
-                collection_name=company_id,
+                company_id=company_id,
                 thread_key=thread_key,
-                message=initial_message,
-                assistant_message_id=assistant_message_id,
-                assistant_timestamp=assistant_timestamp,
-                enable_streaming=user_connected,
-                chat_mode="task_execution",
-                system_prompt=task_specific_prompt
+                initial_mode=mode
             )
+            
+            logger.info(
+                f"[TASK_EXEC] 🚀 Workflow state initialisé dans Redis - "
+                f"mode={mode}, thread={thread_key}"
+            )
+
+            # 8. Exécuter le workflow
+            try:
+                await self._process_unified_workflow(
+                    session=session,
+                    user_id=user_id,
+                    collection_name=company_id,
+                    thread_key=thread_key,
+                    message=initial_message,
+                    assistant_message_id=assistant_message_id,
+                    assistant_timestamp=assistant_timestamp,
+                    enable_streaming=user_on_active_chat,  # ← Streaming seulement si user sur ce thread
+                    chat_mode="task_execution",
+                    system_prompt=task_specific_prompt
+                )
+            finally:
+                # ═══════════════════════════════════════════════════════════
+                # NETTOYER L'ÉTAT WORKFLOW DANS REDIS
+                # ═══════════════════════════════════════════════════════════
+                workflow_manager.end_workflow(
+                    user_id=user_id,
+                    company_id=company_id,
+                    thread_key=thread_key,
+                    status="completed"
+                )
+                logger.info(f"[TASK_EXEC] 🏁 Workflow state nettoyé dans Redis")
 
             dt_ms = int((time.time() - t0) * 1000)
             logger.info(f"[TASK_EXEC] Terminé: task_id={task_id}, dt_ms={dt_ms}")
@@ -3178,6 +3557,22 @@ class LLMManager:
                 f"[TASK_EXEC] Erreur: task_id={task_id}, error={repr(e)}",
                 exc_info=True
             )
+
+            # ═══════════════════════════════════════════════════════════
+            # NETTOYER L'ÉTAT WORKFLOW EN CAS D'ERREUR
+            # ═══════════════════════════════════════════════════════════
+            try:
+                from .workflow_state_manager import get_workflow_state_manager
+                workflow_manager = get_workflow_state_manager()
+                workflow_manager.end_workflow(
+                    user_id=user_id,
+                    company_id=company_id,
+                    thread_key=thread_key,
+                    status="error"
+                )
+                logger.info(f"[TASK_EXEC] 🏁 Workflow state nettoyé (erreur) dans Redis")
+            except:
+                pass
 
             # Marquer l'exécution comme échouée
             try:
@@ -3200,6 +3595,131 @@ class LLMManager:
                 )
             except:
                 pass
+
+    async def execute_task_now(
+        self,
+        mandate_path: str,
+        task_id: str,
+        user_id: str,
+        company_id: str
+    ) -> dict:
+        """
+        Exécute une tâche immédiatement (déclenchée manuellement depuis le frontend).
+        
+        Cette méthode réplique la logique du CRON mais est appelée à la demande.
+        Elle est exposée via RPC: LLM.execute_task_now
+        
+        Args:
+            mandate_path: Chemin du mandat Firebase
+            task_id: ID de la tâche à exécuter
+            user_id: ID de l'utilisateur Firebase
+            company_id: ID de la société (collection_name)
+            
+        Returns:
+            dict: {"success": True, "execution_id": "...", "thread_key": "..."} ou {"success": False, "error": "..."}
+        """
+        import asyncio
+        
+        try:
+            logger.info(f"[EXECUTE_NOW] 🚀 Exécution immédiate: task_id={task_id}, user_id={user_id}, company_id={company_id}")
+            
+            # 1. Récupérer les données de la tâche depuis Firebase
+            from ..firebase_providers import get_firebase_management, get_firebase_realtime
+            fbm = get_firebase_management()
+            
+            task_data = fbm.get_task(mandate_path, task_id)
+            if not task_data:
+                logger.error(f"[EXECUTE_NOW] ❌ Tâche non trouvée: {task_id}")
+                return {
+                    "success": False,
+                    "error": f"Tâche non trouvée: {task_id}"
+                }
+            
+            # Enrichir task_data avec les infos nécessaires
+            task_data["task_id"] = task_id
+            task_data["user_id"] = user_id
+            task_data["company_id"] = company_id
+            task_data["mandate_path"] = mandate_path
+            
+            logger.info(f"[EXECUTE_NOW] ✅ Tâche récupérée: {task_data.get('mission', {}).get('title', task_id)}")
+            
+            # 2. Générer IDs
+            triggered_at = datetime.now(timezone.utc)
+            execution_id = f"exec_{uuid.uuid4().hex[:12]}"
+            
+            # ⭐ Utiliser task_id comme thread_key (chat persistant)
+            thread_key = task_id
+            logger.info(f"[EXECUTE_NOW] 📝 Utilisation du thread_key persistant: {thread_key}")
+            
+            # 3. Créer document d'exécution dans Firebase
+            execution_data = {
+                "execution_id": execution_id,
+                "task_id": task_id,
+                "thread_key": thread_key,
+                "status": "running",
+                "started_at": triggered_at.isoformat(),
+                "triggered_by": "manual",  # Distinguer des exécutions CRON
+                "workflow_checklist": None,
+                "lpt_tasks": {}
+            }
+            
+            fbm.create_task_execution(mandate_path, task_id, execution_data)
+            logger.info(f"[EXECUTE_NOW] 📄 Exécution créée: {execution_id}")
+            
+            # 4. Vérifier et créer chat RTDB SEULEMENT s'il n'existe pas
+            rtdb = get_firebase_realtime()
+            
+            chat_path = f"{company_id}/chats/{thread_key}"
+            existing_chat = rtdb.db.child(chat_path).get()
+            
+            if existing_chat:
+                logger.info(f"[EXECUTE_NOW] ✅ Chat existant trouvé: {thread_key} - Réutilisation avec historique")
+            else:
+                logger.info(f"[EXECUTE_NOW] 🆕 Création nouveau chat: {thread_key}")
+                mission_title = task_data.get("mission", {}).get("title", "Tâche manuelle")
+                
+                chat_result = rtdb.create_chat(
+                    user_id=user_id,
+                    space_code=company_id,
+                    thread_name=mission_title,
+                    mode="chats",
+                    chat_mode="task_execution",
+                    thread_key=thread_key
+                )
+                
+                if not chat_result.get("success"):
+                    logger.error(f"[EXECUTE_NOW] ❌ Échec création chat: {chat_result}")
+                    return {
+                        "success": False,
+                        "error": f"Échec création chat: {chat_result.get('error', 'Unknown')}"
+                    }
+            
+            # 5. Lancer l'exécution en background (comme le CRON)
+            asyncio.create_task(
+                self._execute_scheduled_task(
+                    user_id=user_id,
+                    company_id=company_id,
+                    task_data=task_data,
+                    thread_key=thread_key,
+                    execution_id=execution_id
+                )
+            )
+            
+            logger.info(f"[EXECUTE_NOW] ✅ Tâche lancée: {task_id} | Thread: {thread_key} | Execution: {execution_id}")
+            
+            return {
+                "success": True,
+                "execution_id": execution_id,
+                "thread_key": thread_key,
+                "task_title": task_data.get("mission", {}).get("title", task_id)
+            }
+            
+        except Exception as e:
+            logger.error(f"[EXECUTE_NOW] ❌ Erreur: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
 
     def _build_task_execution_addition(self, mission: dict, last_report: Optional[dict], execution_plan: str = None) -> str:
         """
@@ -3269,9 +3789,15 @@ class LLMManager:
 
         return prompt
 
-    async def _finalize_task_execution_if_needed(self, brain, terminate_kwargs: dict):
+    async def x_finalize_task_execution_if_needed(self, brain, terminate_kwargs: dict):
         """
+        ⚠️ MÉTHODE DÉPRÉCIÉE - À SUPPRIMER
+        
         Finalise l'exécution d'une tâche si on est en mode task_execution.
+        
+        Cette méthode n'est plus utilisée car TERMINATE_TASK peut terminer une session
+        de travail sans finaliser la tâche complète. Une tâche peut avoir plusieurs
+        sessions de travail.
 
         Steps:
             1. Vérifier si brain.active_task_data existe
@@ -3350,13 +3876,11 @@ class LLMManager:
                 "summary": terminate_kwargs.get("conclusion", "Exécution terminée"),
                 "errors": errors,
                 "warnings": [],  # À extraire si nécessaire
-                "lpt_executions": lpt_executions
-            }
+                "lpt_executions": lpt_executions}
 
-            # Finaliser (sauvegarde rapport + suppression execution)
+            # Finaliser (sauvegarde rapport + marquage execution comme completed, sans suppression pour permettre callbacks LPT)
             fbm.complete_task_execution(
-                mandate_path, task_id, execution_id, final_report
-            )
+                mandate_path, task_id, execution_id, final_report)
 
             logger.info(
                 f"[FINALIZE_TASK] Tâche finalisée: {task_id}, status={status}, "
@@ -3632,7 +4156,7 @@ class LLMManager:
         thread_key: str,
         message: Dict[str, Any],
         job_id: Optional[str] = None
-    ) -> None:
+        ) -> None:
         """
         Démarre le mode intermédiation pour un thread donné.
 
@@ -3702,9 +4226,9 @@ class LLMManager:
             # ═══ 3. ENVOYER MESSAGE SYSTÈME AU FRONTEND (VISIBLE, NON SAUVÉ RTDB) ═══
             system_message_content = f"""🔄 **Intermediation Mode Activated**
 
-You are now in direct communication with the business application. Messages will be processed by the business system and not by the main agent.
-{tools_list_text}
-You can use the keywords **TERMINATE**, **PENDING**, or **NEXT** to close this mode, or click on a card if available."""
+            You are now in direct communication with the business application. Messages will be processed by the business system and not by the main agent.
+            {tools_list_text}
+            You can use the keywords **TERMINATE**, **PENDING**, or **NEXT** to close this mode, or click on a card if available."""
 
             # Envoyer via WebSocket comme message système (pas de sauvegarde RTDB)
             system_message_payload = {
@@ -5470,6 +5994,7 @@ The intermediation session has been closed {reason_text}. You can now continue t
                 thread_key,
                 session,
                 chat_mode=chat_mode,
+                mode=mode,  # ⭐ Passer le mode (UI/BACKEND) pour rechargement Redis
             )
             logger.info(f"[UNIFIED_WORKFLOW] Outils créés: {len(tools)} outils")
             
@@ -5505,6 +6030,126 @@ The intermediation session has been closed {reason_text}. You can now continue t
             
             while turn_count < max_turns and not mission_completed:
                 turn_count += 1
+                
+                # ═══════════════════════════════════════════════════════════
+                # ⭐ VÉRIFICATION DYNAMIQUE DU MODE WORKFLOW À CHAQUE TOUR
+                # ═══════════════════════════════════════════════════════════
+                from .workflow_state_manager import get_workflow_state_manager
+                workflow_manager = get_workflow_state_manager()
+                
+                # Vérifier si un workflow est actif pour ce thread
+                workflow_state = workflow_manager.get_workflow_state(
+                    user_id, collection_name, thread_key
+                )
+                
+                if workflow_state and workflow_state.get("status") in ("running", "paused"):
+                    # Mettre à jour le compteur de tour
+                    workflow_manager.update_turn(user_id, collection_name, thread_key, turn_count)
+                    
+                    # Bascule dynamique du mode streaming
+                    current_mode = workflow_state.get("mode", "BACKEND")
+                    enable_streaming = (current_mode == "UI")
+                    
+                    # ─── VÉRIFIER SI WORKFLOW PAUSÉ (conversation utilisateur) ───
+                    if workflow_state.get("status") == "paused":
+                        logger.info(
+                            f"[UNIFIED_WORKFLOW] ⏸️ Workflow pausé - "
+                            f"en attente de reprise (tour {turn_count})"
+                        )
+                        
+                        # Envoyer signal au frontend si en mode UI
+                        if enable_streaming:
+                            await hub.broadcast(user_id, {
+                                "type": "WORKFLOW_PAUSED",
+                                "channel": ws_channel,
+                                "payload": {
+                                    "thread_key": thread_key,
+                                    "turn": turn_count,
+                                    "message": "Workflow en pause - Conversation avec l'utilisateur"
+                                }
+                            })
+                        
+                        # Sortir de la boucle, le workflow sera repris par leave_chat ou TERMINATE
+                        break
+                    
+                    # ─── VÉRIFIER SI MESSAGE EN ATTENTE (TERMINATE ou user_left) ───
+                    pending = workflow_manager.get_pending_message(
+                        user_id, collection_name, thread_key, clear=True
+                    )
+                    
+                    if pending:
+                        user_msg = pending.get("message", "")
+                        
+                        if pending.get("is_terminate") or pending.get("is_user_left"):
+                            # ⭐ REMETTRE chat_mode à "task_execution" pour reprendre le workflow
+                            if session.context.chat_mode != "task_execution":
+                                logger.info(
+                                    f"[UNIFIED_WORKFLOW] 🔄 Basculement chat_mode: {session.context.chat_mode} → task_execution "
+                                    f"(reprise workflow)"
+                                )
+                                session.context.chat_mode = "task_execution"
+                                # ⭐ Mettre à jour le chat_mode utilisé dans le workflow
+                                chat_mode = "task_execution"
+                                # Mettre à jour le brain si nécessaire
+                                if thread_key in session.active_brains:
+                                    brain = session.active_brains[thread_key]
+                                    # Réinitialiser le system prompt avec le nouveau chat_mode
+                                    brain.initialize_system_prompt(chat_mode=chat_mode)
+                                    # Recréer les outils avec le nouveau chat_mode
+                                    tools, tool_mapping = brain.create_workflow_tools(
+                                        thread_key,
+                                        session,
+                                        chat_mode=chat_mode,
+                                        mode=mode
+                                    )
+                                    logger.info(
+                                        f"[UNIFIED_WORKFLOW] 🔄 Outils recréés avec chat_mode={chat_mode}"
+                                    )
+                            
+                            # Construire pré-prompt de reprise
+                            if pending.get("is_user_left"):
+                                resume_prompt = f"""
+🔄 **REPRISE DU WORKFLOW**
+
+L'utilisateur a quitté le chat. Vous devez reprendre le workflow là où vous l'avez laissé.
+
+**Instructions** :
+1. Consultez votre checklist workflow (via UPDATE_STEP si nécessaire)
+2. Continuez l'exécution de la prochaine étape
+3. Travaillez en mode autonome jusqu'à TERMINATE_TASK
+"""
+                            else:
+                                resume_prompt = f"""
+🔄 **REPRISE DU WORKFLOW**
+
+L'utilisateur a demandé la reprise du workflow{f' avec le message suivant: "{user_msg}"' if user_msg else ''}.
+
+**Instructions** :
+1. {'Tenez compte du message de l utilisateur si pertinent' if user_msg else 'Reprenez le workflow'}
+2. Consultez votre checklist workflow
+3. Continuez l exécution là où vous l avez laissée
+4. Travaillez jusqu à TERMINATE_TASK
+"""
+                            
+                            # Injecter comme prochain input
+                            current_input = resume_prompt
+                            
+                            logger.info(
+                                f"[UNIFIED_WORKFLOW] 🔄 Reprise workflow - "
+                                f"reason={pending.get('reason')}, chat_mode={session.context.chat_mode}"
+                            )
+                            
+                            # Signal de reprise
+                            if enable_streaming:
+                                await hub.broadcast(user_id, {
+                                    "type": "WORKFLOW_RESUMED",
+                                    "channel": ws_channel,
+                                    "payload": {
+                                        "thread_key": thread_key,
+                                        "turn": turn_count,
+                                        "message": "Workflow repris"
+                                    }
+                                })
                 
                 # ─── VÉRIFICATION BUDGET TOKENS ───
                 try:
@@ -5627,13 +6272,17 @@ The intermediation session has been closed {reason_text}. You can now continue t
                                     }
                                 })
 
-                            # ⭐ NOUVEAU: Finaliser l'exécution de tâche si mode task_execution
-                            await self._finalize_task_execution_if_needed(brain, tool_input)
-
-                            # ✅ CORRECTION: Ne pas break ici, laisser recevoir tool_result
-                            # pour broadcast tool_use_complete proprement
-                            mission_completed = True
-                            # Le break se fera naturellement à la fin du tour (ligne 2275)
+                            # ⚠️ NOTE: Ne PAS mettre mission_completed = True ici
+                            # Il faut attendre le tool_result pour vérifier si la validation a réussi
+                            # Si _terminate_blocked est présent dans tool_result, on doit continuer la boucle
+                            # La gestion se fait dans la section tool_result (ligne ~6273)
+                        
+                        # ─── WAIT_ON_LPT ───
+                        elif tool_name == "WAIT_ON_LPT":
+                            # L'agent demande une pause en attente d'un callback LPT
+                            # Le message sera ajouté dans tool_result
+                            # Le flag _wait_on_lpt sera géré dans tool_result
+                            pass
                         
                         # ─── LPT (tâche longue) ───
                         elif tool_name.startswith("LPT_"):
@@ -5667,6 +6316,90 @@ The intermediation session has been closed {reason_text}. You can now continue t
                         tool_result = event.get("result")
                         logger.info(f"[UNIFIED_WORKFLOW] Résultat outil reçu")
                         
+                        # ─── GESTION TERMINATE_TASK ───
+                        if tool_name == "TERMINATE_TASK" and tool_result:
+                            # Vérifier si la validation a échoué (_terminate_blocked)
+                            if tool_result.get("_terminate_blocked"):
+                                # ❌ Validation échouée → TERMINATE refusé, continuer la boucle
+                                logger.warning(
+                                    f"[UNIFIED_WORKFLOW] ⚠️ TERMINATE_TASK refusé - "
+                                    f"Étapes incomplètes détectées, workflow continue"
+                                )
+                                
+                                # Ajouter le message d'erreur au contenu accumulé
+                                error_message = tool_result.get("message", "TERMINATE_TASK refusé - Étapes incomplètes")
+                                accumulated_content += f"\n\n{error_message}"
+                                
+                                # Broadcast du message si streaming activé
+                                if enable_streaming:
+                                    await hub.broadcast(user_id, {
+                                        "type": "llm_stream_chunk",
+                                        "channel": ws_channel,
+                                        "payload": {
+                                            "message_id": assistant_message_id,
+                                            "thread_key": thread_key,
+                                            "chunk": f"\n\n{error_message}",
+                                            "is_final": False  # Pas final car workflow continue
+                                        }
+                                    })
+                                
+                                # ⚠️ NE PAS mettre mission_completed = True → la boucle continue
+                                logger.info(
+                                    f"[UNIFIED_WORKFLOW] ✅ Workflow continue - "
+                                    f"Agent doit compléter les étapes restantes"
+                                )
+                            elif tool_result.get("type") == "success" or tool_result.get("success"):
+                                # ✅ Validation réussie → TERMINATE autorisé, arrêter la boucle
+                                logger.info(f"[UNIFIED_WORKFLOW] ✅ TERMINATE_TASK validé - Arrêt du workflow")
+                                
+                                # Ajouter le message de succès au contenu accumulé
+                                success_message = tool_result.get("message", "Task terminated successfully")
+                                accumulated_content += f"\n\n{success_message}"
+                                
+                                # Broadcast du message si streaming activé
+                                if enable_streaming:
+                                    await hub.broadcast(user_id, {
+                                        "type": "llm_stream_chunk",
+                                        "channel": ws_channel,
+                                        "payload": {
+                                            "message_id": assistant_message_id,
+                                            "thread_key": thread_key,
+                                            "chunk": f"\n\n{success_message}",
+                                            "is_final": True
+                                        }
+                                    })
+                                
+                                # Marquer la mission comme complétée
+                                mission_completed = True
+                                logger.info(f"[UNIFIED_WORKFLOW] ✅ Workflow terminé avec succès")
+                        
+                        # ─── GESTION WAIT_ON_LPT ───
+                        elif tool_name == "WAIT_ON_LPT" and tool_result:
+                            # Vérifier le flag _wait_on_lpt pour mettre en pause le workflow
+                            if tool_result.get("_wait_on_lpt") or tool_result.get("_terminate_workflow"):
+                                logger.info(f"[UNIFIED_WORKFLOW] ⏳ WAIT_ON_LPT détecté - Mise en pause workflow")
+                                
+                                # Ajouter le message de confirmation au contenu accumulé
+                                wait_message = tool_result.get("message", "Workflow en pause - Attente callback LPT")
+                                accumulated_content += f"\n\n{wait_message}"
+                                
+                                # Broadcast du message si streaming activé
+                                if enable_streaming:
+                                    await hub.broadcast(user_id, {
+                                        "type": "llm_stream_chunk",
+                                        "channel": ws_channel,
+                                        "payload": {
+                                            "message_id": assistant_message_id,
+                                            "thread_key": thread_key,
+                                            "chunk": f"\n\n{wait_message}",
+                                            "is_final": True
+                                        }
+                                    })
+                                
+                                # Marquer la mission comme complétée (pause propre)
+                                mission_completed = True
+                                logger.info(f"[UNIFIED_WORKFLOW] ✅ Workflow mis en pause - Attente callback LPT")
+                        
                         # Notifier fin d'utilisation d'outil
                         if enable_streaming:
                             await hub.broadcast(user_id, {
@@ -5686,14 +6419,27 @@ The intermediation session has been closed {reason_text}. You can now continue t
                 if mission_completed:
                     break
                 
-                # Si que du texte (pas d'outils) → Mission complétée
-                if text_generated_this_turn and not tools_used_this_turn:
-                    logger.info(
-                        f"[UNIFIED_WORKFLOW] Texte simple sans outils → "
-                        f"Mission complétée"
-                    )
-                    mission_completed = True
-                    break
+                # ⚠️ MODE TASK_EXECUTION : Désactiver détection automatique "texte sans outils"
+                # En mode task_execution, seuls TERMINATE_TASK et WAIT_ON_LPT peuvent clôturer/pauser
+                if chat_mode == "task_execution":
+                    # En mode task_execution, on ne termine PAS automatiquement sur texte sans outils
+                    # L'agent DOIT utiliser TERMINATE_TASK ou WAIT_ON_LPT explicitement
+                    if text_generated_this_turn and not tools_used_this_turn:
+                        logger.warning(
+                            f"[UNIFIED_WORKFLOW] ⚠️ Mode task_execution: Texte sans outils détecté, "
+                            f"mais workflow continue (attente TERMINATE_TASK ou WAIT_ON_LPT)"
+                        )
+                        # Ne pas mettre mission_completed = True, continuer le workflow
+                else:
+                    # Mode normal (general_chat, etc.) : Comportement habituel
+                    # Si que du texte (pas d'outils) → Mission complétée
+                    if text_generated_this_turn and not tools_used_this_turn:
+                        logger.info(
+                            f"[UNIFIED_WORKFLOW] Texte simple sans outils → "
+                            f"Mission complétée"
+                        )
+                        mission_completed = True
+                        break
                 
                 # Continuer avec feedback des outils
                 # (Le feedback est déjà dans l'historique du provider)
@@ -5838,19 +6584,26 @@ The intermediation session has been closed {reason_text}. You can now continue t
             }
         
         finally:
-            # Désenregistrer le stream dans tous les cas (succès, erreur, annulation)
+            # Désenregistrer le stream avec délai (fenêtre de grâce pour stop utilisateur)
+            # Le stream reste enregistré pendant 10 secondes après la fin pour permettre
+            # à l'utilisateur de cliquer sur "stop" même si le stream est déjà terminé
             try:
-                await self.streaming_controller.unregister_stream(
-                    session_key=f"{user_id}:{collection_name}",
-                    thread_key=thread_key
+                # Lancer le désenregistrement différé en arrière-plan (non-bloquant)
+                # Note: asyncio est déjà importé au niveau du module
+                asyncio.create_task(
+                    self.streaming_controller.unregister_stream(
+                        session_key=f"{user_id}:{collection_name}",
+                        thread_key=thread_key,
+                        delay_seconds=10.0  # Fenêtre de grâce de 10 secondes
+                    )
                 )
                 logger.info(
-                    f"[UNIFIED_WORKFLOW] 🧹 Stream désenregistré - "
-                    f"session={user_id}:{collection_name} thread={thread_key}"
+                    f"[UNIFIED_WORKFLOW] 🧹 Désenregistrement différé programmé - "
+                    f"session={user_id}:{collection_name} thread={thread_key} (délai: 10s)"
                 )
             except Exception as cleanup_error:
                 logger.error(
-                    f"[UNIFIED_WORKFLOW] Erreur désenregistrement stream: {cleanup_error}"
+                    f"[UNIFIED_WORKFLOW] Erreur programmation désenregistrement stream: {cleanup_error}"
                 )
     
    
@@ -5975,15 +6728,18 @@ The intermediation session has been closed {reason_text}. You can now continue t
             # ═══════════════════════════════════════════════════════════
             # ÉTAPE 1 : GARANTIR INITIALISATION SESSION (⭐ CRITIQUE)
             # ═══════════════════════════════════════════════════════════
+            # ⭐ IMPORTANT: Tâche planifiée = task_execution, LPT simple = general_chat
+            resume_chat_mode = "task_execution" if is_planned_task else "general_chat"
+            
             session = await self._ensure_session_initialized(
                 user_id=user_id,
                 collection_name=company_id,
-                chat_mode="general_chat"
+                chat_mode=resume_chat_mode
             )
             
             logger.info(
                 f"[WORKFLOW_RESUME] ✅ Session garantie avec données permanentes "
-                f"(user_context, jobs_data, jobs_metrics)"
+                f"(user_context, jobs_data, jobs_metrics) - chat_mode={resume_chat_mode}"
             )
             messages_base_path = self._get_messages_base_path(
                 company_id, thread_key, session.context.chat_mode
@@ -6019,10 +6775,15 @@ The intermediation session has been closed {reason_text}. You can now continue t
             else:
                 logger.info(f"[WORKFLOW_RESUME] ✅ Brain existant trouvé")
             
+            # ⭐ IMPORTANT: Mettre à jour le brain avec le bon chat_mode
+            brain = session.active_brains.get(thread_key)
+            if brain and is_planned_task:
+                brain.initialize_system_prompt(chat_mode="task_execution", jobs_metrics=session.jobs_metrics)
+                logger.info(f"[WORKFLOW_RESUME] 🔄 Brain mis à jour avec chat_mode=task_execution")
+            
             # ═══════════════════════════════════════════════════════════
             # ÉTAPE 3 : RÉCUPÉRER MISSION DEPUIS FIREBASE (si execution_id)
             # ═══════════════════════════════════════════════════════════
-            brain = session.active_brains.get(thread_key)
             mission_data = None
             execution_data = None
             task_id = None
@@ -6063,11 +6824,19 @@ The intermediation session has been closed {reason_text}. You can now continue t
                 traceability = original_payload.get("traceability", {})
                 execution_id = traceability.get("execution_id")
                 mandate_path = original_payload.get("mandates_path")
-                # Pour task_id, on peut utiliser batch_id ou chercher dans Firebase
+                
+                # ⭐ Pour les tâches planifiées, thread_key = task_id de la tâche
+                # (voir cron_scheduler.py ligne 295: thread_key = task_id)
+                if is_planned_task and not task_id:
+                    task_id = thread_key
+                    logger.info(f"[WORKFLOW_RESUME] task_id déduit du thread_key: {task_id}")
+                
                 if execution_id and mandate_path:
                     logger.info(f"[WORKFLOW_RESUME] execution_id trouvé dans traceability: {execution_id}")
             
             # Si on a execution_id et mandate_path, récupérer la mission depuis Firebase
+            workflow_checklist = None  # ⭐ Variable pour stocker la checklist
+            
             if execution_id and mandate_path:
                 try:
                     from ..firebase_providers import get_firebase_management
@@ -6085,9 +6854,12 @@ The intermediation session has been closed {reason_text}. You can now continue t
                         
                         if execution_data:
                             mission_data = execution_data.get("mission")
+                            # ⭐ NOUVEAU : Récupérer la workflow_checklist
+                            workflow_checklist = execution_data.get("workflow_checklist")
                             logger.info(
                                 f"[WORKFLOW_RESUME] ✅ Mission récupérée depuis Firebase: "
-                                f"task_id={task_id}, execution_id={execution_id}"
+                                f"task_id={task_id}, execution_id={execution_id}, "
+                                f"has_checklist={workflow_checklist is not None}"
                             )
                         else:
                             logger.warning(
@@ -6096,6 +6868,20 @@ The intermediation session has been closed {reason_text}. You can now continue t
                             )
                 except Exception as e:
                     logger.warning(f"[WORKFLOW_RESUME] ⚠️ Erreur récupération mission: {e}")
+            
+            # ⭐ NOUVEAU : Remplir brain.active_task_data si on a les IDs (nécessaire pour UPDATE_STEP)
+            if is_planned_task and brain and task_id and execution_id and mandate_path:
+                if not brain.active_task_data:
+                    brain.active_task_data = {
+                        "task_id": task_id,
+                        "execution_id": execution_id,
+                        "mandate_path": mandate_path,
+                        "mission": mission_data
+                    }
+                    logger.info(
+                        f"[WORKFLOW_RESUME] 📝 brain.active_task_data initialisé: "
+                        f"task_id={task_id}, execution_id={execution_id}"
+                    )
             
             # ═══════════════════════════════════════════════════════════
             # ÉTAPE 4 : CONSTRUIRE PROMPT SYSTÈME + MESSAGE (ADAPTATIF)
@@ -6110,14 +6896,14 @@ The intermediation session has been closed {reason_text}. You can now continue t
                 logger.info(f"[WORKFLOW_RESUME] 📋 Tâche planifiée → Prompt avec checklist")
                 
                 # Construire prompt système de base
-                from ...pinnokio_agentic_workflow.orchestrator.system_prompt_principal_agent import build_principal_agent_prompt
+                from app.pinnokio_agentic_workflow.orchestrator.system_prompt_principal_agent import build_principal_agent_prompt
                 base_system_prompt = build_principal_agent_prompt(
                     user_context=user_context,
                     jobs_metrics=session.jobs_metrics or {}
                 )
             
                 # Construire le prompt callback LPT avec instructions checklist
-                from ...pinnokio_agentic_workflow.orchestrator.system_prompt_lpt_callback import build_lpt_callback_prompt
+                from app.pinnokio_agentic_workflow.orchestrator.system_prompt_lpt_callback import build_lpt_callback_prompt
                 lpt_callback_addition = build_lpt_callback_prompt(
                     user_context=user_context,
                     lpt_response=lpt_response,
@@ -6155,68 +6941,150 @@ The intermediation session has been closed {reason_text}. You can now continue t
             # ⭐ CONSTRUCTION MESSAGE ADAPTATIF selon le type
             if is_planned_task:
                 # ═══ CAS 1 : TÂCHE PLANIFIÉE → Demander UPDATE_STEP ═══
+                
+                # ⭐ NOUVEAU : Formater la checklist pour l'afficher à l'agent
+                checklist_section = ""
+                step_in_progress_id = None
+                step_in_progress_name = None
+                
+                if workflow_checklist and workflow_checklist.get("steps"):
+                    steps = workflow_checklist.get("steps", [])
+                    total_steps = workflow_checklist.get("total_steps", len(steps))
+                    completed_count = sum(1 for s in steps if s.get("status") == "completed")
+                    
+                    checklist_lines = []
+                    for step in steps:
+                        step_id = step.get("id", "?")
+                        step_name = step.get("name", "Étape sans nom")
+                        step_status = step.get("status", "pending")
+                        step_message = step.get("message", "")
+                        
+                        # Icône selon le statut
+                        if step_status == "completed":
+                            icon = "✅"
+                        elif step_status == "in_progress":
+                            icon = "🔄"
+                            step_in_progress_id = step_id
+                            step_in_progress_name = step_name
+                        elif step_status == "error":
+                            icon = "❌"
+                        else:  # pending
+                            icon = "⏳"
+                        
+                        step_line = f"   - {icon} `{step_id}` : {step_name}"
+                        if step_message:
+                            step_line += f" → {step_message}"
+                        checklist_lines.append(step_line)
+                    
+                    checklist_section = f"""
+📋 **ÉTAT ACTUEL DE VOTRE CHECKLIST** ({completed_count}/{total_steps} étapes terminées) :
+
+{chr(10).join(checklist_lines)}
+
+"""
+                    logger.info(
+                        f"[WORKFLOW_RESUME] 📋 Checklist chargée: {completed_count}/{total_steps} étapes, "
+                        f"step_in_progress={step_in_progress_id}"
+                    )
+                else:
+                    checklist_section = """
+⚠️ **CHECKLIST NON TROUVÉE** - Consultez votre historique pour retrouver les étapes créées.
+
+"""
+                
+                # Identifier l'étape à mettre à jour
+                step_to_update_hint = ""
+                if step_in_progress_id:
+                    step_to_update_hint = f"""
+🎯 **ÉTAPE À METTRE À JOUR** : `{step_in_progress_id}` ({step_in_progress_name})
+   Cette étape était en "in_progress" et correspond au LPT {task_type} qui vient de se terminer.
+"""
+                
                 if status == "completed":
                     continuation_message = f"""
-                        🔄 **RÉPONSE DE L'OUTIL {task_type}**
+🔄 **RÉPONSE DE L'OUTIL {task_type}**
 
-                        ✅ **{summary}**
+✅ **{summary}**
 
-                        ---
+---
 
-                        ⚠️ **ACTIONS REQUISES** :
+{checklist_section}{step_to_update_hint}
+---
 
-                        1. **METTRE À JOUR LA CHECKLIST** (🔴 PRIORITÉ ABSOLUE)
-                        - Utilisez `UPDATE_STEP` pour marquer l'étape concernée comme terminée
-                        - Message : "{summary}"
+⚠️ **ACTIONS REQUISES** (dans cet ordre) :
 
-                        2. **ANALYSER ET CONTINUER**
-                        - Consultez votre plan initial (dans l'historique)
-                        - Déterminez la prochaine étape ou terminez si tout est fait
-                        - Ajustez le plan si nécessaire selon les résultats
+1. **METTRE À JOUR LA CHECKLIST** (🔴 OBLIGATOIRE EN PREMIER)
+   ```json
+   {{
+     "step_id": "{step_in_progress_id or 'STEP_X_XXX'}",
+     "status": "completed",
+     "message": "✅ {summary[:50]}..."
+   }}
+   ```
 
-                        **Rappel** : Vous avez accès à tous les outils (SPT et LPT) pour continuer le workflow.
+2. **ANALYSER ET DÉCIDER DE LA SUITE**
+   - Si des étapes restent en "pending" → Marquer la prochaine en "in_progress" et l'exécuter
+   - Si TOUTES les étapes sont "completed" → Appeler `TERMINATE_TASK` avec un résumé complet
+
+**Rappel** : Vous avez accès à tous les outils (SPT et LPT) pour continuer le workflow.
                         """
                 elif status == "failed":
                     continuation_message = f"""
-                        🔄 **RÉPONSE DE L'OUTIL {task_type}**
+🔄 **RÉPONSE DE L'OUTIL {task_type}**
 
-                        ❌ **{error or "Échec de l'exécution"}**
+❌ **{error or "Échec de l'exécution"}**
 
-                        ---
+---
 
-                        ⚠️ **ACTIONS REQUISES** :
+{checklist_section}{step_to_update_hint}
+---
 
-                        1. **METTRE À JOUR LA CHECKLIST** (🔴 PRIORITÉ ABSOLUE)
-                        - Utilisez `UPDATE_STEP` pour marquer l'étape comme "error"
-                        - Message : "❌ {error or 'Échec'}"
+⚠️ **ACTIONS REQUISES** (dans cet ordre) :
 
-                        2. **ANALYSER ET DÉCIDER**
-                        - Proposez des actions correctives
-                        - Ajustez le plan si nécessaire
-                        - Continuez ou terminez avec un rapport d'échec
+1. **METTRE À JOUR LA CHECKLIST** (🔴 OBLIGATOIRE EN PREMIER)
+   ```json
+   {{
+     "step_id": "{step_in_progress_id or 'STEP_X_XXX'}",
+     "status": "error",
+     "message": "❌ {(error or 'Échec')[:50]}..."
+   }}
+   ```
 
-                        **Rappel** : Gérez l'échec de manière proactive et proposez une solution.
+2. **ANALYSER ET DÉCIDER**
+   - Proposez des actions correctives si possible
+   - Ajustez le plan si nécessaire
+   - Continuez avec les étapes restantes ou terminez avec un rapport d'échec
+
+**Rappel** : Gérez l'échec de manière proactive et proposez une solution.
                         """
                 else:  # partial
                     continuation_message = f"""
-                    🔄 **RÉPONSE DE L'OUTIL {task_type}**
+🔄 **RÉPONSE DE L'OUTIL {task_type}**
 
-                    ⚠️ **{summary}**
+⚠️ **{summary}**
 
-                    ---
+---
 
-                    ⚠️ **ACTIONS REQUISES** :
+{checklist_section}{step_to_update_hint}
+---
 
-                    1. **METTRE À JOUR LA CHECKLIST** (🔴 PRIORITÉ ABSOLUE)
-                    - Utilisez `UPDATE_STEP` avec status approprié
-                    - Message : "⚠️ {summary}"
+⚠️ **ACTIONS REQUISES** (dans cet ordre) :
 
-                    2. **ANALYSER ET CONTINUER**
-                    - Expliquez pourquoi le résultat est partiel
-                    - Proposez des actions pour compléter (relancer, ajuster, etc.)
-                    - Continuez selon le plan ajusté
+1. **METTRE À JOUR LA CHECKLIST** (🔴 OBLIGATOIRE EN PREMIER)
+   ```json
+   {{
+     "step_id": "{step_in_progress_id or 'STEP_X_XXX'}",
+     "status": "completed",
+     "message": "⚠️ Partiel: {summary[:40]}..."
+   }}
+   ```
 
-                    **Rappel** : Un résultat partiel nécessite une attention particulière.
+2. **ANALYSER ET CONTINUER**
+   - Expliquez pourquoi le résultat est partiel
+   - Proposez des actions pour compléter (relancer, ajuster, etc.)
+   - Continuez selon le plan ajusté
+
+**Rappel** : Un résultat partiel nécessite une attention particulière.
                     """
             else:
                 # ═══ CAS 2 : LPT SIMPLE → Message simple, pas de checklist ═══
@@ -6291,32 +7159,110 @@ The intermediation session has been closed {reason_text}. You can now continue t
             # ═══════════════════════════════════════════════════════════
             # ÉTAPE 6 : LANCER WORKFLOW UNIFIÉ AVEC PROMPT SPÉCIAL
             # ═══════════════════════════════════════════════════════════
-            result = await self._process_unified_workflow(
-                session=session,
-                user_id=user_id,
-                collection_name=company_id,
-                thread_key=thread_key,
-                message=continuation_message,
-                assistant_message_id=assistant_message_id,
-                assistant_timestamp=assistant_timestamp,
-                enable_streaming=user_connected,  # ← Streaming conditionnel basé sur connexion user
-                chat_mode=session.context.chat_mode,
-                system_prompt=lpt_callback_system_prompt  # ⭐ NOUVEAU : Prompt système spécial callback
-            )
             
-            if result.get("success"):
+            # ═══════════════════════════════════════════════════════════
+            # ⭐ CRITIQUE: Attendre la fin d'une conversation en cours
+            # ═══════════════════════════════════════════════════════════
+            # Si l'utilisateur est en train de converser (streaming en cours),
+            # on attend la fin de la conversation avant de reprendre le workflow
+            import asyncio
+            base_session_key = f"{user_id}:{company_id}"
+            
+            max_wait_seconds = 60  # Attendre max 60 secondes
+            wait_interval = 0.5   # Vérifier toutes les 0.5 secondes
+            waited = 0
+            
+            # Utiliser le streaming_controller pour vérifier les streams actifs
+            active_streams = await self.streaming_controller.get_active_streams(base_session_key)
+            
+            while thread_key in active_streams and waited < max_wait_seconds:
                 logger.info(
-                    f"[WORKFLOW_RESUME] ✅ Terminé avec succès - mode={mode} "
-                    f"content_length={len(result.get('content', ''))}"
+                    f"[WORKFLOW_RESUME] ⏳ Conversation en cours détectée - "
+                    f"Attente fin streaming... (waited={waited}s)"
                 )
-            else:
-                logger.error(
-                    f"[WORKFLOW_RESUME] ❌ Échec workflow - mode={mode} "
-                    f"error={result.get('error')}"
+                await asyncio.sleep(wait_interval)
+                waited += wait_interval
+                # Recharger les streams actifs
+                active_streams = await self.streaming_controller.get_active_streams(base_session_key)
+            
+            if waited > 0:
+                if thread_key in active_streams:
+                    logger.warning(
+                        f"[WORKFLOW_RESUME] ⚠️ Timeout attente conversation - "
+                        f"Forçage reprise workflow après {waited}s"
+                    )
+                else:
+                    logger.info(
+                        f"[WORKFLOW_RESUME] ✅ Conversation terminée après {waited}s - "
+                        f"Reprise workflow"
+                    )
+            
+            # ⭐ IMPORTANT: Enregistrer le workflow dans Redis pour éviter les conflits
+            # Si l'utilisateur envoie un message pendant le workflow, is_workflow_running() retournera True
+            from .workflow_state_manager import get_workflow_state_manager
+            workflow_manager = get_workflow_state_manager()
+            
+            if is_planned_task:
+                workflow_manager.start_workflow(
+                    user_id=user_id,
+                    company_id=company_id,
+                    thread_key=thread_key,
+                    initial_mode=mode
                 )
+                logger.info(f"[WORKFLOW_RESUME] 🚀 Workflow enregistré dans Redis - mode={mode}")
+            
+            result = None  # Initialiser pour le finally
+            try:
+                result = await self._process_unified_workflow(
+                    session=session,
+                    user_id=user_id,
+                    collection_name=company_id,
+                    thread_key=thread_key,
+                    message=continuation_message,
+                    assistant_message_id=assistant_message_id,
+                    assistant_timestamp=assistant_timestamp,
+                    enable_streaming=user_connected,  # ← Streaming conditionnel basé sur connexion user
+                    chat_mode=session.context.chat_mode,
+                    system_prompt=lpt_callback_system_prompt  # ⭐ NOUVEAU : Prompt système spécial callback
+                )
+                
+                if result.get("success"):
+                    logger.info(
+                        f"[WORKFLOW_RESUME] ✅ Terminé avec succès - mode={mode} "
+                        f"content_length={len(result.get('content', ''))}"
+                    )
+                else:
+                    logger.error(
+                        f"[WORKFLOW_RESUME] ❌ Échec workflow - mode={mode} "
+                        f"error={result.get('error')}"
+                    )
+            finally:
+                # ⭐ Toujours nettoyer l'état workflow
+                if is_planned_task:
+                    workflow_manager.end_workflow(
+                        user_id=user_id,
+                        company_id=company_id,
+                        thread_key=thread_key,
+                        status="completed" if result and result.get("success") else "error"
+                    )
+                    logger.info(f"[WORKFLOW_RESUME] 🏁 Workflow nettoyé dans Redis")
             
         except Exception as e:
             logger.error(f"[WORKFLOW_RESUME] ❌ Erreur: {e}", exc_info=True)
+            
+            # ⭐ Nettoyer le workflow dans Redis en cas d'erreur
+            if is_planned_task:
+                try:
+                    from .workflow_state_manager import get_workflow_state_manager
+                    workflow_manager = get_workflow_state_manager()
+                    workflow_manager.end_workflow(
+                        user_id=user_id,
+                        company_id=company_id,
+                        thread_key=thread_key,
+                        status="error"
+                    )
+                except Exception as cleanup_error:
+                    logger.error(f"[WORKFLOW_RESUME] Erreur nettoyage Redis: {cleanup_error}")
             
             # Tenter de marquer comme erreur dans RTDB
             try:

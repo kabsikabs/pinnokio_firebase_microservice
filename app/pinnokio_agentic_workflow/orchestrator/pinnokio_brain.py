@@ -1,6 +1,11 @@
 """
 Pinnokio Brain - Agent Cerveau Principal
 Agent orchestrateur intelligent avec capacité de raisonnement pour gérer SPT et LPT
+
+⭐ Architecture Stateless (Multi-Instance Ready):
+L'historique de chat est externalisé dans Redis via ChatHistoryManager.
+Cela permet le scaling horizontal : n'importe quelle instance peut reprendre
+une conversation créée par une autre instance.
 """
 
 import logging
@@ -10,6 +15,7 @@ from datetime import datetime, timezone
 import json
 
 from ...llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_Anthropic_Agent, NEW_OpenAiAgent
+from ...llm_service.chat_history_manager import get_chat_history_manager, ChatHistoryManager
 from .agent_modes import get_agent_mode_config
 
 logger = logging.getLogger("pinnokio.brain")
@@ -92,6 +98,14 @@ class PinnokioBrain:
         
         # ⭐ Données spécifiques job (chargées à la demande, pour router_chat, banker_chat, etc.)
         self.job_data: Optional[Dict[str, Any]] = None
+        
+        # ═══════════════════════════════════════════════════════════════
+        # ⭐ ARCHITECTURE STATELESS (Multi-Instance Ready)
+        # ═══════════════════════════════════════════════════════════════
+        # ChatHistoryManager externalise l'historique dans Redis
+        # Approche hybride: cache local (performance) + Redis (durabilité)
+        self._chat_history_manager: ChatHistoryManager = get_chat_history_manager()
+        self._redis_sync_enabled: bool = True  # Activer la sync Redis
 
         logger.info(f"PinnokioBrain initialisé pour user={firebase_user_id}, collection={collection_name}")
     
@@ -169,11 +183,20 @@ class PinnokioBrain:
         thread_key: str,
         session=None,
         chat_mode: str = "general_chat",
+        mode: str = "UI",  # ⭐ NOUVEAU : Mode UI ou BACKEND pour rechargement Redis
     ) -> Tuple[List[Dict], Dict]:
-        """Retourne l'ensemble d'outils configuré pour le mode de chat."""
+        """
+        Retourne l'ensemble d'outils configuré pour le mode de chat.
+        
+        Args:
+            thread_key: Clé du thread
+            session: Session LLM (optionnel)
+            chat_mode: Mode de chat (general_chat, router_chat, etc.)
+            mode: "UI" (utilisateur connecté, cache Redis à jour) ou "BACKEND" (utilisateur déconnecté)
+        """
 
         config = get_agent_mode_config(chat_mode)
-        tool_set, tool_mapping = config.tool_builder(self, thread_key, session, chat_mode)
+        tool_set, tool_mapping = config.tool_builder(self, thread_key, session, chat_mode, mode=mode)
 
         logger.info(
             f"Outils initialisés pour mode={chat_mode} (config={config.name}) : {len(tool_set)} outils"
@@ -181,8 +204,18 @@ class PinnokioBrain:
         return tool_set, tool_mapping
 
 
-    def _build_general_chat_tools(self, thread_key: str, session=None) -> Tuple[List[Dict], Dict]:
-        """Construit l'ensemble d'outils standard (mode général)."""
+    def _build_general_chat_tools(self, thread_key: str, session=None, mode: str = "UI") -> Tuple[List[Dict], Dict]:
+        """
+        Construit l'ensemble d'outils standard (mode général).
+        
+        Args:
+            thread_key: Clé du thread
+            session: Session LLM (optionnel)
+            mode: "UI" (utilisateur connecté, cache Redis à jour) ou "BACKEND" (utilisateur déconnecté)
+        """
+        # ⭐ Stocker le mode pour les handlers d'outils
+        self._current_mode = mode
+        
         from ..tools.spt_tools import SPTTools
         from ..tools.lpt_client import LPTClient
         
@@ -225,28 +258,50 @@ class PinnokioBrain:
         logger.info(f"[BRAIN] 🔍 DIAGNOSTIC self.jobs_data avant création outils - "
                    f"Clés: {list(self.jobs_data.keys()) if self.jobs_data else 'None'}")
         if self.jobs_data and 'ROUTER' in self.jobs_data:
-            router_unprocessed = self.jobs_data['ROUTER'].get('unprocessed', [])
-            logger.info(f"[BRAIN] 🔍 DIAGNOSTIC self.jobs_data['ROUTER']['unprocessed'] - "
-                       f"Longueur: {len(router_unprocessed) if isinstance(router_unprocessed, list) else 'N/A'}")
+            router_to_process = self.jobs_data['ROUTER'].get('to_process', [])  # ✅ Corrigé : format Reflex utilise 'to_process'
+            logger.info(f"[BRAIN] 🔍 DIAGNOSTIC self.jobs_data['ROUTER']['to_process'] - "
+                       f"Longueur: {len(router_to_process) if isinstance(router_to_process, list) else 'N/A'}")
         else:
             logger.warning(f"[BRAIN] ⚠️ DIAGNOSTIC - Pas de données ROUTER dans self.jobs_data !")
         
-        # 1. APBookkeeper Jobs
-        apbookeeper_tools = APBookkeeperJobTools(jobs_data=self.jobs_data)
+        # ⭐ Déterminer le mode (UI si user_context existe, BACKEND sinon)
+        # Le mode UI signifie que l'utilisateur est connecté et que le cache Redis est à jour
+        mode = "UI" if self.user_context else "BACKEND"
+        
+        # 1. APBookkeeper Jobs - ⭐ Passer paramètres pour rechargement Redis
+        apbookeeper_tools = APBookkeeperJobTools(
+            jobs_data=self.jobs_data,
+            user_id=self.firebase_user_id,
+            company_id=self.collection_name,
+            user_context=self.user_context,
+            mode=mode
+        )
         get_apbookeeper_jobs_def = apbookeeper_tools.get_tool_definition()
         
         async def handle_get_apbookeeper_jobs(**kwargs):
             return await apbookeeper_tools.search(**kwargs)
         
-        # 2. Router Jobs
-        router_tools = RouterJobTools(jobs_data=self.jobs_data)
+        # 2. Router Jobs - ⭐ Passer paramètres pour rechargement Redis
+        router_tools = RouterJobTools(
+            jobs_data=self.jobs_data,
+            user_id=self.firebase_user_id,
+            company_id=self.collection_name,
+            user_context=self.user_context,
+            mode=mode
+        )
         get_router_jobs_def = router_tools.get_tool_definition()
         
         async def handle_get_router_jobs(**kwargs):
             return await router_tools.search(**kwargs)
         
-        # 3. Bank Transactions
-        bank_tools = BankJobTools(jobs_data=self.jobs_data)
+        # 3. Bank Transactions - ⭐ Passer paramètres pour rechargement Redis
+        bank_tools = BankJobTools(
+            jobs_data=self.jobs_data,
+            user_id=self.firebase_user_id,
+            company_id=self.collection_name,
+            user_context=self.user_context,
+            mode=mode
+        )
         get_bank_transactions_def = bank_tools.get_tool_definition()
         
         async def handle_get_bank_transactions(**kwargs):
@@ -286,27 +341,7 @@ class PinnokioBrain:
         # ═══ OUTIL VISION DOCUMENT DRIVE ═══
         view_drive_document_def = {
             "name": "VIEW_DRIVE_DOCUMENT",
-            "description": """🖼️ Visionner et analyser un document Google Drive.
-            
-            Utilisez cet outil pour:
-            - Voir le contenu d'un document/image dans Google Drive
-            - Analyser des factures, PDF, images
-            - Répondre aux questions sur le contenu visuel d'un document
-            
-            ⚠️ **WORKFLOW OBLIGATOIRE** :
-            1. **D'ABORD** : Récupérer le `drive_file_id` avec :
-               - `GET_APBOOKEEPER_JOBS` pour les factures
-               - `GET_ROUTER_JOBS` pour les documents à router
-               - `GET_BANK_TRANSACTIONS` (pas de file_id ici, ne pas utiliser)
-            2. **ENSUITE** : Utiliser ce `drive_file_id` avec VIEW_DRIVE_DOCUMENT
-            
-            ❌ **NE PAS** inventer ou deviner un file_id !
-            ❌ **NE PAS** utiliser un nom de fichier comme file_id !
-            
-            Exemples corrects:
-            1. GET_APBOOKEEPER_JOBS(file_name_contains="38653") → obtenir drive_file_id
-            2. VIEW_DRIVE_DOCUMENT(file_id="1A2B3C4D5E...", question="Détails de la facture")
-            """,
+            "description": "🖼️ Visualiser un document Google Drive (PDF, image, facture). Requis: file_id obtenu via GET_APBOOKEEPER_JOBS ou GET_ROUTER_JOBS. GET_TOOL_HELP pour détails.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -371,6 +406,50 @@ class PinnokioBrain:
                     "analysis": response if isinstance(response, str) else response.get('text_output', str(response))
                 }
                 
+            except ImportError as e:
+                # ✅ Gérer spécifiquement les erreurs d'import de pdf2image
+                error_msg = str(e)
+                if "pdf2image" in error_msg.lower() or "poppler" in error_msg.lower():
+                    detailed_msg = (
+                        f"Le module 'pdf2image' n'est pas disponible pour analyser le fichier '{file_id}'. "
+                        f"Installez-le avec: pip install pdf2image. "
+                        f"Sur Windows, vous devez aussi installer poppler: "
+                        f"https://github.com/oschwartz10612/poppler-windows/releases/"
+                    )
+                else:
+                    detailed_msg = f"Erreur d'import: {error_msg}"
+                logger.error(f"[VIEW_DRIVE_DOCUMENT] ❌ Erreur d'import: {e}")
+                return {
+                    "type": "error",
+                    "message": detailed_msg,
+                    "file_id": file_id
+                }
+            except FileNotFoundError as e:
+                # ✅ Gérer spécifiquement les erreurs 404 (fichier non trouvé)
+                error_msg = f"Le fichier Google Drive '{file_id}' n'a pas été trouvé. Il a peut-être été supprimé, déplacé, ou vous n'avez pas les permissions nécessaires pour y accéder."
+                logger.error(f"[VIEW_DRIVE_DOCUMENT] ❌ Fichier non trouvé: {e}")
+                return {
+                    "type": "error",
+                    "message": error_msg,
+                    "file_id": file_id
+                }
+            except ValueError as e:
+                # ✅ Gérer les erreurs de conversion/transformation
+                error_msg = str(e)
+                if "Aucun contenu d'image" in error_msg or "Aucune image" in error_msg:
+                    logger.error(f"[VIEW_DRIVE_DOCUMENT] ❌ Erreur de traitement: {e}")
+                    return {
+                        "type": "error",
+                        "message": f"Impossible de traiter le fichier '{file_id}'. {error_msg}",
+                        "file_id": file_id
+                    }
+                else:
+                    logger.error(f"[VIEW_DRIVE_DOCUMENT] ❌ Erreur de validation: {e}")
+                    return {
+                        "type": "error",
+                        "message": error_msg,
+                        "file_id": file_id
+                    }
             except Exception as e:
                 logger.error(f"[VIEW_DRIVE_DOCUMENT] ❌ Erreur: {e}", exc_info=True)
                 return {
@@ -390,12 +469,7 @@ class PinnokioBrain:
         # ═══ OUTILS WORKFLOW CHECKLIST (pour tâches planifiées) ═══
         create_checklist_tool = {
             "name": "CREATE_CHECKLIST",
-            "description": """📋 Créer la workflow checklist pour l'exécution de la tâche.
-
-                **À utiliser uniquement en mode task_execution.**
-
-                Créez une liste d'étapes basée sur le plan d'action de la mission.
-                Chaque étape doit avoir un ID unique et un nom descriptif.""",
+            "description": "📋 Créer la checklist de workflow (mode task_execution). Chaque étape: id + name. GET_TOOL_HELP pour détails.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -424,15 +498,7 @@ class PinnokioBrain:
 
         update_step_tool = {
             "name": "UPDATE_STEP",
-            "description": """📊 Mettre à jour l'état d'une étape de la checklist.
-
-                **OBLIGATOIRE lors de l'exécution de tâches planifiées.**
-
-                Utilisez cet outil pour signaler la progression :
-                - Avant de commencer une étape : status="in_progress"
-                - Après avoir terminé une étape : status="completed"
-                - En cas d'erreur : status="error"
-                """,
+            "description": "📊 Mettre à jour le statut d'une étape (in_progress/completed/error). GET_TOOL_HELP pour détails.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -531,13 +597,17 @@ class PinnokioBrain:
                 
                 ws_channel = f"chat:{self.firebase_user_id}:{self.collection_name}:{thread_key}"
                 
-                await hub.broadcast(self.firebase_user_id, {
-                    "type": "WORKFLOW_CHECKLIST",
-                    "channel": ws_channel,
-                    "payload": ws_message
-                })
-                
-                logger.info(f"[CREATE_CHECKLIST] 📡 Checklist envoyée via WebSocket")
+                # ⭐ Broadcast conditionnel selon le mode (UI/BACKEND)
+                current_mode = getattr(self, "_current_mode", "UI")
+                if current_mode == "UI":
+                    await hub.broadcast(self.firebase_user_id, {
+                        "type": "WORKFLOW_CHECKLIST",
+                        "channel": ws_channel,
+                        "payload": ws_message
+                    })
+                    logger.info(f"[CREATE_CHECKLIST] 📡 Checklist envoyée via WebSocket (mode={current_mode})")
+                else:
+                    logger.info(f"[CREATE_CHECKLIST] ⏭️ Broadcast WebSocket ignoré (mode={current_mode})")
                 
                 # 2. Sauvegarde dans RTDB pour persistence
                 rtdb = get_firebase_realtime()
@@ -658,13 +728,17 @@ class PinnokioBrain:
                 
                 ws_channel = f"chat:{self.firebase_user_id}:{self.collection_name}:{thread_key}"
                 
-                await hub.broadcast(self.firebase_user_id, {
-                    "type": "WORKFLOW_STEP_UPDATE",
-                    "channel": ws_channel,
-                    "payload": ws_message
-                })
-                
-                logger.info(f"[UPDATE_STEP] 📡 Mise à jour envoyée via WebSocket")
+                # ⭐ Broadcast conditionnel selon le mode (UI/BACKEND)
+                current_mode = getattr(self, "_current_mode", "UI")
+                if current_mode == "UI":
+                    await hub.broadcast(self.firebase_user_id, {
+                        "type": "WORKFLOW_STEP_UPDATE",
+                        "channel": ws_channel,
+                        "payload": ws_message
+                    })
+                    logger.info(f"[UPDATE_STEP] 📡 Mise à jour envoyée via WebSocket (mode={current_mode})")
+                else:
+                    logger.info(f"[UPDATE_STEP] ⏭️ Broadcast WebSocket ignoré (mode={current_mode})")
                 
                 # 2. Sauvegarde dans RTDB pour persistence
                 rtdb = get_firebase_realtime()
@@ -702,22 +776,7 @@ class PinnokioBrain:
         # Outil GET_CURRENT_DATETIME
         get_current_datetime_tool = {
             "name": "GET_CURRENT_DATETIME",
-            "description": """⏰ **Obtenir la date et l'heure actuelles**
-
-**Utilisez cet outil pour** :
-- Connaître la date et l'heure précises en ce moment
-- Calculer des délais relatifs (dans X heures, demain, etc.)
-- Vérifier l'heure avant de planifier une tâche
-- Obtenir la date du jour pour des requêtes utilisateur
-
-**Fuseau horaire** :
-- Par défaut : Utilise la timezone configurée pour la société
-- Vous pouvez spécifier une autre timezone IANA (ex: 'America/New_York')
-
-**Formats de sortie** :
-- ISO : Format ISO 8601 (ex: 2025-11-30T14:30:00+01:00)
-- READABLE : Format lisible français (ex: "samedi 30 novembre 2025 à 14:30")
-- BOTH : Les deux formats""",
+            "description": "⏰ Date/heure actuelles. Optionnel: timezone IANA, format (ISO/READABLE/BOTH). GET_TOOL_HELP pour détails.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -759,7 +818,32 @@ class PinnokioBrain:
             }
         }
         
-        # Combiner tous les outils (avec les 3 outils jobs + 4 outils context + VIEW_DRIVE_DOCUMENT + CREATE_TASK + checklist + datetime)
+        # ═══ OUTIL WAIT_ON_LPT ═══
+        # Créer l'outil WAIT_ON_LPT pour mettre en pause le workflow en attente d'un callback LPT
+        from ..tools.wait_on_lpt import create_wait_on_lpt_tool
+        
+        wait_on_lpt_def, wait_on_lpt_mapping = create_wait_on_lpt_tool(
+            brain=self,
+            thread_key=thread_key,
+            mode=mode
+        )
+        
+        async def handle_wait_on_lpt(**kwargs):
+            """Handler pour WAIT_ON_LPT."""
+            return await wait_on_lpt_mapping["WAIT_ON_LPT"](**kwargs)
+        
+        # ═══ REGISTRE D'AIDE DYNAMIQUE (GET_TOOL_HELP) ═══
+        from ..tools.tool_help_registry import ToolHelpRegistry, DETAILED_HELP
+        
+        help_registry = ToolHelpRegistry()
+        
+        # Enregistrer la documentation détaillée de tous les outils
+        help_registry.register_multiple(DETAILED_HELP)
+        
+        # Créer l'outil GET_TOOL_HELP dynamiquement
+        get_tool_help_def, handle_get_tool_help = help_registry.create_get_tool_help()
+        
+        # Combiner tous les outils (avec les 3 outils jobs + 4 outils context + VIEW_DRIVE_DOCUMENT + CREATE_TASK + checklist + datetime + WAIT_ON_LPT + GET_TOOL_HELP)
         tool_set = [
             get_apbookeeper_jobs_def,
             get_router_jobs_def,
@@ -772,7 +856,9 @@ class PinnokioBrain:
             create_task_def,
             create_checklist_tool,
             update_step_tool,
-            get_current_datetime_tool  # ⏰ Outil date/heure actuelle
+            get_current_datetime_tool,  # ⏰ Outil date/heure actuelle
+            wait_on_lpt_def,  # ⏳ Outil WAIT_ON_LPT
+            get_tool_help_def  # 📚 Outil GET_TOOL_HELP dynamique
         ] + spt_tools_list + lpt_tools_list + [terminate_tool]
 
         tool_mapping = {
@@ -788,13 +874,15 @@ class PinnokioBrain:
             "CREATE_CHECKLIST": handle_create_checklist,
             "UPDATE_STEP": handle_update_step,
             "GET_CURRENT_DATETIME": handle_get_current_datetime,  # ⏰ Handler date/heure
+            "WAIT_ON_LPT": handle_wait_on_lpt,  # ⏳ Handler WAIT_ON_LPT
             "TERMINATE_TASK": self._handle_terminate_task,  # 🏁 Handler terminaison
+            "GET_TOOL_HELP": handle_get_tool_help,  # 📚 Handler aide dynamique
             **spt_tools_mapping,
             **lpt_tools_mapping
         }
         
-        # ⭐ RETOURNER LES NOUVEAUX OUTILS (SPT + LPT simplifiés)
-        logger.info(f"Outils créés: {len(tool_set)} outils (SPT: {len(spt_tools_list)}, LPT: {len(lpt_tools_list)})")
+        # ⭐ RETOURNER LES NOUVEAUX OUTILS (SPT + LPT simplifiés + GET_TOOL_HELP)
+        logger.info(f"Outils créés: {len(tool_set)} outils (SPT: {len(spt_tools_list)}, LPT: {len(lpt_tools_list)}, HELP: {len(help_registry.get_available_tools())} outils documentés)")
         return tool_set, tool_mapping
 
     async def load_onboarding_data(self) -> Dict[str, Any]:
@@ -1079,22 +1167,45 @@ class PinnokioBrain:
         Cette méthode est appelée automatiquement par le workflow pour générer
         un résultat d'outil (tool_result) qui sera ajouté au chat_history.
         
+        ⚠️ VALIDATION : En mode execution (tâche planifiée), vérifie que toutes
+        les étapes de la checklist sont "completed" avant d'autoriser la terminaison.
+        
         Args:
             reason: Raison de la terminaison
             conclusion: Rapport final complet
             **kwargs: Paramètres additionnels ignorés
             
         Returns:
-            Dict avec le résultat de la terminaison
+            Dict avec le résultat de la terminaison (succès ou erreur avec détails)
         """
         logger.info(f"[TERMINATE_TASK] 🏁 Terminaison demandée - raison: {reason}")
         
+        # ⭐ VALIDATION : Vérifier que toutes les étapes sont "completed" en mode execution
+        from ..tools.terminate_task_validator import validate_terminate_task
+        
+        is_valid, validation_result = validate_terminate_task(
+            brain=self,
+            reason=reason,
+            conclusion=conclusion
+        )
+        
+        if not is_valid:
+            # ❌ Validation échouée → retourner l'erreur détaillée
+            logger.warning(
+                f"[TERMINATE_TASK] ❌ Terminaison refusée: "
+                f"{len(validation_result.get('incomplete_steps', []))} étapes incomplètes"
+            )
+            return validation_result
+        
+        # ✅ Validation OK → terminaison autorisée
+        logger.info("[TERMINATE_TASK] ✅ Validation OK, terminaison autorisée")
         return {
             "success": True,
             "reason": reason,
             "conclusion": conclusion,
             "status": "terminated",
-            "message": "Task terminated successfully"
+            "message": "Task terminated successfully",
+            "validation": validation_result
         }
     
     def _get_current_datetime(self, timezone: str = None, format: str = "BOTH") -> Dict:
@@ -1334,12 +1445,14 @@ class PinnokioBrain:
 
     # ═══════════════════════════════════════════════════════
     # GESTION HISTORIQUE CHAT (ISOLÉ PAR THREAD)
+    # ⭐ Multi-Instance Ready: Synchronisation Redis
     # ═══════════════════════════════════════════════════════
     
     def add_user_message(self, content):
         """
         Ajoute un message utilisateur à l'historique du chat.
-        Proxy vers self.pinnokio_agent.add_user_message()
+        
+        ⭐ Multi-Instance: Synchronise avec Redis après ajout.
         
         Args:
             content: Contenu du message utilisateur (str ou list pour tool_results)
@@ -1348,13 +1461,17 @@ class PinnokioBrain:
             self.pinnokio_agent.add_user_message(content, provider=self.default_provider)
             content_len = len(content) if isinstance(content, (str, list)) else 0
             logger.debug(f"[CHAT_HISTORY] Message utilisateur ajouté via agent (type={type(content).__name__}, len={content_len})")
+            
+            # ⭐ Sync Redis (multi-instance)
+            self._sync_history_to_redis()
         else:
             logger.warning(f"[CHAT_HISTORY] Agent non initialisé, message non ajouté")
     
     def add_assistant_message(self, content: Any):
         """
         Ajoute un message assistant à l'historique du chat.
-        Proxy vers self.pinnokio_agent.add_ai_message()
+        
+        ⭐ Multi-Instance: Synchronise avec Redis après ajout.
         
         Args:
             content: Contenu du message assistant (str, list ou dict)
@@ -1367,13 +1484,18 @@ class PinnokioBrain:
             content_type = type(content).__name__
             content_len = len(content) if isinstance(content, (str, list)) else 1
             logger.debug(f"[CHAT_HISTORY] Message assistant ajouté via agent (type={content_type}, len={content_len})")
+            
+            # ⭐ Sync Redis (multi-instance)
+            self._sync_history_to_redis()
         else:
             logger.warning(f"[CHAT_HISTORY] Agent non initialisé, message non ajouté")
     
     def get_chat_history(self) -> List[Dict[str, Any]]:
         """
         Retourne l'historique complet du chat.
-        Proxy vers self.pinnokio_agent.chat_history
+        
+        ⭐ Multi-Instance: Utilise le cache local (performance).
+        Pour cross-instance, utiliser get_chat_history_from_redis().
         
         Returns:
             Liste des messages du chat
@@ -1382,18 +1504,136 @@ class PinnokioBrain:
             return self.pinnokio_agent.chat_history.get(self.default_provider.value, []).copy()
         return []
     
+    def get_chat_history_from_redis(self) -> List[Dict[str, Any]]:
+        """
+        Récupère l'historique depuis Redis (pour reprise cross-instance).
+        
+        ⭐ Multi-Instance: Lecture directe depuis Redis.
+        
+        Returns:
+            Liste des messages depuis Redis, ou liste vide
+        """
+        if not self.active_thread_key:
+            logger.warning("[CHAT_HISTORY] Pas de thread_key actif pour lecture Redis")
+            return []
+        
+        return self._chat_history_manager.get_messages(
+            self.firebase_user_id,
+            self.collection_name,
+            self.active_thread_key
+        )
+    
+    def restore_history_from_redis(self) -> bool:
+        """
+        Restaure l'historique depuis Redis dans l'agent local.
+        
+        ⭐ Multi-Instance: Appelé au démarrage du brain pour reprise.
+        
+        Returns:
+            True si restauration réussie
+        """
+        if not self.active_thread_key:
+            logger.debug("[CHAT_HISTORY] Pas de thread_key actif pour restauration")
+            return False
+        
+        try:
+            history = self._chat_history_manager.load_chat_history(
+                self.firebase_user_id,
+                self.collection_name,
+                self.active_thread_key
+            )
+            
+            if history and self.pinnokio_agent:
+                messages = history.get("messages", [])
+                system_prompt = history.get("system_prompt", "")
+                
+                # Restaurer le system prompt
+                if system_prompt:
+                    self.pinnokio_agent.update_system_prompt(system_prompt)
+                
+                # Restaurer les messages
+                # Note: On remplace directement le chat_history
+                self.pinnokio_agent.chat_history[self.default_provider.value] = messages
+                
+                logger.info(
+                    f"[CHAT_HISTORY] ✅ Historique restauré depuis Redis: "
+                    f"{len(messages)} messages, thread={self.active_thread_key}"
+                )
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.warning(f"[CHAT_HISTORY] ⚠️ Erreur restauration Redis: {e}")
+            return False
+    
     def clear_chat_history(self):
         """
         Vide l'historique du chat pour ce thread.
-        Proxy vers self.pinnokio_agent.clear_chat_history()
+        
+        ⭐ Multi-Instance: Synchronise avec Redis après vidage.
         """
         if self.pinnokio_agent:
             current_history = self.get_chat_history()
             message_count = len(current_history)
             self.pinnokio_agent.clear_chat_history()
+            
+            # ⭐ Sync Redis (vider aussi dans Redis)
+            if self._redis_sync_enabled and self.active_thread_key:
+                self._chat_history_manager.clear_messages(
+                    self.firebase_user_id,
+                    self.collection_name,
+                    self.active_thread_key,
+                    keep_system_prompt=True
+                )
+            
             logger.info(f"[CHAT_HISTORY] Historique vidé via agent ({message_count} messages supprimés)")
         else:
             logger.warning(f"[CHAT_HISTORY] Agent non initialisé, rien à vider")
+    
+    def _sync_history_to_redis(self):
+        """
+        Synchronise l'historique local vers Redis (non-bloquant).
+        
+        ⭐ Multi-Instance: Appelé après chaque modification pour durabilité.
+        """
+        if not self._redis_sync_enabled:
+            return
+        
+        if not self.active_thread_key:
+            logger.debug("[CHAT_HISTORY] Pas de thread_key actif pour sync Redis")
+            return
+        
+        try:
+            messages = self.get_chat_history()
+            system_prompt = ""
+            
+            # Récupérer le system prompt si disponible
+            if self.pinnokio_agent:
+                provider_instance = self.pinnokio_agent.get_provider_instance(self.default_provider)
+                if provider_instance and hasattr(provider_instance, 'system_prompt'):
+                    system_prompt = provider_instance.system_prompt or ""
+            
+            self._chat_history_manager.save_chat_history(
+                user_id=self.firebase_user_id,
+                company_id=self.collection_name,
+                thread_key=self.active_thread_key,
+                messages=messages,
+                system_prompt=system_prompt,
+                metadata={
+                    "chat_mode": self.current_chat_mode,
+                    "provider": self.default_provider.value
+                },
+                status="active"
+            )
+            
+            logger.debug(
+                f"[CHAT_HISTORY] 💾 Sync Redis: {len(messages)} messages, "
+                f"thread={self.active_thread_key}"
+            )
+            
+        except Exception as e:
+            logger.warning(f"[CHAT_HISTORY] ⚠️ Erreur sync Redis: {e}")
     
     async def load_user_context(self, mode: str = "UI") -> Dict[str, Any]:
         """

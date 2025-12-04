@@ -745,6 +745,12 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
             async def _async_wrapper(**kwargs):
                 return await get_llm_manager().invalidate_user_context(**kwargs)
             return _async_wrapper, "LLM"
+        if name == "execute_task_now":
+            # ⭐ NOUVEAU: Exécution immédiate d'une tâche (déclenchée depuis le frontend)
+            # Réplique la logique du CRON mais appelée manuellement
+            async def _async_wrapper(**kwargs):
+                return await get_llm_manager().execute_task_now(**kwargs)
+            return _async_wrapper, "LLM"
     # ❌ SUPPRIMÉ: DOUBLON - Les méthodes listeners sont déjà exposées sous REGISTRY.*
     # if method.startswith("REGISTRY_LISTENERS."):
     #     name = method.split(".", 1)[1]
@@ -1167,10 +1173,17 @@ async def invalidate_cache(req: InvalidateCacheRequest):
             keys_to_delete.append(context_key)
         
         if "all" in req.cache_types or "jobs" in req.cache_types:
-            # Jobs par département
+            # ⭐ Jobs par département - Utiliser cache:* (source de vérité unique)
+            # Format: cache:{user_id}:{company_id}:{data_type}:{sub_type}
+            dept_mapping = {
+                "APBOOKEEPER": "apbookeeper:documents",
+                "ROUTER": "drive:documents",
+                "BANK": "bank:transactions"
+            }
             for dept in ["APBOOKEEPER", "ROUTER", "BANK"]:
-                job_key = f"jobs:{req.user_id}:{req.collection_name}:{dept}"
-                keys_to_delete.append(job_key)
+                data_type_sub = dept_mapping.get(dept, f"{dept.lower()}:data")
+                cache_key = f"cache:{req.user_id}:{req.collection_name}:{data_type_sub}"
+                keys_to_delete.append(cache_key)
         
         # Supprimer chaque clé
         for key in keys_to_delete:
@@ -1264,8 +1277,10 @@ async def lpt_callback(req: LPTCallbackRequest, authorization: str | None = Head
         mandate_path = req.mandates_path
         tasks_path = f"{mandate_path}/tasks"
         
-        # Vérifier si le task_id existe dans {mandate_path}/tasks/{task_id}
-        task_ref = get_firestore().document(f"{tasks_path}/{req.task_id}")
+        # ⭐ CORRECTION : Utiliser thread_key pour détecter la tâche planifiée
+        # Car thread_key = task_id de la tâche planifiée (voir cron_scheduler.py ligne 295)
+        # req.task_id est le batch_id du LPT (router_batch_xxx, apbookeeper_batch_xxx, etc.)
+        task_ref = get_firestore().document(f"{tasks_path}/{req.thread_key}")
         task_doc_snap = task_ref.get()
         
         # Déterminer si c'est une tâche planifiée ou un LPT simple
@@ -1332,9 +1347,9 @@ async def lpt_callback(req: LPTCallbackRequest, authorization: str | None = Head
                 "response": req.response
             }
             
-            # Mise à jour dans {mandate_path}/tasks/{task_id}
+            # Mise à jour dans {mandate_path}/tasks/{thread_key} (thread_key = task_id de la tâche planifiée)
             task_ref.update(update_data)
-            logger.info("lpt_callback_firebase_updated task_id=%s path=%s with_full_payload=True", req.task_id, tasks_path)
+            logger.info("lpt_callback_firebase_updated task_id=%s (thread_key) path=%s with_full_payload=True", req.thread_key, tasks_path)
         else:
             # Pour LPT simple, pas de mise à jour Firebase (pas de document task)
             logger.info("lpt_callback_skip_firebase_update task_id=%s (LPT simple, pas de document task)", req.task_id)
@@ -1448,16 +1463,23 @@ async def lpt_callback(req: LPTCallbackRequest, authorization: str | None = Head
         )
         
         dt_ms = int((time.time() - t0) * 1000)
+        
+        # ⭐ Pour les tâches planifiées, utiliser thread_key comme task_id (car thread_key = task_id de la tâche planifiée)
+        # Pour les LPT simples, utiliser req.task_id (batch_id)
+        returned_task_id = req.thread_key if is_planned_task else req.task_id
+        
         logger.info(
-            "lpt_callback_ok task_id=%s status=%s dt_ms=%s",
+            "lpt_callback_ok task_id=%s (returned=%s) status=%s dt_ms=%s is_planned=%s",
             req.task_id,
+            returned_task_id,
             req.status,
-            dt_ms
+            dt_ms,
+            is_planned_task
         )
         
         return {
             "ok": True,
-            "task_id": req.task_id,
+            "task_id": returned_task_id,
             "message": "Callback traité avec succès"
         }
     
