@@ -20,6 +20,7 @@ class JobLoader:
     - APBOOKEEPER : Factures fournisseur (source: Firebase)
     - ROUTER : Documents à router (source: Drive + Firebase)
     - BANK : Transactions bancaires (source: ERP Odoo)
+    - EXPENSES : Notes de frais (source: Firebase)
     
     Workflow :
     1. Mode UI : Cache Redis → Fallback sources
@@ -110,10 +111,12 @@ class JobLoader:
             ap_key = self._build_reflex_cache_key("APBOOKEEPER")
             router_key = self._build_reflex_cache_key("ROUTER")
             bank_key = self._build_reflex_cache_key("BANK")
+            expenses_key = self._build_reflex_cache_key("EXPENSES")
             logger.info(f"[JOB_LOADER] 🔑 Clés Redis (format Reflex):")
             logger.info(f"[JOB_LOADER]   - APBookkeeper: {ap_key}")
             logger.info(f"[JOB_LOADER]   - Router: {router_key}")
             logger.info(f"[JOB_LOADER]   - Bank: {bank_key}")
+            logger.info(f"[JOB_LOADER]   - Expenses: {expenses_key}")
         else:
             logger.info(f"[JOB_LOADER] Mode BACKEND → Appel direct aux sources (pas de cache)")
         
@@ -123,12 +126,14 @@ class JobLoader:
         apbookeeper_task = self.load_apbookeeper_jobs(mode)
         router_task = self.load_router_jobs(mode, user_context)
         bank_task = self.load_bank_transactions(mode, user_context)
+        expenses_task = self.load_expenses(mode, user_context)
         
         # Attendre tous les chargements
-        apbookeeper_data, router_data, bank_data = await asyncio.gather(
+        apbookeeper_data, router_data, bank_data, expenses_data = await asyncio.gather(
             apbookeeper_task,
             router_task,
             bank_task,
+            expenses_task,
             return_exceptions=True
         )
         
@@ -149,6 +154,7 @@ class JobLoader:
         jobs_data["APBOOKEEPER"] = apbookeeper_data if not isinstance(apbookeeper_data, Exception) else {}
         jobs_data["ROUTER"] = router_data if not isinstance(router_data, Exception) else {}
         jobs_data["BANK"] = bank_data if not isinstance(bank_data, Exception) else {}
+        jobs_data["EXPENSES"] = expenses_data if not isinstance(expenses_data, Exception) else {}
         
         # 🔍 LOGS DE DIAGNOSTIC - Après assemblage
         logger.info(f"[JOB_LOADER] 🔍 DIAGNOSTIC APRÈS assemblage - "
@@ -164,7 +170,8 @@ class JobLoader:
         
         logger.info(f"[JOB_LOADER] ✅ Jobs chargés - AP: {jobs_metrics['APBOOKEEPER']['to_do']}, "
                    f"Router: {jobs_metrics['ROUTER']['to_process']}, "
-                   f"Bank: {jobs_metrics['BANK']['total_accounts']} comptes")
+                   f"Bank: {jobs_metrics['BANK']['total_accounts']} comptes, "
+                   f"Expenses: {jobs_metrics['EXPENSES']['open']} open, {jobs_metrics['EXPENSES']['closed']} closed")
         
         return jobs_data, jobs_metrics
     
@@ -331,6 +338,119 @@ class JobLoader:
             logger.error(f"[JOB_LOADER] Erreur chargement Bank: {e}", exc_info=True)
             return {"to_reconcile": [], "pending": [], "in_process": [], "in_process_batches": []}
     
+    async def load_expenses(self, mode: str, user_context: Dict) -> Dict:
+        """
+        Charge les notes de frais depuis Redis → Firebase.
+        
+        Format compatible avec le frontend (ExpenseState) :
+        - {"open": [...], "closed": [...]}
+        - Statuts : "to_process" (open) et "close" (closed)
+        
+        Returns:
+            {
+                "open": [{"expense_id": "...", "date": "...", "amount": ..., ...}],
+                "closed": [...]
+            }
+        """
+        try:
+            logger.info(f"[JOB_LOADER] Chargement Expenses...")
+            
+            # Mode UI : Vérifier cache Redis (utilisateur connecté, données à jour)
+            if mode == "UI":
+                cached_data = await self._get_from_cache("EXPENSES")
+                if cached_data:
+                    open_count = len(cached_data.get("open", [])) if isinstance(cached_data.get("open"), list) else 0
+                    closed_count = len(cached_data.get("closed", [])) if isinstance(cached_data.get("closed"), list) else 0
+                    
+                    # ⭐ Vérifier que le cache contient réellement des données
+                    total_expenses = open_count + closed_count
+                    if total_expenses > 0:
+                        logger.info(f"[JOB_LOADER] ✅ Expenses depuis cache - open: {open_count}, closed: {closed_count}")
+                        logger.info(f"[JOB_LOADER] 🔍 DEBUG Expenses - Structure: {list(cached_data.keys())}")
+                        return cached_data
+                    else:
+                        logger.warning(f"[JOB_LOADER] ⚠️ Cache Expenses VIDE (0 expenses) - Fallback vers Firebase")
+                        # Ne pas retourner → continue vers fallback Firebase
+                else:
+                    logger.info(f"[JOB_LOADER] ❌ CACHE MISS Expenses - Fallback vers Firebase")
+            
+            # Mode BACKEND : Toujours aller à la source (cache peut être obsolète)
+            # Fallback mode UI : Si cache miss ou vide
+            logger.info(f"[JOB_LOADER] Fetch Expenses depuis Firebase...")
+            data = await self._fetch_expenses_from_firebase(user_context)
+            
+            # ⭐ Mettre en cache dans tous les modes (format uniforme cache:*)
+            # Mode UI : Pour prochains appels
+            # Mode BACKEND : Pour que le prochain mode UI en bénéficie
+            if data:
+                await self._set_to_cache("EXPENSES", data, ttl=2400)  # 40 minutes comme le frontend
+            
+            return data
+        
+        except Exception as e:
+            logger.error(f"[JOB_LOADER] Erreur chargement Expenses: {e}", exc_info=True)
+            return {"open": [], "closed": []}
+    
+    async def _fetch_expenses_from_firebase(self, user_context: Dict) -> Dict:
+        """
+        Récupère les notes de frais depuis Firebase.
+        Format compatible avec ExpenseState (frontend).
+        """
+        try:
+            from ...firebase_providers import FirebaseManagement
+            
+            firebase_service = FirebaseManagement()
+            mandate_path = user_context.get("mandate_path")
+            
+            if not mandate_path:
+                logger.warning(f"[JOB_LOADER] Pas de mandate_path dans le contexte")
+                return {"open": [], "closed": []}
+            
+            # Récupérer toutes les expenses depuis Firebase
+            expenses_data = firebase_service.fetch_expenses_by_mandate(mandate_path=mandate_path)
+            
+            if not expenses_data:
+                logger.info(f"[JOB_LOADER] Aucune expense trouvée dans Firebase")
+                return {"open": [], "closed": []}
+            
+            # Séparer open et closed (format compatible frontend)
+            open_items = []
+            closed_items = []
+            
+            for expense_id, expense_data in expenses_data.items():
+                # Normaliser les timestamps
+                expense_item = {
+                    "expense_id": expense_id,
+                    "date": expense_data.get("date", ""),
+                    "supplier": expense_data.get("supplier", ""),
+                    "amount": float(expense_data.get("amount", 0)),
+                    "currency": expense_data.get("currency", "CHF"),
+                    "status": expense_data.get("status", "to_process"),
+                    "concern": expense_data.get("concern", ""),
+                    "drive_file_id": expense_data.get("drive_file_id", ""),
+                    "payment_method": expense_data.get("payment_method", ""),
+                    "job_id": expense_data.get("job_id", ""),
+                    "file_name": expense_data.get("file_name", "")
+                }
+                
+                # Séparer selon le statut
+                if expense_item["status"] == "close":
+                    closed_items.append(expense_item)
+                else:
+                    # "to_process" ou autres statuts → open
+                    open_items.append(expense_item)
+            
+            logger.info(f"[JOB_LOADER] Expenses: {len(open_items)} open, {len(closed_items)} closed")
+            
+            return {
+                "open": open_items,
+                "closed": closed_items
+            }
+        
+        except Exception as e:
+            logger.error(f"[JOB_LOADER] Erreur fetch Expenses Firebase: {e}", exc_info=True)
+            return {"open": [], "closed": []}
+    
     def _build_reflex_cache_key(self, department: str) -> str:
         """
         Construit la clé Redis compatible avec le format Reflex.
@@ -341,7 +461,8 @@ class JobLoader:
         reflex_mapping = {
             "BANK": "bank:transactions",
             "ROUTER": "drive:documents",
-            "APBOOKEEPER": "apbookeeper:documents"
+            "APBOOKEEPER": "apbookeeper:documents",
+            "EXPENSES": "expenses:details"
         }
         
         data_type_sub = reflex_mapping.get(department)
@@ -404,7 +525,8 @@ class JobLoader:
             source_mapping = {
                 "BANK": "bank.transactions",
                 "ROUTER": "router.documents",
-                "APBOOKEEPER": "apbookeeper.documents"
+                "APBOOKEEPER": "apbookeeper.documents",
+                "EXPENSES": "expenses.details"
             }
             
             # Convertir les DatetimeWithNanoseconds en strings ISO
@@ -898,6 +1020,16 @@ class JobLoader:
         if "warning_message" in bank_data:
             metrics["BANK"]["warning_message"] = bank_data["warning_message"]
             all_warnings.append(f"🏦 Bank: {bank_data['warning_message']}")
+        
+        # Expenses
+        expenses_data = jobs_data.get("EXPENSES", {})
+        metrics["EXPENSES"] = {
+            "open": len(expenses_data.get("open", [])),
+            "closed": len(expenses_data.get("closed", []))
+        }
+        if "warning_message" in expenses_data:
+            metrics["EXPENSES"]["warning_message"] = expenses_data["warning_message"]
+            all_warnings.append(f"💰 Expenses: {expenses_data['warning_message']}")
         
         # Ajouter tous les warnings collectés
         if all_warnings:

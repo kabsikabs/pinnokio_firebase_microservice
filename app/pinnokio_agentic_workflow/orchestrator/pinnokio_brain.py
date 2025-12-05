@@ -252,7 +252,7 @@ class PinnokioBrain:
         
         # ═══ OUTILS JOBS (3 outils séparés par département) ═══
         # Créer les 3 outils jobs avec leurs handlers
-        from ..tools.job_tools import APBookkeeperJobTools, RouterJobTools, BankJobTools, ContextTools
+        from ..tools.job_tools import APBookkeeperJobTools, RouterJobTools, BankJobTools, ExpenseJobTools, ContextTools
         
         # 🔍 LOGS DE DIAGNOSTIC - Vérifier jobs_data avant création outils
         logger.info(f"[BRAIN] 🔍 DIAGNOSTIC self.jobs_data avant création outils - "
@@ -306,6 +306,19 @@ class PinnokioBrain:
         
         async def handle_get_bank_transactions(**kwargs):
             return await bank_tools.search(**kwargs)
+        
+        # 4. Expenses - ⭐ Passer paramètres pour rechargement Redis
+        expenses_tools = ExpenseJobTools(
+            jobs_data=self.jobs_data,
+            user_id=self.firebase_user_id,
+            company_id=self.collection_name,
+            user_context=self.user_context,
+            mode=mode
+        )
+        get_expenses_info_def = expenses_tools.get_tool_definition()
+        
+        async def handle_get_expenses_info(**kwargs):
+            return await expenses_tools.search(**kwargs)
         
         # ═══ OUTILS CONTEXT (5 outils d'accès et modification des contextes) ═══
         # Créer les outils de contexte avec leurs handlers
@@ -369,7 +382,7 @@ class PinnokioBrain:
                     error_msg = (
                         "❌ Paramètre 'file_id' manquant ou invalide. "
                         "Pour voir un document, tu DOIS d'abord récupérer son drive_file_id "
-                        "en utilisant GET_APBOOKEEPER_JOBS, GET_ROUTER_JOBS ou GET_BANK_TRANSACTIONS."
+                        "en utilisant GET_APBOOKEEPER_JOBS, GET_ROUTER_JOBS, GET_BANK_TRANSACTIONS ou GET_EXPENSES_INFO."
                     )
                     logger.warning(f"[VIEW_DRIVE_DOCUMENT] {error_msg}")
                     return {
@@ -843,11 +856,12 @@ class PinnokioBrain:
         # Créer l'outil GET_TOOL_HELP dynamiquement
         get_tool_help_def, handle_get_tool_help = help_registry.create_get_tool_help()
         
-        # Combiner tous les outils (avec les 3 outils jobs + 4 outils context + VIEW_DRIVE_DOCUMENT + CREATE_TASK + checklist + datetime + WAIT_ON_LPT + GET_TOOL_HELP)
+        # Combiner tous les outils (avec les 4 outils jobs + 4 outils context + VIEW_DRIVE_DOCUMENT + CREATE_TASK + checklist + datetime + WAIT_ON_LPT + GET_TOOL_HELP)
         tool_set = [
             get_apbookeeper_jobs_def,
             get_router_jobs_def,
             get_bank_transactions_def,
+            get_expenses_info_def,
             router_prompt_def,
             apbookeeper_context_def,
             company_context_def,
@@ -865,6 +879,7 @@ class PinnokioBrain:
             "GET_APBOOKEEPER_JOBS": handle_get_apbookeeper_jobs,
             "GET_ROUTER_JOBS": handle_get_router_jobs,
             "GET_BANK_TRANSACTIONS": handle_get_bank_transactions,
+            "GET_EXPENSES_INFO": handle_get_expenses_info,
             "ROUTER_PROMPT": handle_router_prompt,
             "APBOOKEEPER_CONTEXT": handle_apbookeeper_context,
             "COMPANY_CONTEXT": handle_company_context,

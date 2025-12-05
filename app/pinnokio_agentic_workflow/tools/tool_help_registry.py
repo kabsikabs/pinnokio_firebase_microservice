@@ -295,6 +295,84 @@ Chaque transaction retournée contient :
 2. `LPT_Banker(transaction_ids=[...])` → Lancer la réconciliation
 """,
 
+    "GET_EXPENSES_INFO": """
+💰 **GET_EXPENSES_INFO** - Recherche des notes de frais
+
+## Rôle
+Recherche et filtre les notes de frais par statut, date, montant, fournisseur ou méthode de paiement.
+
+## Statuts des notes de frais
+- **`open`** (statut "to_process") : Notes de frais **non saisies en comptabilité**. Elles doivent généralement être réconciliées avec une transaction bancaire correspondante. Ce sont les notes de frais en attente de traitement comptable.
+- **`closed`** (statut "close") : Notes de frais **déjà comptabilisées en comptabilité**. Elles ont été traitées et enregistrées dans les écritures comptables.
+
+## ⚠️ IMPORTANT - Notes de frais à rembourser
+Si une note de frais représente un remboursement à un employé ou à une personne (frais professionnels remboursables), elle doit être traitée comme une **facture fournisseur** et passer par le processus des factures fournisseurs (APBookkeeper) plutôt que comme une simple note de frais.
+
+**Workflow recommandé pour les notes de frais à rembourser** :
+1. Identifier que la note de frais est un remboursement (via GET_EXPENSES_INFO et VIEW_DRIVE_DOCUMENT si nécessaire)
+2. Expliquer à l'utilisateur que ce type de note doit être saisie comme facture fournisseur
+3. Recommander la mise à jour du contexte expenses pour clarifier cette règle
+4. Guider l'utilisateur vers le processus APBookkeeper si nécessaire
+
+## Paramètres
+| Paramètre | Type | Description |
+|-----------|------|-------------|
+| `status` | string | `open` (non saisies), `closed` (comptabilisées), `all` |
+| `date_from` | string | Date début (YYYY-MM-DD) |
+| `date_to` | string | Date fin (YYYY-MM-DD) |
+| `amount_min` | number | Montant minimum |
+| `amount_max` | number | Montant maximum |
+| `supplier_contains` | string | Recherche dans le nom du fournisseur (case insensitive) |
+| `payment_method` | string | Filtrer par méthode de paiement |
+| `limit` | integer | Nombre max de résultats (défaut: 50, max: 200) |
+
+## Output
+Chaque expense retournée contient :
+- `expense_id` : ID unique de la note de frais
+- `drive_file_id` : ID du document Google Drive (pour visualisation via VIEW_DRIVE_DOCUMENT)
+- `date` : Date de la note de frais
+- `amount` : Montant
+- `currency` : Devise (ex: CHF, EUR)
+- `supplier` : Nom du fournisseur
+- `status` : Statut ("to_process" ou "close")
+- `concern` : Description/objet de la note de frais
+- `payment_method` : Méthode de paiement
+- `job_id` : ID du job associé (si applicable)
+- `file_name` : Nom du fichier
+
+## Exemples d'utilisation
+
+**1. Notes de frais ouvertes (non saisies) :**
+```json
+{"status": "open"}
+```
+
+**2. Notes de frais d'un fournisseur spécifique :**
+```json
+{"supplier_contains": "Restaurant", "status": "all"}
+```
+
+**3. Notes de frais récentes de montant élevé :**
+```json
+{"date_from": "2025-01-01", "amount_min": 500, "status": "open"}
+```
+
+**4. Notes de frais fermées (comptabilisées) :**
+```json
+{"status": "closed", "date_from": "2024-01-01"}
+```
+
+## Accès aux documents
+- Chaque expense contient un `drive_file_id` qui permet de visualiser le document via `VIEW_DRIVE_DOCUMENT`
+- Utilisez `VIEW_DRIVE_DOCUMENT` avec le `drive_file_id` pour analyser le contenu de la note de frais en cas de doute
+
+## Workflow typique
+1. `GET_EXPENSES_INFO(status="open")` → Obtenir les notes de frais non saisies
+2. `VIEW_DRIVE_DOCUMENT(file_id=drive_file_id)` → Analyser le document si nécessaire
+3. Identifier si c'est un remboursement → Guider vers APBookkeeper si nécessaire
+4. Réconcilier avec transaction bancaire si applicable
+""",
+
     # ─────────────────────────────────────────────────────────────────────────────
     # OUTILS LPT (lpt_client.py)
     # ─────────────────────────────────────────────────────────────────────────────

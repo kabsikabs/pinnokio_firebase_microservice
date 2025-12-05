@@ -487,6 +487,207 @@ class BankJobTools:
             }
 
 
+class ExpenseJobTools:
+    """
+    Outil GET_EXPENSES_INFO pour rechercher les notes de frais.
+    
+    Output complet avec tous les détails des expenses pour analyse approfondie.
+    Inclut drive_file_id pour visualisation des documents.
+    
+    ⭐ NOUVEAU : Recharge depuis Redis à chaque appel (mode UI) pour données à jour
+    """
+    
+    def __init__(self, jobs_data: Dict, user_id: str = None, company_id: str = None, user_context: Dict = None, mode: str = "UI"):
+        self.expenses_data = jobs_data.get("EXPENSES", {})  # Données initiales (fallback)
+        self.user_id = user_id
+        self.company_id = company_id
+        self.user_context = user_context or {}
+        self.mode = mode
+        logger.info(f"[EXPENSES_TOOLS] Initialisé avec {len(self.expenses_data.get('open', []))} expenses open (mode={mode})")
+    
+    def get_tool_definition(self) -> Dict:
+        """Définition COURTE de l'outil GET_EXPENSES_INFO (pour l'API)."""
+        return {
+            "name": "GET_EXPENSES_INFO",
+            "description": "💰 Recherche les notes de frais par statut/date/montant/fournisseur. Retourne expense_id, drive_file_id, date, amount, supplier, status. Utilisez GET_TOOL_HELP pour plus de détails.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["open", "closed", "all"],
+                        "description": "Filtrer par statut (open=non saisies, closed=comptabilisées, défaut: open)"
+                    },
+                    "date_from": {
+                        "type": "string",
+                        "description": "Date de début (YYYY-MM-DD)"
+                    },
+                    "date_to": {
+                        "type": "string",
+                        "description": "Date de fin (YYYY-MM-DD)"
+                    },
+                    "amount_min": {
+                        "type": "number",
+                        "description": "Montant minimum"
+                    },
+                    "amount_max": {
+                        "type": "number",
+                        "description": "Montant maximum"
+                    },
+                    "supplier_contains": {
+                        "type": "string",
+                        "description": "Rechercher dans le nom du fournisseur (case insensitive)"
+                    },
+                    "payment_method": {
+                        "type": "string",
+                        "description": "Filtrer par méthode de paiement"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Nombre max de résultats (défaut: 50, max: 200)",
+                        "default": 50
+                    }
+                },
+                "required": []
+            }
+        }
+    
+    async def search(
+        self,
+        status: str = "open",
+        date_from: str = None,
+        date_to: str = None,
+        amount_min: float = None,
+        amount_max: float = None,
+        supplier_contains: str = None,
+        payment_method: str = None,
+        limit: int = 50
+    ) -> Dict:
+        """
+        Recherche les notes de frais.
+        
+        ⭐ NOUVEAU : Recharge depuis Redis à chaque appel (mode UI) pour données à jour
+        """
+        try:
+            logger.info(f"[GET_EXPENSES_INFO] Recherche - status={status}, limit={limit}")
+            
+            # ⭐ Recharger depuis Redis si mode UI (données à jour)
+            expenses_data = self.expenses_data  # Fallback vers données initiales
+            if self.mode == "UI" and self.user_id and self.company_id:
+                try:
+                    from ..tools.job_loader import JobLoader
+                    loader = JobLoader(
+                        user_id=self.user_id,
+                        company_id=self.company_id,
+                        client_uuid=self.user_context.get("client_uuid")
+                    )
+                    # Recharger uniquement Expenses depuis Redis
+                    fresh_expenses_data = await loader.load_expenses(mode="UI", user_context=self.user_context)
+                    if fresh_expenses_data:
+                        expenses_data = fresh_expenses_data
+                        logger.info(f"[GET_EXPENSES_INFO] ✅ Données rechargées depuis Redis - {len(expenses_data.get('open', []))} open, {len(expenses_data.get('closed', []))} closed")
+                except Exception as e:
+                    logger.warning(f"[GET_EXPENSES_INFO] ⚠️ Erreur rechargement Redis: {e} - Utilisation données initiales")
+            
+            limit = min(limit, 200)
+            
+            # Récupérer les expenses selon le statut
+            if status == "all":
+                all_expenses = []
+                all_expenses.extend(expenses_data.get("open", []))  # ✅ Utiliser données rechargées
+                all_expenses.extend(expenses_data.get("closed", []))
+            elif status == "closed":
+                all_expenses = expenses_data.get("closed", [])
+            else:  # "open" par défaut
+                all_expenses = expenses_data.get("open", [])
+            
+            if not all_expenses:
+                return {
+                    "success": True,
+                    "department": "EXPENSES",
+                    "filters_applied": {},
+                    "total_found": 0,
+                    "total_amount": 0,
+                    "results": [],
+                    "summary": "💰 Aucune note de frais trouvée"
+                }
+            
+            # Convertir en DataFrame pour filtrage avancé
+            df = pd.DataFrame(all_expenses)
+            
+            # Appliquer les filtres
+            if date_from:
+                df = df[df['date'] >= date_from]
+            
+            if date_to:
+                df = df[df['date'] <= date_to]
+            
+            if amount_min is not None:
+                df = df[df['amount'] >= amount_min]
+            
+            if amount_max is not None:
+                df = df[df['amount'] <= amount_max]
+            
+            if supplier_contains:
+                df = df[df['supplier'].astype(str).str.contains(supplier_contains, case=False, na=False)]
+            
+            if payment_method:
+                df = df[df['payment_method'].astype(str).str.contains(payment_method, case=False, na=False)]
+            
+            # Limiter les résultats
+            df = df.head(limit)
+            
+            # Output complet avec tous les détails
+            results = []
+            for _, row in df.iterrows():
+                results.append({
+                    "expense_id": row.get("expense_id"),  # ID pour référence
+                    "drive_file_id": row.get("drive_file_id"),  # 🔍 Pour voir le document
+                    "date": str(row.get("date", "")),
+                    "amount": float(row.get("amount", 0)),
+                    "currency": str(row.get("currency", "CHF")),
+                    "supplier": str(row.get("supplier", "")),
+                    "status": str(row.get("status", "to_process")),  # "to_process" ou "close"
+                    "concern": str(row.get("concern", "")),
+                    "payment_method": str(row.get("payment_method", "")),
+                    "job_id": row.get("job_id", ""),
+                    "file_name": row.get("file_name", "")
+                })
+            
+            # Calculer le total
+            total_amount = sum(r["amount"] for r in results)
+            
+            # Résumé
+            status_info = f" ({status})" if status != "all" else ""
+            supplier_info = f" pour {supplier_contains}" if supplier_contains else ""
+            
+            return {
+                "success": True,
+                "department": "EXPENSES",
+                "filters_applied": {
+                    "status": status,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "amount_min": amount_min,
+                    "amount_max": amount_max,
+                    "supplier_contains": supplier_contains,
+                    "payment_method": payment_method
+                },
+                "total_found": len(results),
+                "total_amount": round(total_amount, 2),
+                "results": results,
+                "summary": f"💰 {len(results)} note(s) de frais{status_info}{supplier_info} - Total: {total_amount:.2f}{results[0]['currency'] if results else 'CHF'}"
+            }
+        
+        except Exception as e:
+            logger.error(f"[GET_EXPENSES_INFO] Erreur: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e),
+                "results": []
+            }
+
+
 class ContextTools:
     """
     Outils d'accès et de modification des contextes (Router, APBookkeeper, Company).

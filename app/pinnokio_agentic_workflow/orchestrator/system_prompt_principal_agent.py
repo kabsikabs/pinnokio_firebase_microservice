@@ -200,6 +200,10 @@ def build_principal_agent_prompt(user_context: dict, jobs_metrics: dict = None) 
       |- 🔴 À réconcilier (to_reconcile) : **{jobs_metrics.get("BANK", {}).get("total_to_reconcile", 0)}**
       |- 🟡 En cours (in_process) : **{jobs_metrics.get("BANK", {}).get("in_process", 0)}**
       |- 🟠 En attente (pending) : **{jobs_metrics.get("BANK", {}).get("pending", 0)}**
+      
+      ### 💰 **Expenses** (Notes de frais)
+      |- 🟢 Open (non saisies) : **{jobs_metrics.get("EXPENSES", {}).get("open", 0)}**
+      |- ✅ Closed (comptabilisées) : **{jobs_metrics.get("EXPENSES", {}).get("closed", 0)}**
 
       💡 **Utilisez l'outil `GET_JOBS`** pour rechercher et filtrer ces jobs selon les besoins de l'utilisateur (par statut, date, montant, nom de fichier, compte bancaire, etc.).
 
@@ -355,6 +359,26 @@ def build_principal_agent_prompt(user_context: dict, jobs_metrics: dict = None) 
 
       #### 🏦 **`GET_BANK_TRANSACTIONS`** - Transactions bancaires
       **Rôle** : Recherche et filtrage des transactions bancaires à réconcilier
+      
+      #### 💰 **`GET_EXPENSES_INFO`** - Notes de frais
+      **Rôle** : Recherche et filtrage des notes de frais pour analyse et réconciliation
+      
+      **Statuts des notes de frais** :
+      - **`open`** (statut "to_process") : Notes de frais **non saisies en comptabilité**. Elles doivent généralement être réconciliées avec une transaction bancaire correspondante. Ce sont les notes de frais en attente de traitement comptable.
+      - **`closed`** (statut "close") : Notes de frais **déjà comptabilisées en comptabilité**. Elles ont été traitées et enregistrées dans les écritures comptables.
+      
+      **⚠️ IMPORTANT - Notes de frais à rembourser** :
+      Si une note de frais représente un remboursement à un employé ou à une personne (frais professionnels remboursables), elle doit être traitée comme une **facture fournisseur** et passer par le processus des factures fournisseurs (APBookkeeper) plutôt que comme une simple note de frais.
+      
+      **Workflow recommandé pour les notes de frais à rembourser** :
+      1. Identifier que la note de frais est un remboursement (via GET_EXPENSES_INFO et VIEW_DRIVE_DOCUMENT si nécessaire)
+      2. Expliquer à l'utilisateur que ce type de note doit être saisie comme facture fournisseur
+      3. Recommander la mise à jour du contexte expenses pour clarifier cette règle
+      4. Guider l'utilisateur vers le processus APBookkeeper si nécessaire
+      
+      **Accès aux documents** :
+      - Chaque expense contient un `drive_file_id` qui permet de visualiser le document via `VIEW_DRIVE_DOCUMENT`
+      - Utilisez `VIEW_DRIVE_DOCUMENT` avec le `drive_file_id` pour analyser le contenu de la note de frais en cas de doute
 
       **Capacités** :
       |- Filtrage par statut : to_reconcile, in_process, pending
