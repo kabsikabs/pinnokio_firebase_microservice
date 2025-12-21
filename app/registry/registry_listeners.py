@@ -23,6 +23,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List
 from google.cloud import firestore
 from ..firebase_client import get_firestore
+from .. import runtime as runtime_state
 
 
 class RegistryListeners:
@@ -214,6 +215,43 @@ class RegistryListeners:
                     f"listener_already_exists uid={user_id} type={listener_type} "
                     f"space={space_code} thread={thread_key}"
                 )
+                
+                # ⭐ CRITIQUE : Même si le listener est déjà enregistré, vérifier si le listener Firestore est actif
+                # (nécessaire après un restart ou si le listener Firestore a été arrêté)
+                if listener_type == "workflow" and thread_key:
+                    try:
+                        listeners_manager = runtime_state.listeners_manager
+                        if listeners_manager is None:
+                            raise RuntimeError("listeners_manager is None (service not started or startup failed)")
+                        # Vérifier si le listener Firestore est actif
+                        key = f"{user_id}_{thread_key}"
+                        with listeners_manager._lock:
+                            is_firestore_active = key in listeners_manager._workflow_unsubs
+                        
+                        if not is_firestore_active:
+                            self.logger.info(
+                                f"🔄 workflow_listener_firestore_missing uid={user_id} job_id={thread_key} - "
+                                f"démarrage du listener Firestore même si registre existe"
+                            )
+                            success = listeners_manager.start_workflow_listener_for_job(user_id, thread_key)
+                            if success:
+                                self.logger.info(
+                                    f"✅ workflow_listener_firestore_started uid={user_id} job_id={thread_key}"
+                                )
+                            else:
+                                self.logger.warning(
+                                    f"⚠️ workflow_listener_firestore_failed uid={user_id} job_id={thread_key}"
+                                )
+                        else:
+                            self.logger.debug(
+                                f"✅ workflow_listener_firestore_already_active uid={user_id} job_id={thread_key}"
+                            )
+                    except Exception as e:
+                        self.logger.error(
+                            f"❌ workflow_listener_firestore_error uid={user_id} job_id={thread_key} error={e}",
+                            exc_info=True
+                        )
+                
                 return {
                     "success": False,
                     "error": "LISTENER_ALREADY_EXISTS",
@@ -257,7 +295,9 @@ class RegistryListeners:
             # ⭐ NOUVEAU: Si c'est un workflow listener, démarrer le listener Firestore pour ce job
             if listener_type == "workflow" and thread_key:
                 try:
-                    from ..listeners_manager import listeners_manager
+                    listeners_manager = runtime_state.listeners_manager
+                    if listeners_manager is None:
+                        raise RuntimeError("listeners_manager is None (service not started or startup failed)")
                     success = listeners_manager.start_workflow_listener_for_job(user_id, thread_key)
                     if success:
                         self.logger.info(

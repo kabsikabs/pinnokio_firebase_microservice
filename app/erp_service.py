@@ -20,7 +20,7 @@ Avantages:
 
 import threading
 import logging
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 from datetime import datetime, timedelta
 from .erp_manager import ODOO_KLK_VISION
 from .tools.g_cred import get_secret
@@ -201,7 +201,60 @@ class ERPConnectionManager:
             logger.error(f"❌ [ERP] Error getting credentials: {e}", exc_info=True)
             return None
 
+    def get_mandate_path(self, user_id: str, company_id: str, client_uuid: Optional[str] = None) -> Optional[str]:
+        """Construit le mandate_path Firestore (chemin réel) pour (user_id, company_id).
+
+        Utilise la même logique de résolution que _get_erp_credentials (client_uuid -> reconstruct_full_client_profile).
+        """
+        try:
+            from .firebase_providers import FirebaseManagement
+
+            db = get_firestore()
+            firebase_service = FirebaseManagement()
+
+            resolved_client_uuid = client_uuid
+
+            if not resolved_client_uuid:
+                lookup = firebase_service.resolve_client_by_contact_space(user_id, company_id)
+                if lookup and lookup.get("client_uuid"):
+                    resolved_client_uuid = lookup["client_uuid"]
+
+            if not resolved_client_uuid:
+                doc_ref = db.collection(f"clients/{user_id}/bo_clients").document(user_id)
+                doc = doc_ref.get()
+                if doc.exists:
+                    resolved_client_uuid = (doc.to_dict() or {}).get("client_uuid")
+
+            if not resolved_client_uuid:
+                logger.error("❌ [ERP] client_uuid not found for mandate_path user=%s company=%s", user_id, company_id)
+                return None
+
+            full_profile = firebase_service.reconstruct_full_client_profile(
+                user_id,
+                resolved_client_uuid,
+                company_id,
+            )
+
+            if not full_profile:
+                logger.error("❌ [ERP] Full profile not found for user=%s company=%s", user_id, company_id)
+                return None
+
+            mandate_id = full_profile.get("_mandate_id")
+            client_id = full_profile.get("_client_id")
+
+            if not mandate_id or not client_id:
+                logger.error("❌ [ERP] Missing mandate_id/client_id in full_profile for user=%s company=%s", user_id, company_id)
+                return None
+
+            return f"clients/{user_id}/bo_clients/{client_id}/mandates/{mandate_id}"
+
+        except Exception as e:
+            logger.error("❌ [ERP] Error building mandate_path: %s", e, exc_info=True)
+            return None
+
     def get_connection(self, user_id: str, company_id: str, client_uuid: Optional[str] = None) -> Optional[ODOO_KLK_VISION]:
+
+
         """
         Récupère ou crée une connexion ERP pour un utilisateur/société.
 
@@ -531,6 +584,140 @@ class ERPService:
         return connection.update_accounts(accounts_data)
 
     @classmethod
+
+
+    @classmethod
+    def update_coa_structure(
+        cls,
+        user_id: str,
+        company_id: str,
+        modified_rows: dict,
+        client_uuid: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Met à jour la structure du plan comptable (COA) : Odoo + Firestore.
+
+        - Odoo : via connection.update_accounts([...])
+        - Firestore : écrit dans {mandate_path}/setup/coa (merge=True)
+        """
+        if not user_id or not company_id:
+            raise ValueError("user_id et company_id requis")
+
+        if not isinstance(modified_rows, dict) or not modified_rows:
+            return {
+                "success": True,
+                "message": "No changes",
+                "odoo": {"requested": 0, "result": None},
+                "firebase": {"requested": 0, "doc_path": None},
+                "skipped": 0,
+            }
+
+        manager = cls._get_manager()
+        connection = manager.get_connection(user_id, company_id, client_uuid=client_uuid)
+        if not connection:
+            raise Exception("Failed to connect to ERP")
+
+        # Types Odoo supportés pour account_type
+        odoo_account_types = {
+            "asset_cash", "asset_current", "asset_prepayments",
+            "asset_fixed", "asset_non_current", "asset_receivable",
+            "liability_payable", "liability_credit_card",
+            "liability_current", "liability_non_current",
+            "equity_unaffected", "equity", "expense_depreciation",
+            "expense", "expense_direct_cost", "income", "income_other",
+        }
+
+        # Fonctions gérées uniquement dans Firebase
+        firebase_only_functions = {
+            "hr_expenses",
+            "general_administration_expenses",
+            "corporate_tax_expenses",
+        }
+
+        def _coerce_bool(v: Any) -> bool:
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, int):
+                return bool(v)
+            if isinstance(v, str):
+                return v.strip().lower() in ("true", "1", "yes", "oui", "y")
+            return bool(v)
+
+        odoo_updates: List[Dict[str, Any]] = []
+        firebase_updates: Dict[str, Dict[str, Any]] = {}
+        skipped = 0
+
+        for account_id, account_data in modified_rows.items():
+            if not isinstance(account_data, dict):
+                skipped += 1
+                continue
+
+            str_id = str(account_id)
+            new_function = account_data.get("new_function")
+            if new_function is None:
+                new_function = account_data.get("account_function")
+            isactive = account_data.get("isactive")
+
+            # Firebase update
+            fb_update: Dict[str, Any] = {
+                "account_id": str_id,
+                "klk_account_nature": account_data.get("account_nature"),
+            }
+            if new_function is not None:
+                fb_update["klk_account_function"] = new_function
+                if new_function in odoo_account_types:
+                    fb_update["account_type"] = new_function
+            if isactive is not None:
+                fb_update["isactive"] = _coerce_bool(isactive)
+            firebase_updates[str_id] = fb_update
+
+            # Odoo update (si nécessaire)
+            try:
+                acc_int = int(str_id)
+            except Exception:
+                skipped += 1
+                continue
+
+            needs_odoo = False
+            odoo_update: Dict[str, Any] = {"account_id": acc_int}
+
+            if isactive is not None:
+                odoo_update["deprecated"] = not _coerce_bool(isactive)
+                needs_odoo = True
+
+            if new_function and new_function in odoo_account_types:
+                odoo_update["account_type"] = new_function
+                needs_odoo = True
+
+            # Si uniquement une fonction administrative et pas de changement isactive → pas d'update Odoo
+            if (new_function in firebase_only_functions) and (isactive is None):
+                needs_odoo = False
+
+            if needs_odoo:
+                odoo_updates.append(odoo_update)
+
+        odoo_result = None
+        if odoo_updates:
+            logger.info("🔄 [ERP] update_coa_structure: updating %s accounts in Odoo", len(odoo_updates))
+            odoo_result = connection.update_accounts(odoo_updates)
+
+        mandate_path = manager.get_mandate_path(user_id, company_id, client_uuid=client_uuid)
+        if not mandate_path:
+            raise Exception("Failed to resolve mandate_path for Firestore update")
+
+        doc_path = f"{mandate_path}/setup/coa"
+        if firebase_updates:
+            db = get_firestore()
+            payload = {str(k): v for k, v in firebase_updates.items()}
+            db.document(doc_path).set(payload, merge=True)
+
+        return {
+            "success": True,
+            "message": "COA structure updated",
+            "odoo": {"requested": len(odoo_updates), "result": odoo_result},
+            "firebase": {"requested": len(firebase_updates), "doc_path": doc_path},
+            "skipped": skipped,
+        }
+
     def invalidate_connection(cls, user_id: str, company_id: str):
         """
         Invalide la connexion ERP pour un utilisateur/société.

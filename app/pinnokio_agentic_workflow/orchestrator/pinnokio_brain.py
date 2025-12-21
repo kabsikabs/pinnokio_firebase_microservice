@@ -320,11 +320,26 @@ class PinnokioBrain:
         async def handle_get_expenses_info(**kwargs):
             return await expenses_tools.search(**kwargs)
         
-        # ═══ OUTILS CONTEXT (5 outils d'accès et modification des contextes) ═══
-        # Créer les outils de contexte avec leurs handlers
+        # ═══ OUTILS CONTEXT + TASK_MANAGER (Firestore) ═══
+        # Créer l'accès Firebase (réutilisé par plusieurs outils)
         from ...firebase_providers import FirebaseManagement
         firebase_management = FirebaseManagement()
-        
+
+        # ═══ OUTILS TASK_MANAGER (index + détails audit) ═══
+        # Outils contractuels : clients/{userId}/task_manager/{job_id} + events/
+        from ..tools.task_manager_tools import TaskManagerTools
+
+        task_manager_tools = TaskManagerTools(firebase_management=firebase_management, brain=self)
+
+        get_task_manager_index_def = task_manager_tools.get_task_manager_index_definition()
+        get_task_manager_details_def = task_manager_tools.get_task_manager_details_definition()
+
+        async def handle_get_task_manager_index(**kwargs):
+            return await task_manager_tools.get_index(**kwargs)
+
+        async def handle_get_task_manager_details(**kwargs):
+            return await task_manager_tools.get_details(**kwargs)
+        # ═══ OUTILS CONTEXT (5 outils d'accès et modification des contextes) ═══
         context_tools = ContextTools(
             firebase_management=firebase_management,
             firebase_user_id=self.firebase_user_id,
@@ -335,6 +350,7 @@ class PinnokioBrain:
         # Définitions des outils de contexte
         router_prompt_def = context_tools.get_router_prompt_definition()
         apbookeeper_context_def = context_tools.get_apbookeeper_context_definition()
+        bank_context_def = context_tools.get_bank_context_definition()
         company_context_def = context_tools.get_company_context_definition()
         update_context_def = context_tools.get_update_context_definition()
         
@@ -347,6 +363,9 @@ class PinnokioBrain:
         
         async def handle_company_context(**kwargs):
             return await context_tools.get_company_context(**kwargs)
+
+        async def handle_bank_context(**kwargs):
+            return await context_tools.get_bank_context(**kwargs)
         
         async def handle_update_context(**kwargs):
             return await context_tools.update_context(**kwargs)
@@ -862,8 +881,11 @@ class PinnokioBrain:
             get_router_jobs_def,
             get_bank_transactions_def,
             get_expenses_info_def,
+            get_task_manager_index_def,
+            get_task_manager_details_def,
             router_prompt_def,
             apbookeeper_context_def,
+            bank_context_def,
             company_context_def,
             update_context_def,
             view_drive_document_def,  # ⭐ Outil de vision Drive
@@ -880,8 +902,11 @@ class PinnokioBrain:
             "GET_ROUTER_JOBS": handle_get_router_jobs,
             "GET_BANK_TRANSACTIONS": handle_get_bank_transactions,
             "GET_EXPENSES_INFO": handle_get_expenses_info,
+            "GET_TASK_MANAGER_INDEX": handle_get_task_manager_index,
+            "GET_TASK_MANAGER_DETAILS": handle_get_task_manager_details,
             "ROUTER_PROMPT": handle_router_prompt,
             "APBOOKEEPER_CONTEXT": handle_apbookeeper_context,
+            "BANK_CONTEXT": handle_bank_context,
             "COMPANY_CONTEXT": handle_company_context,
             "UPDATE_CONTEXT": handle_update_context,
             "VIEW_DRIVE_DOCUMENT": handle_view_drive_document,  # ⭐ Handler vision Drive

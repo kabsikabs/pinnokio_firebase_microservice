@@ -1342,11 +1342,18 @@ class ListenersManager:
             def on_job_snapshot(doc_snapshot, changes, read_time):
                 """Callback pour un job spécifique"""
                 try:
-                    if not doc_snapshot or not doc_snapshot.exists:
+                    # google-cloud-firestore fournit souvent une LISTE de snapshots (même pour DocumentReference)
+                    # signature: (doc_snapshot, changes, read_time)
+                    # - doc_snapshot: List[DocumentSnapshot] ou DocumentSnapshot selon versions/contexts
+                    snapshot = doc_snapshot
+                    if isinstance(snapshot, list):
+                        snapshot = snapshot[0] if snapshot else None
+
+                    if not snapshot or not getattr(snapshot, "exists", False):
                         self.logger.debug("workflow_job_snapshot_empty uid=%s job_id=%s", uid, job_id)
                         return
                     
-                    doc_data = doc_snapshot.to_dict() or {}
+                    doc_data = snapshot.to_dict() or {}
                     space_code = doc_data.get("collection_id") or doc_data.get("space_code")
                     
                     self.logger.debug(

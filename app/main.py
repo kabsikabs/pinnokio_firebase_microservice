@@ -17,6 +17,7 @@ from .tools.g_cred import get_secret
 from .firebase_client import get_firestore
 from .listeners_manager import ListenersManager
 from .ws_hub import hub
+from . import runtime as runtime_state
 from google.cloud.firestore_v1 import SERVER_TIMESTAMP
 from .redis_client import get_redis
 from .firebase_providers import get_firebase_management, get_firebase_realtime
@@ -67,9 +68,11 @@ async def on_startup():
     try:
         listeners_manager = ListenersManager()
         listeners_manager.start()
+        runtime_state.listeners_manager = listeners_manager
         logger.info("listeners_manager status=started")
     except Exception as e:
         listeners_manager = None
+        runtime_state.listeners_manager = None
         logger.error("listeners_manager status=error error=%s", repr(e))
 
     # ⭐ NOUVEAU: Démarrer le scheduler CRON
@@ -90,6 +93,8 @@ async def on_shutdown():
             logger.info("listeners_manager status=stopped")
     except Exception as e:
         logger.error("listeners_manager_stop status=error error=%s", repr(e))
+    finally:
+        runtime_state.listeners_manager = None
 
     # ⭐ NOUVEAU: Arrêter le scheduler CRON
     try:

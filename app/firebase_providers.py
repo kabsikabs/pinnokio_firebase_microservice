@@ -142,6 +142,21 @@ class FirebaseManagement:
     @property
     def firestore_client(self):
         return self.db
+    
+    def list_collection(self, collection_path: str):
+        """
+        Retourne tous les documents d'une collection avec leurs IDs.
+        Utilisé par l'UI (Approval Waitlist) via RPC.
+        """
+        if collection_path.startswith("/"):
+            collection_path = collection_path[1:]
+        try:
+            collection_ref = self.db.collection(collection_path)
+            docs = collection_ref.stream()
+            return [{**doc.to_dict(), "id": doc.id} for doc in docs]
+        except Exception as e:
+            logger.error(f"[FB] list_collection error path=%s err=%s", collection_path, e)
+            return []
 
     def create_telegram_user(self, user_id: str, mandate_path: str, telegram_username: str, additional_data: dict = None):
         """
@@ -1619,53 +1634,112 @@ class FirebaseManagement:
             print(f"La devise {currency_data['id']} a été ajoutée avec succès.")
             return True
 
-    def upload_token_usage(self,user_id, data):
+    def upload_token_usage(self, user_id: str, data: dict, entry_id: Optional[str] = None) -> bool:
         """
-        Télécharge les données d'utilisation des tokens vers Firebase.
-        Stocke les données dans un document identifié par job_id.
-        Si le document existe déjà, ajoute les nouvelles données à une liste.
-        
-        Args:
-            data (dict): Données d'utilisation des tokens
-                
-        Returns:
-            bool: True si le téléchargement est réussi, False sinon
+        Télécharge les données d'utilisation des tokens vers Firestore.
+
+        ⭐ Conçu pour le scaling multi-instances:
+        - Chaque événement est écrit dans une sous-collection `entries/` (évite un tableau qui grossit)
+        - Écriture idempotente via `entry_id` (si déjà présent, on ne re-compte pas)
+        - Agrégation rapide sur le document parent via increments atomiques
+
+        Chemins:
+        - Parent:  clients/{user_id}/token_usage/{job_id}
+        - Entry:   clients/{user_id}/token_usage/{job_id}/entries/{entry_id}
         """
         try:
-            # Extraire le job_id des données
-            job_id = data.get('job_id')
+            job_id = data.get("job_id")
             if not job_id:
                 print("Erreur: job_id manquant dans les données")
                 return False
-            
-            # Structure: clients (collection) / user_id (document) / token_usage (collection) / job_id (document)
-            doc_ref = self.db.document(f'clients/{user_id}/token_usage/{job_id}')
-            
-            # Vérifier si le document existe déjà
-            doc = doc_ref.get()
-            
-            if doc.exists:
-                # Le document existe, récupérer les données actuelles
-                current_data = doc.to_dict()
-                
-                # Si 'entries' n'existe pas, l'initialiser comme une liste
-                if 'entries' not in current_data:
-                    current_data['entries'] = []
-                
-                # Ajouter les nouvelles données à la liste
-                current_data['entries'].append(data)
-                
-                # Mettre à jour le document
-                doc_ref.set(current_data)
-            else:
-                # Le document n'existe pas, le créer avec les données initiales
-                doc_ref.set({
-                    'entries': [data]
-                })
-            
-            print(f"Données d'utilisation téléchargées avec succès pour job {job_id}, provider {data.get('provider_name')}")
-            return True
-            
+
+            # Idempotence: si pas fourni, générer un id unique (moins robuste aux retries)
+            if not entry_id:
+                entry_id = data.get("entry_id") or uuid.uuid4().hex
+
+            parent_ref = self.db.document(f"clients/{user_id}/token_usage/{job_id}")
+            entry_ref = parent_ref.collection("entries").document(str(entry_id))
+
+            # Déduire une date de facturation si le job_id suit le pattern chat journalier:
+            # chat:{user_id}:{collection_name}:{YYYY-MM-DD}
+            billing_kind = None
+            billing_date = None
+            try:
+                if isinstance(job_id, str) and job_id.startswith("chat:"):
+                    parts = job_id.split(":")
+                    if len(parts) >= 4:
+                        candidate = parts[-1]
+                        # format attendu YYYY-MM-DD
+                        if re.match(r"^\d{4}-\d{2}-\d{2}$", candidate):
+                            billing_kind = "chat_daily"
+                            billing_date = candidate
+            except Exception:
+                billing_kind = None
+                billing_date = None
+
+            # Helpers de conversion
+            def _to_int(v: Any) -> int:
+                try:
+                    return int(v) if v is not None else 0
+                except Exception:
+                    try:
+                        return int(float(v))
+                    except Exception:
+                        return 0
+
+            def _to_float(v: Any) -> float:
+                try:
+                    return float(v) if v is not None else 0.0
+                except Exception:
+                    return 0.0
+
+            input_tokens = _to_int(data.get("total_input_tokens"))
+            output_tokens = _to_int(data.get("total_output_tokens"))
+            total_tokens = _to_int(data.get("total_tokens"))
+            if total_tokens <= 0:
+                total_tokens = input_tokens + output_tokens
+            buy_price = _to_float(data.get("buy_price"))
+            sales_price = _to_float(data.get("sales_price"))
+            resolved_function = data.get("function") or data.get("department")
+
+            transaction = self.db.transaction()
+
+            @firestore.transactional
+            def _txn(tx):
+                snap = entry_ref.get(transaction=tx)
+                if snap.exists:
+                    # Déjà enregistré (idempotence)
+                    return True
+
+                # Écrire l'event complet
+                tx.set(entry_ref, data)
+
+                # Agrégats sur le parent
+                tx.set(parent_ref, {
+                    "user_id": user_id,
+                    "job_id": job_id,
+                    "project_id": data.get("project_id"),
+                    "function": resolved_function,
+                    "collection_name": data.get("collection_name"),
+                    "mandate_path": data.get("mandate_path"),
+                    "billing_kind": billing_kind or data.get("billing_kind"),
+                    "billing_date": billing_date or data.get("billing_date"),
+                    "last_entry_at": firestore.SERVER_TIMESTAMP,
+                    "entries_count": firestore.Increment(1),
+                    "total_input_tokens": firestore.Increment(input_tokens),
+                    "total_output_tokens": firestore.Increment(output_tokens),
+                    "total_tokens": firestore.Increment(total_tokens),
+                    "total_buy_price": firestore.Increment(buy_price),
+                    "total_sales_price": firestore.Increment(sales_price),
+                }, merge=True)
+                return True
+
+            ok = bool(_txn(transaction))
+            if ok:
+                print(
+                    f"Données token_usage enregistrées (job={job_id}, provider={data.get('provider_name')}, entry_id={entry_id})"
+                )
+            return ok
         except Exception as e:
             print(f"Erreur lors du téléchargement des données d'utilisation: {e}")
             return False
@@ -1807,149 +1881,369 @@ class FirebaseManagement:
         """
         Récupère les notes de frais depuis Firebase pour un mandat donné.
         
-        Source: {mandate_path}/working_doc/expenses_details
+        NOUVELLE STRUCTURE (v2):
+            {mandate_path}/working_doc/expenses_details (document)
+            └── items (sous-collection)
+                └── {job_id} (document) { ...expense_data }
+        
+        ANCIENNE STRUCTURE (legacy - migration automatique):
+            {mandate_path}/working_doc/expenses_details (document)
+            └── items: { "job_id": {...}, ... }  (champ map dans le document)
         
         Args:
             mandate_path: Chemin du mandat
-            status: Filtrer par statut ("to_process", "close", None=tous)
+            status: Filtrer par statut ("to_process", "running", "close", None=tous)
         
         Returns:
-            Dict: Dictionnaire des expenses avec expense_id comme clé
+            Dict: Dictionnaire des expenses avec job_id comme clé
         """
         try:
-            mandate_path = self._normalize_mandate_path(mandate_path)
-            # Chemin vers le document des expenses
-            expenses_doc_path = f"{mandate_path}/working_doc/expenses_details"
-            print(f"📚 [FIREBASE] Récupération des expenses depuis: {expenses_doc_path}")
+            base_doc_path = f"{mandate_path}/working_doc/expenses_details"
+            items_collection_path = f"{base_doc_path}/items"
             
-            # Récupérer le document working_doc
-            doc_ref = self.db.document(expenses_doc_path)
+            # 1. Essayer de lire la NOUVELLE structure (sous-collection items)
+            collection_ref = self.db.collection(items_collection_path)
+            docs = list(collection_ref.stream())
+            
+            if docs:
+                expenses_data = {}
+                for doc in docs:
+                    job_id = doc.id
+                    expense_data = doc.to_dict() or {}
+                    if status and expense_data.get("status") != status:
+                        continue
+                    expenses_data[job_id] = expense_data
+                print(f"✅ [FIREBASE] {len(expenses_data)} expenses récupérées depuis collection: {items_collection_path}")
+                return expenses_data
+            
+            # 2. Fallback: ANCIENNE structure (document avec champ items map)
+            doc_ref = self.db.document(base_doc_path)
             doc = doc_ref.get()
+            if doc.exists:
+                doc_data = doc.to_dict() or {}
+                items = dict(doc_data.get("items", {}) or {})
+                if items:
+                    print(f"📦 [FIREBASE] Ancienne structure détectée ({len(items)} items) - à migrer")
+                    if status:
+                        items = {k: v for k, v in items.items() if isinstance(v, dict) and v.get("status") == status}
+                    return items
             
-            if not doc.exists:
-                print(f"⚠️ [FIREBASE] Document working_doc n'existe pas: {expenses_doc_path}")
-                return {}
+            # Note: L'ancien fallback legacy {mandate_path}/working_doc a été supprimé
+            # car ce chemin a un nombre impair de segments (collection, pas document)
+            # et n'était probablement pas utilisé dans la pratique.
             
-            doc_data = doc.to_dict()
-            
-            # Récupérer le dictionnaire depuis le champ 'items'
-            expenses_data = doc_data.get("items", {})
-            
-            if not expenses_data:
-                print(f"⚠️ [FIREBASE] Aucun item trouvé dans: {expenses_doc_path}")
-                return {}
-            
-            # Filtrer par statut si spécifié
-            if status:
-                expenses_data = {
-                    expense_id: data 
-                    for expense_id, data in expenses_data.items()
-                    if data.get("status") == status
-                }
-            
-            print(f"✅ [FIREBASE] {len(expenses_data)} expenses récupérées")
-            return expenses_data
-            
+            print(f"ℹ️ [FIREBASE] Aucune expense trouvée pour: {mandate_path}")
+            return {}
+
         except Exception as e:
             print(f"❌ [FIREBASE] Erreur lors de la récupération des expenses: {e}")
             import traceback
             traceback.print_exc()
             return {}
     
+    def migrate_expenses_to_collection(self, mandate_path: str) -> bool:
+        """
+        Migre les expenses de l'ancienne structure (document avec items map) vers 
+        la nouvelle structure (collection de documents individuels).
+        
+        Cette méthode est appelée automatiquement lors du chargement si l'ancienne
+        structure est détectée.
+        
+        AVANT (ancienne structure):
+            {mandate_path}/working_doc/expenses_details (document)
+            └── items: { "job_id_1": {...}, "job_id_2": {...} }
+        
+        APRÈS (nouvelle structure):
+            {mandate_path}/working_doc/expenses_details (document)
+            └── items (sous-collection)
+                └── job_id_1 (document) { ...expense_data }
+                └── job_id_2 (document) { ...expense_data }
+        
+        Args:
+            mandate_path: Chemin du mandat
+        
+        Returns:
+            bool: True si migration réussie ou pas nécessaire, False sinon
+        """
+        try:
+            base_doc_path = f"{mandate_path}/working_doc/expenses_details"
+            items_collection_path = f"{base_doc_path}/items"
+            
+            # Vérifier si l'ancienne structure existe
+            doc_ref = self.db.document(base_doc_path)
+            doc = doc_ref.get()
+            
+            if not doc.exists:
+                print(f"ℹ️ [MIGRATION] Pas d'ancienne structure à migrer pour: {base_doc_path}")
+                return True
+            
+            doc_data = doc.to_dict() or {}
+            items = dict(doc_data.get("items", {}) or {})
+            
+            if not items:
+                print(f"ℹ️ [MIGRATION] Document existe mais sans items à migrer: {base_doc_path}")
+                return True
+            
+            print(f"🔄 [MIGRATION] Début migration de {len(items)} expenses vers sous-collection items...")
+            
+            # Créer chaque expense comme document individuel dans la sous-collection items
+            collection_ref = self.db.collection(items_collection_path)
+            batch = self.db.batch()
+            batch_count = 0
+            migrated_count = 0
+            
+            for job_id, expense_data in items.items():
+                if not isinstance(expense_data, dict):
+                    print(f"⚠️ [MIGRATION] Skipping invalid expense data for job_id: {job_id}")
+                    continue
+                
+                # Créer le document dans la sous-collection items
+                expense_doc_ref = collection_ref.document(job_id)
+                batch.set(expense_doc_ref, expense_data)
+                batch_count += 1
+                migrated_count += 1
+                
+                # Firestore batch limit est 500 opérations
+                if batch_count >= 450:
+                    batch.commit()
+                    print(f"✅ [MIGRATION] Batch commit: {migrated_count} expenses migrées")
+                    batch = self.db.batch()
+                    batch_count = 0
+            
+            # Commit remaining
+            if batch_count > 0:
+                batch.commit()
+            
+            print(f"✅ [MIGRATION] {migrated_count} expenses migrées vers sous-collection items")
+            
+            # Supprimer le champ items du document (garder le document pour la sous-collection)
+            from google.cloud.firestore import FieldValue
+            doc_ref.update({"items": FieldValue.delete()})
+            print(f"🗑️ [MIGRATION] Champ 'items' supprimé du document: {base_doc_path}")
+            
+            print(f"✅ [MIGRATION] Migration terminée avec succès pour: {mandate_path}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ [MIGRATION] Erreur lors de la migration: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def check_and_migrate_expenses(self, mandate_path: str) -> bool:
+        """
+        Vérifie si une migration est nécessaire et l'effectue si besoin.
+        
+        Args:
+            mandate_path: Chemin du mandat
+        
+        Returns:
+            bool: True si aucune migration nécessaire ou migration réussie
+        """
+        try:
+            base_doc_path = f"{mandate_path}/working_doc/expenses_details"
+            
+            # Vérifier si l'ancienne structure existe (document avec champ items map)
+            doc_ref = self.db.document(base_doc_path)
+            doc = doc_ref.get()
+            
+            if doc.exists:
+                doc_data = doc.to_dict() or {}
+                items = dict(doc_data.get("items", {}) or {})
+                if items:
+                    print(f"⚠️ [FIREBASE] Ancienne structure détectée (champ items) - lancement migration...")
+                    return self.migrate_expenses_to_collection(mandate_path)
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ [FIREBASE] Erreur lors de la vérification de migration: {e}")
+            return False
+    
     def update_expense_in_firebase(
         self, 
         mandate_path: str, 
         expense_id: str, 
         update_data: Dict
-    ) -> bool:
+            ) -> bool:
         """
         Met à jour un ou plusieurs champs d'une expense dans Firebase.
         
+        NOUVELLE STRUCTURE (v2):
+            {mandate_path}/working_doc/expenses_details/items/{expense_id} (document dans sous-collection)
+        
+        ANCIENNE STRUCTURE (legacy):
+            {mandate_path}/working_doc/expenses_details (document) → items.{expense_id} (champ map)
+            {mandate_path}/working_doc (document) → expense_details.{expense_id}
+        
         Args:
             mandate_path: Chemin du mandat
-            expense_id: ID de l'expense à mettre à jour
+            expense_id: ID de l'expense (job_id) à mettre à jour
             update_data: Dictionnaire des champs à mettre à jour
         
         Returns:
             bool: True si succès, False sinon
         """
         try:
-            mandate_path = self._normalize_mandate_path(mandate_path)
-            # Chemin vers le document working_doc
-            expenses_doc_path = f"{mandate_path}/working_doc/expenses_details"
-            print(f"✏️ [FIREBASE] Mise à jour de l'expense {expense_id} dans: {expenses_doc_path}")
+            base_doc_path = f"{mandate_path}/working_doc/expenses_details"
+            items_collection_path = f"{base_doc_path}/items"
             
-            # Construire le chemin du champ à mettre à jour
-            # Format: items.{expense_id}.{field}
-            update_fields = {}
-            for field, value in update_data.items():
-                update_fields[f"items.{expense_id}.{field}"] = value
+            # 1. NOUVELLE STRUCTURE: Document individuel dans sous-collection items
+            expense_doc_ref = self.db.collection(items_collection_path).document(expense_id)
+            expense_doc = expense_doc_ref.get()
+            if expense_doc.exists:
+                print(f"✏️ [FIREBASE] Mise à jour expense {expense_id} dans sous-collection: {items_collection_path}/{expense_id}")
+                expense_doc_ref.update(update_data or {})
+                print(f"✅ [FIREBASE] Expense {expense_id} mise à jour avec succès (sous-collection)")
+                return True
             
-            # Mettre à jour le document
-            doc_ref = self.db.document(expenses_doc_path)
-            doc_ref.update(update_fields)
+            # 2. ANCIENNE STRUCTURE: Document avec items map (champ)
+            doc_ref = self.db.document(base_doc_path)
+            doc = doc_ref.get()
+            if doc.exists:
+                doc_data = doc.to_dict() or {}
+                items = dict(doc_data.get("items", {}) or {})
+                if expense_id in items:
+                    print(f"✏️ [FIREBASE] Mise à jour expense {expense_id} dans champ items: {base_doc_path}")
+                    update_fields = {f"items.{expense_id}.{field}": value for field, value in (update_data or {}).items()}
+                    doc_ref.update(update_fields)
+                    print(f"✅ [FIREBASE] Expense {expense_id} mise à jour avec succès (champ items)")
+                    return True
             
-            print(f"✅ [FIREBASE] Expense {expense_id} mise à jour avec succès")
-            return True
+            # 3. FALLBACK LEGACY: working_doc avec expense_details
+            legacy_doc_path = f"{mandate_path}/working_doc"
+            legacy_doc_ref = self.db.document(legacy_doc_path)
+            legacy_doc = legacy_doc_ref.get()
+            if legacy_doc.exists:
+                legacy_data = legacy_doc.to_dict() or {}
+                if expense_id in (legacy_data.get("expense_details", {}) or {}):
+                    print(f"✏️ [FIREBASE] Mise à jour expense {expense_id} dans legacy: {legacy_doc_path}")
+                    update_fields = {f"expense_details.{expense_id}.{field}": value for field, value in (update_data or {}).items()}
+                    legacy_doc_ref.update(update_fields)
+                    print(f"✅ [FIREBASE] Expense {expense_id} mise à jour avec succès (legacy)")
+                    return True
             
+            print(f"⚠️ [FIREBASE] Expense {expense_id} non trouvée dans aucune structure")
+            return False
+
         except Exception as e:
             print(f"❌ [FIREBASE] Erreur lors de la mise à jour de l'expense {expense_id}: {e}")
             import traceback
             traceback.print_exc()
             return False
+    
     def delete_expense_from_firebase(
         self, 
         mandate_path: str, 
         expense_id: str
-    ) -> bool:
+        ) -> bool:
         """
         Supprime une expense de Firebase.
         
+        NOUVELLE STRUCTURE (v2):
+            {mandate_path}/working_doc/expenses_details/items/{expense_id} (document) → suppression du document
+        
+        ANCIENNE STRUCTURE (legacy):
+            {mandate_path}/working_doc/expenses_details (document) → FieldValue.delete() sur items.{expense_id}
+            {mandate_path}/working_doc (document) → FieldValue.delete() sur expense_details.{expense_id}
+        
         Args:
             mandate_path: Chemin du mandat
-            expense_id: ID de l'expense à supprimer
+            expense_id: ID de l'expense (job_id) à supprimer
         
         Returns:
             bool: True si succès, False sinon
         """
         try:
-            # Chemin vers le document working_doc
-            expenses_doc_path = f"{mandate_path}/working_doc/expenses_details"
-            print(f"🗑️ [FIREBASE] Suppression de l'expense {expense_id} dans: {expenses_doc_path}")
+            from google.cloud.firestore import FieldValue
+            base_doc_path = f"{mandate_path}/working_doc/expenses_details"
+            items_collection_path = f"{base_doc_path}/items"
             
-            # Vérifier d'abord que l'expense existe et n'est pas "close"
-            doc_ref = self.db.document(expenses_doc_path)
+            # 1. NOUVELLE STRUCTURE: Document individuel dans sous-collection items
+            expense_doc_ref = self.db.collection(items_collection_path).document(expense_id)
+            expense_doc = expense_doc_ref.get()
+            if expense_doc.exists:
+                expense_data = expense_doc.to_dict() or {}
+                if expense_data.get("status") == "close":
+                    print("⚠️ [FIREBASE] Impossible de supprimer une expense avec status 'close'")
+                    return False
+                expense_doc_ref.delete()
+                print(f"✅ [FIREBASE] Expense {expense_id} supprimée avec succès (sous-collection)")
+                return True
+            
+            # 2. ANCIENNE STRUCTURE: Document avec items map (champ)
+            doc_ref = self.db.document(base_doc_path)
             doc = doc_ref.get()
+            if doc.exists:
+                data = doc.to_dict() or {}
+                items = dict(data.get("items", {}) or {})
+                if expense_id in items:
+                    if isinstance(items.get(expense_id), dict) and items[expense_id].get("status") == "close":
+                        print("⚠️ [FIREBASE] Impossible de supprimer une expense avec status 'close'")
+                        return False
+                    doc_ref.update({f"items.{expense_id}": FieldValue.delete()})
+                    print(f"✅ [FIREBASE] Expense {expense_id} supprimée avec succès (champ items)")
+                    return True
             
-            if not doc.exists:
-                print(f"⚠️ [FIREBASE] Document working_doc n'existe pas: {expenses_doc_path}")
-                return False
+            # 3. FALLBACK LEGACY: working_doc avec expense_details
+            legacy_doc_path = f"{mandate_path}/working_doc"
+            legacy_doc_ref = self.db.document(legacy_doc_path)
+            legacy_doc = legacy_doc_ref.get()
+            if legacy_doc.exists:
+                legacy_data = legacy_doc.to_dict() or {}
+                expenses_data = dict(legacy_data.get("expense_details", {}) or {})
+                if expense_id in expenses_data:
+                    if isinstance(expenses_data.get(expense_id), dict) and expenses_data[expense_id].get("status") == "close":
+                        print("⚠️ [FIREBASE] Impossible de supprimer une expense avec status 'close'")
+                        return False
+                    legacy_doc_ref.update({f"expense_details.{expense_id}": FieldValue.delete()})
+                    print(f"✅ [FIREBASE] Expense {expense_id} supprimée avec succès (legacy)")
+                    return True
             
-            doc_data = doc.to_dict()
-            expenses_data = doc_data.get("items", {})
-            
-            if expense_id not in expenses_data:
-                print(f"⚠️ [FIREBASE] Expense {expense_id} non trouvée")
-                return False
-            
-            expense = expenses_data[expense_id]
-            if expense.get("status") == "close":
-                print(f"⚠️ [FIREBASE] Impossible de supprimer une expense avec status 'close'")
-                return False
-            
-            # Utiliser firestore.DELETE_FIELD pour supprimer le champ
-            doc_ref.update({
-                f"items.{expense_id}": firestore.DELETE_FIELD
-            })
-            
-            print(f"✅ [FIREBASE] Expense {expense_id} supprimée avec succès")
-            return True
-            
+            print(f"⚠️ [FIREBASE] Expense {expense_id} non trouvée dans aucune structure")
+            return False
+
         except Exception as e:
             print(f"❌ [FIREBASE] Erreur lors de la suppression de l'expense {expense_id}: {e}")
             import traceback
             traceback.print_exc()
             return False
+    
+    def create_expense_in_firebase(
+        self, 
+        mandate_path: str, 
+        expense_id: str, 
+        expense_data: Dict
+        ) -> bool:
+        """
+        Crée une nouvelle expense dans Firebase (nouvelle structure sous-collection).
+        
+        STRUCTURE:
+            {mandate_path}/working_doc/expenses_details/items/{expense_id} (document)
+        
+        Args:
+            mandate_path: Chemin du mandat
+            expense_id: ID de l'expense (job_id)
+            expense_data: Données de l'expense
+        
+        Returns:
+            bool: True si succès, False sinon
+        """
+        try:
+            base_doc_path = f"{mandate_path}/working_doc/expenses_details"
+            items_collection_path = f"{base_doc_path}/items"
+            expense_doc_ref = self.db.collection(items_collection_path).document(expense_id)
+            
+            expense_doc_ref.set(expense_data)
+            print(f"✅ [FIREBASE] Expense {expense_id} créée avec succès dans: {items_collection_path}/{expense_id}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ [FIREBASE] Erreur lors de la création de l'expense {expense_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
     
 
     def load_automated_router_context(self, mandate_path):
@@ -2387,27 +2681,57 @@ class FirebaseManagement:
                 print("Veuillez spécifier un job_id ou une liste de job_id.")
                 return False
 
+            # Normaliser en liste de strings
             if isinstance(job_id, str):
-                job_id = [job_id]
+                job_ids: List[str] = [job_id]
+            else:
+                job_ids = list(job_id)
+            job_ids = [str(j).strip() for j in job_ids if j is not None and str(j).strip()]
+            if not job_ids:
+                print("Veuillez spécifier un job_id ou une liste de job_id non vide.")
+                return False
 
             # Construire le chemin de la collection
             collection_path = f"clients/{user_id}/notifications"
             collection_ref = self.db.collection(collection_path)
-            docs = collection_ref.stream()
 
             deleted = False
 
-            # Chercher et supprimer les documents correspondant aux job_id
-            for doc in docs:
-                doc_data = doc.to_dict()
-                if doc_data.get('job_id') in job_id:
-                    self.db.collection(collection_path).document(doc.id).delete()
-                    print(f"Notification {doc.id} supprimée pour job_id {doc_data.get('job_id')}.")
-                    deleted = True
+            # ✅ Fast-path: si le job_id correspond à l'ID du document,
+            # on peut supprimer directement clients/{user_id}/notifications/{job_id}
+            # (et en batch si plusieurs job_ids).
+            try:
+                doc_refs = [collection_ref.document(jid) for jid in job_ids]
+                snapshots = list(self.db.get_all(doc_refs))
+
+                batch = self.db.batch()
+                for snap in snapshots:
+                    if snap.exists:
+                        batch.delete(snap.reference)
+                        print(f"Notification {snap.id} supprimée (doc_id={snap.id}).")
+                        deleted = True
+
+                if deleted:
+                    batch.commit()
+                    return True
+            except Exception as e:
+                # Si l'environnement ne supporte pas get_all/batch comme attendu, on retombe en mode legacy.
+                print(f"⚠️ Suppression directe échouée, fallback legacy: {e}")
 
             if not deleted:
-                print(f"Aucune notification trouvée pour job_id={job_id}")
-                return False
+                # 🔁 Fallback legacy: parcourir la collection et matcher sur le champ 'job_id'
+                # (utile si l'ID du document n'est pas le job_id).
+                docs = collection_ref.stream()
+                for doc in docs:
+                    doc_data = doc.to_dict() or {}
+                    if doc_data.get('job_id') in job_ids:
+                        collection_ref.document(doc.id).delete()
+                        print(f"Notification {doc.id} supprimée pour job_id {doc_data.get('job_id')}.")
+                        deleted = True
+
+                if not deleted:
+                    print(f"Aucune notification trouvée pour job_id={job_ids}")
+                    return False
             
             return True
         
@@ -2630,6 +2954,30 @@ class FirebaseManagement:
             if not user_id:
                 print("Could not extract user_id from mandate_path")
                 return 0.0
+
+            # ───────────────────────────────────────────────────────
+            # ✅ Lock Redis (anti double facturation concurrente)
+            # Sans lock, deux process peuvent voir `billed=false` et incrémenter 2x current_expenses.
+            # ───────────────────────────────────────────────────────
+            lock_key = f"lock:billing:balance:{user_id}"
+            lock_token = uuid.uuid4().hex
+            lock_acquired = False
+            try:
+                from .redis_client import get_redis
+                r = get_redis()
+                lock_acquired = bool(r.set(lock_key, lock_token, nx=True, ex=120))
+            except Exception:
+                # En cas de panne Redis, on laisse passer (mode dégradé)
+                lock_acquired = True
+
+            if not lock_acquired:
+                # Quelqu'un d'autre est en train de recalculer → renvoyer le solde actuel
+                balance_doc_ref = self.db.document(f"clients/{user_id}/billing/current_balance")
+                balance_doc = balance_doc_ref.get()
+                if balance_doc.exists:
+                    balance_data = balance_doc.to_dict() or {}
+                    return float(balance_data.get("current_balance", 0.0))
+                return 0.0
                 
             # Step 1: Get the current balance document
             balance_doc_ref = self.db.document(f"clients/{user_id}/billing/current_balance")
@@ -2726,6 +3074,18 @@ class FirebaseManagement:
             import traceback
             traceback.print_exc()
             return 0.0
+        finally:
+            # Libérer le lock si on l'a pris (best-effort)
+            try:
+                from .redis_client import get_redis
+                r = get_redis()
+                current = r.get(lock_key)
+                if isinstance(current, bytes):
+                    current = current.decode("utf-8")
+                if current == lock_token:
+                    r.delete(lock_key)
+            except Exception:
+                pass
 
 
     def get_balance_info(self, mandate_path: str=None,user_id:str=None) -> dict:
@@ -2791,6 +3151,92 @@ class FirebaseManagement:
                 'current_expenses': 0.0, 
                 'current_topping': 0.0
             }
+
+
+    def ensure_chat_daily_expenses(
+        self,
+        mandate_path: str,
+        collection_name: str,
+        user_id: Optional[str] = None,
+        days_back: int = 7,
+        include_today: bool = False,
+    ) -> dict:
+        """
+        Crée (si manquants) les docs expenses journaliers "chat" à partir des agrégats token_usage.
+
+        But: permettre un rattrapage (serveur arrêté / CRON raté) sans attendre le prochain CRON.
+        Cette méthode est idempotente: elle fait des upserts sur les expenses.
+        """
+        try:
+            mandate_path = self._normalize_mandate_path(mandate_path)
+            if mandate_path:
+                parts = mandate_path.split("/")
+                user_id = user_id or (parts[1] if len(parts) > 1 else None)
+
+            if not user_id or not mandate_path or not collection_name:
+                return {"success": False, "error": "missing user_id/mandate_path/collection_name"}
+
+            from datetime import datetime, timedelta, timezone
+
+            today = datetime.now(timezone.utc).date()
+            dates = []
+            start = 0 if include_today else 1
+            for i in range(start, max(1, days_back) + 1):
+                d = today - timedelta(days=i)
+                dates.append(d.strftime("%Y-%m-%d"))
+
+            created_or_updated = 0
+            missing_token_usage = 0
+
+            for billing_date in dates:
+                job_id = f"chat:{user_id}:{collection_name}:{billing_date}"
+                token_usage_ref = self.db.document(f"clients/{user_id}/token_usage/{job_id}")
+                token_doc = token_usage_ref.get()
+                if not token_doc.exists:
+                    missing_token_usage += 1
+                    continue
+
+                tu = token_doc.to_dict() or {}
+                # Format "Chat usage DD/MM/YYYY"
+                ddmmyyyy = billing_date
+                try:
+                    from datetime import datetime
+                    ddmmyyyy = datetime.strptime(billing_date, "%Y-%m-%d").strftime("%d/%m/%Y")
+                except Exception:
+                    ddmmyyyy = billing_date
+
+                expense_ref = self.db.document(f"{mandate_path}/billing/topping/expenses/{job_id}")
+                expense_payload = {
+                    "job_id": job_id,
+                    "function": "chat",
+                    "file_name": f"Chat usage {ddmmyyyy}",
+                    "billing_kind": "chat_daily",
+                    "billing_date": billing_date,
+                    "collection_name": collection_name,
+                    "user_id": user_id,
+                    "total_input_tokens": tu.get("total_input_tokens", 0),
+                    "total_output_tokens": tu.get("total_output_tokens", 0),
+                    "total_tokens": tu.get("total_tokens", (tu.get("total_input_tokens", 0) or 0) + (tu.get("total_output_tokens", 0) or 0)),
+                    "total_buy_price": tu.get("total_buy_price", 0.0),
+                    "total_sales_price": tu.get("total_sales_price", 0.0),
+                    "entries_count": tu.get("entries_count", 0),
+                    # IMPORTANT: laisser billed=false → get_user_balance() fera la consommation une seule fois
+                    "billed": False,
+                    "billing_timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                expense_ref.set(expense_payload, merge=True)
+                created_or_updated += 1
+
+            return {
+                "success": True,
+                "days_back": days_back,
+                "include_today": include_today,
+                "expenses_upserted": created_or_updated,
+                "missing_token_usage": missing_token_usage,
+            }
+        except Exception as e:
+            logger.error("[BILLING] ensure_chat_daily_expenses error=%s", repr(e), exc_info=True)
+            return {"success": False, "error": str(e)}
 
 
     
@@ -7694,11 +8140,12 @@ class FirebaseManagement:
 
     def get_all_contexts(self, mandate_path: str) -> Dict[str, Any]:
         """
-        Récupère tous les contextes (accounting, general, router) en une seule requête.
+        Récupère tous les contextes (accounting, general, router, bank) en une seule requête.
         
         ⭐ Structure Firebase :
         
         accounting_context/data/accounting_context_0: "TEXTE LONG..."
+        bank_context/data/bank_context_0: "TEXTE LONG..."
         general_context/context_company_profile_report: "TEXTE LONG..."
         router_context/router_prompt: {banks_cash: "...", hr: "...", ...}
         
@@ -7710,6 +8157,10 @@ class FirebaseManagement:
             {
                 'accounting': {
                     'accounting_context_0': "TEXTE...",
+                    'last_refresh': "..."
+                },
+                'bank': {
+                    'bank_context_0': "TEXTE...",
                     'last_refresh': "..."
                 },
                 'general': {
@@ -7734,6 +8185,9 @@ class FirebaseManagement:
                 if doc_id == 'accounting_context':
                     # Pour accounting: extraire le dictionnaire 'data' qui contient accounting_context_0
                     contexts['accounting'] = data.get('data', {})
+                elif doc_id == 'bank_context':
+                    # Pour bank: extraire le dictionnaire 'data' qui contient bank_context_0
+                    contexts['bank'] = data.get('data', {})
                 elif doc_id == 'general_context':
                     # Pour general: le document entier (context_company_profile_report est direct)
                     contexts['general'] = data
@@ -7745,6 +8199,39 @@ class FirebaseManagement:
         except Exception as e:
             print(f"[Firebase] Erreur get_all_contexts: {e}")
             return {}
+
+    def update_bank_context(self, mandate_path: str, updated_content: Dict, additions: Dict = None) -> bool:
+        """
+        Met à jour le contexte bancaire avec timestamp last_refresh.
+        
+        ⚠️ STRUCTURE: Le contenu est stocké sous 'data' (comme accounting_context).
+        
+        Args:
+            mandate_path: Chemin du mandat
+            updated_content: Contenu mis à jour (remplace 'bank_context_0')
+            additions: Champs supplémentaires à ajouter (optional)
+        
+        Returns:
+            bool: True si succès
+        """
+        try:
+            context_ref = self.db.document(f"{mandate_path}/context/bank_context")
+            
+            update_data = {
+                'data': {
+                    'bank_context_0': updated_content,
+                    'last_refresh': datetime.now(timezone.utc).isoformat(),
+                }
+            }
+            
+            if additions:
+                update_data['data'].update(additions)
+            
+            context_ref.set(update_data, merge=True)
+            return True
+        except Exception as e:
+            print(f"[Firebase] Erreur update_bank_context: {e}")
+            return False
 
     def update_accounting_context(self, mandate_path: str, updated_content: Dict, additions: Dict = None) -> bool:
         """

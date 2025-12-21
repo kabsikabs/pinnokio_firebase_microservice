@@ -4,6 +4,7 @@ Exécutées par Celery Beat pour maintenir la santé du système.
 """
 
 import logging
+from datetime import datetime, timedelta, timezone
 from .task_service import celery_app
 from .registry import get_unified_registry, get_registry_listeners
 from .firebase_client import get_firestore
@@ -183,4 +184,133 @@ def cleanup_expired_listeners():
             "status": "error",
             "error": str(e)
         }
+
+
+@celery_app.task(name="app.maintenance_tasks.finalize_daily_chat_billing")
+def finalize_daily_chat_billing(target_date: str | None = None, days_back: int = 7) -> dict:
+    """
+    Finalise la facturation quotidienne du chat.
+
+    - Source: collection group `token_usage` (docs agrégés) avec billing_kind='chat_daily'
+    - Cible: {mandate_path}/billing/topping/expenses/{job_id}
+    - Puis: recalcul solde via FirebaseManagement.get_user_balance(mandate_path)
+
+    Notes:
+    - Par défaut, traite la veille UTC (pour éviter les écritures en cours sur le jour courant).
+    - Si `days_back > 1` et `target_date` est None, fait un rattrapage sur les N derniers jours (hors aujourd'hui).
+    - Cette tâche est conçue pour être exécutée via Celery Beat (CRON).
+    """
+    try:
+        from google.cloud.firestore_v1.base_query import FieldFilter
+        from .firebase_providers import get_firebase_management
+
+        db = get_firestore()
+        fbm = get_firebase_management()
+
+        # Dates à traiter
+        if target_date:
+            target_dates = [target_date]
+        else:
+            # Rattrapage: veille → veille-(days_back-1)
+            n = max(1, int(days_back or 1))
+            target_dates = [
+                (datetime.now(timezone.utc) - timedelta(days=i)).strftime("%Y-%m-%d")
+                for i in range(1, n + 1)
+            ]
+
+        logger.info("[BILLING_CRON] start target_dates=%s", target_dates)
+
+        total_token_usage_docs = 0
+        expenses_written = 0
+        skipped_missing_mandate = 0
+        skipped_already_billed = 0
+        balances_updated = 0
+
+        for td in target_dates:
+            # Collection group query sur tous les token_usage (clients/*/token_usage/*)
+            query = (
+                db.collection_group("token_usage")
+                .where(filter=FieldFilter("billing_kind", "==", "chat_daily"))
+                .where(filter=FieldFilter("billing_date", "==", td))
+            )
+
+            token_usage_docs = list(query.stream())
+            total_token_usage_docs += len(token_usage_docs)
+            logger.info("[BILLING_CRON] token_usage_docs=%s date=%s", len(token_usage_docs), td)
+
+            mandate_paths: set[str] = set()
+
+            for doc in token_usage_docs:
+                data = doc.to_dict() or {}
+                mandate_path = data.get("mandate_path")
+                job_id = data.get("job_id") or doc.id
+                collection_name = data.get("collection_name")
+                user_id = data.get("user_id")
+
+                if not mandate_path:
+                    skipped_missing_mandate += 1
+                    continue
+
+                expense_ref = db.document(f"{mandate_path}/billing/topping/expenses/{job_id}")
+                existing = expense_ref.get()
+                if existing.exists and (existing.to_dict() or {}).get("billed") is True:
+                    skipped_already_billed += 1
+                    continue
+
+                # Format "Chat usage DD/MM/YYYY"
+                ddmmyyyy = td
+                try:
+                    ddmmyyyy = datetime.strptime(td, "%Y-%m-%d").strftime("%d/%m/%Y")
+                except Exception:
+                    ddmmyyyy = td
+
+                total_input = data.get("total_input_tokens", 0) or 0
+                total_output = data.get("total_output_tokens", 0) or 0
+                total_tokens = data.get("total_tokens", total_input + total_output)
+
+                expense_payload = {
+                    "job_id": job_id,
+                    "function": "chat",
+                    "file_name": f"Chat usage {ddmmyyyy}",
+                    "billing_kind": "chat_daily",
+                    "billing_date": td,
+                    "collection_name": collection_name,
+                    "user_id": user_id,
+                    "total_input_tokens": total_input,
+                    "total_output_tokens": total_output,
+                    "total_tokens": total_tokens,
+                    "total_buy_price": data.get("total_buy_price", 0.0),
+                    "total_sales_price": data.get("total_sales_price", 0.0),
+                    "entries_count": data.get("entries_count", 0),
+                    "billed": False,
+                    "billing_timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+
+                expense_ref.set(expense_payload, merge=True)
+                expenses_written += 1
+                mandate_paths.add(mandate_path)
+
+            # Mettre à jour le solde une fois par mandate_path
+            for mp in mandate_paths:
+                try:
+                    _ = fbm.get_user_balance(mandate_path=mp)
+                    balances_updated += 1
+                except Exception as e:
+                    logger.error("[BILLING_CRON] balance_update_error mandate_path=%s error=%s", mp, repr(e))
+
+        result = {
+            "status": "success",
+            "target_dates": target_dates,
+            "token_usage_docs": total_token_usage_docs,
+            "expenses_written": expenses_written,
+            "balances_updated": balances_updated,
+            "skipped_missing_mandate": skipped_missing_mandate,
+            "skipped_already_billed": skipped_already_billed,
+        }
+
+        logger.info("[BILLING_CRON] complete %s", result)
+        return result
+    except Exception as e:
+        logger.error("[BILLING_CRON] fatal error=%s", repr(e), exc_info=True)
+        return {"status": "error", "error": str(e)}
 

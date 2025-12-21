@@ -374,6 +374,81 @@ Chaque expense retournée contient :
 """,
 
     # ─────────────────────────────────────────────────────────────────────────────
+    # OUTILS TASK_MANAGER (index + audit) — Solution A
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    "GET_TASK_MANAGER_INDEX": """
+📌 **GET_TASK_MANAGER_INDEX** - Index des travaux (task_manager) filtrable
+
+## Rôle
+Permet d’obtenir une **vue générale** des travaux exécutés (jobs) stockés dans Firestore selon le contrat Solution A :
+- Index : `clients/{userId}/task_manager/{job_id}`
+
+⚠️ **Sécurité/Contrat** :
+- `mandate_path` est **imposé** côté outil (lu depuis le contexte utilisateur) et appliqué comme filtre obligatoire.
+- `userId` est **imposé** (ID Firebase utilisateur courant).
+
+## Paramètres
+| Paramètre | Type | Description |
+|-----------|------|-------------|
+| `department` | string | Filtre exact sur `department` (optionnel) |
+| `status_final` | string | Filtre exact sur `status_final` (optionnel) |
+| `status` | string | Filtre exact sur `status` runtime (optionnel) |
+| `last_outcome` | string | Filtre exact sur `last_outcome` (info\\|success\\|failure\\|pending) (optionnel) |
+| `file_name_contains` | string | Filtre contains (case-insensitive) sur `file_name` (optionnel, filtré côté backend) |
+| `started_from` | string | ISO 8601, filtre `started_at >=` (optionnel) |
+| `started_to` | string | ISO 8601, filtre `started_at <=` (optionnel) |
+| `limit` | integer | Nombre max (défaut: 50, max: 200) |
+| `start_after_job_id` | string | Pagination: reprendre après ce job_id (optionnel) |
+| `include_raw` | boolean | Si true, inclut le doc complet en plus des champs utiles (défaut: false) |
+
+## Exemples d'utilisation
+
+**1) Derniers travaux en erreur :**
+```json
+{"status_final":"error","limit":25}
+```
+
+**2) Travaux d’un département sur une période :**
+```json
+{"department":"router","started_from":"2025-12-01T00:00:00Z","started_to":"2025-12-20T23:59:59Z","limit":50}
+```
+
+## Output
+Retourne une liste d’items incluant `job_id`, `department`, `file_name`, `status`, `status_final`, `started_at`, `last_*`, et `department_data`.
+""",
+
+    "GET_TASK_MANAGER_DETAILS": """
+🧾 **GET_TASK_MANAGER_DETAILS** - Détails d’un travail (index + timeline events)
+
+## Rôle
+Ouvre un job via `job_id` et retourne :
+- l’index `clients/{userId}/task_manager/{job_id}`
+- la timeline append-only `clients/{userId}/task_manager/{job_id}/events/*`
+
+⚠️ **Sécurité/Contrat** :
+- Accès refusé si le document ne porte pas le **même** `mandate_path` que celui du contexte utilisateur.
+
+## Paramètres
+| Paramètre | Type | Description |
+|-----------|------|-------------|
+| `job_id` | string | ID du job (requis) |
+| `events_limit` | integer | Nombre max d’events (défaut: 100, max: 500) |
+| `events_order` | string | `asc` ou `desc` (défaut: `asc`) |
+
+## Exemples d'utilisation
+
+**1) Ouvrir un job et lire les 100 derniers events :**
+```json
+{"job_id":"klk_...","events_limit":100,"events_order":"desc"}
+```
+
+## Output
+- `job`: document d’index
+- `events`: liste d’events (avec `event_id`) triés selon `events_order`
+""",
+
+    # ─────────────────────────────────────────────────────────────────────────────
     # OUTILS LPT (lpt_client.py)
     # ─────────────────────────────────────────────────────────────────────────────
     

@@ -309,7 +309,7 @@ Dans l'implémentation actuelle, les SPT sont des **outils directs** du Pinnokio
 ├──────────────────┤                       ├──────────────────────┤
 │ • GET_FIREBASE   │                       │ • APBookkeeper        │
 │ • SEARCH_CHROMA  │                       │ • Banker              │
-│ • GET_CONTEXT    │                       │ • Router              │
+│ • ContextTools   │                       │ • Router              │
 │                  │                       │ • AdminManager        │
 │ Fonctions async  │                       │ HTTP + Callback       │
 │ Retour direct    │                       │ + Stop tool           │
@@ -359,6 +359,26 @@ class SPTTools:
             }
         ]
 ```
+
+### Outils de contexte (ContextTools) - Firestore (Implémenté)
+
+En complément de `SPTTools`, le `PinnokioBrain` expose des **outils de contexte** (accès direct Firestore) dans les modes qui utilisent `_build_general_tools` (ex: `general_chat`, `accounting_chat`, `onboarding_chat`, `task_execution`).
+
+**Outils disponibles** :
+
+- `ROUTER_PROMPT(service)` : lire les règles de routage/classification (source: `{mandate_path}/context/router_context`, champ `router_prompt`)
+- `APBOOKEEPER_CONTEXT()` : lire le contexte comptable (source: `{mandate_path}/context/accounting_context`, champ `data.accounting_context_0`)
+- `BANK_CONTEXT()` : lire le contexte bancaire (source: `{mandate_path}/context/bank_context`, champ `data.bank_context_0`)
+- `COMPANY_CONTEXT()` : lire le profil entreprise (source: `{mandate_path}/context/general_context`, champ `context_company_profile_report`)
+- `UPDATE_CONTEXT(...)` : modifier un contexte via opérations `add/replace/delete` + approbation + sauvegarde Firestore
+  - `context_type` supporte : `router`, `accounting`, `bank`, `company`
+  - `service_name` requis uniquement pour `router`
+
+⚠️ **RÈGLE CRITIQUE (anti-confusion)** :
+
+- `router_context/router_prompt` = **règles de routage** (choix du département/service)
+- `bank_context` = **contexte bancaire** (règles de rapprochement)
+- `{mandate_path}/setup/function_table` = **règles d’approbation** par département (lecture seule), **ce n’est PAS un contexte métier**.
 
 ### Architecture Future : SPT Agents Autonomes
 

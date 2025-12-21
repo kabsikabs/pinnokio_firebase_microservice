@@ -1186,6 +1186,55 @@ class LLMManager:
             Exception si l'initialisation échoue
         """
         session_key = f"{user_id}:{collection_name}"
+
+        def _schedule_billing_catchup(s: "LLMSession") -> None:
+            """
+            Lance un rattrapage de facturation en arrière-plan (non-bloquant) au niveau session (user+collection).
+            Utilise un garde-fou Redis pour éviter de relancer en boucle.
+            """
+            try:
+                if not s or not s.user_context:
+                    return
+
+                mandate_path = (s.user_context or {}).get("mandate_path")
+                if not mandate_path:
+                    return
+
+                # Garde-fou (cross-instance): 1 fois / heure par user+collection
+                should_run = True
+                try:
+                    from ..redis_client import get_redis
+                    r = get_redis()
+                    key = f"billing:catchup:{user_id}:{collection_name}"
+                    should_run = bool(r.set(key, "1", nx=True, ex=3600))
+                except Exception:
+                    # Redis indisponible: fallback best-effort (pas de garde-fou cross-instance)
+                    should_run = True
+
+                if not should_run:
+                    return
+
+                from ..firebase_providers import get_firebase_management
+                fbm = get_firebase_management()
+
+                async def _run():
+                    await asyncio.to_thread(
+                        fbm.ensure_chat_daily_expenses,
+                        mandate_path,
+                        collection_name,
+                        user_id,
+                        7,
+                        False,
+                    )
+                    await asyncio.to_thread(
+                        fbm.get_user_balance,
+                        mandate_path,
+                        user_id,
+                    )
+
+                asyncio.create_task(_run())
+            except Exception as e:
+                logger.warning("[ENSURE_SESSION] billing_catchup_error session=%s err=%s", session_key, str(e))
         
         # Vérifier si session existe avec données chargées
         session = None
@@ -1206,6 +1255,7 @@ class LLMManager:
                         logger.info(
                             f"[ENSURE_SESSION] ✅ Session OK avec données permanentes: {session_key}"
                         )
+                        _schedule_billing_catchup(session)
                         return session
                 else:
                     # Session existe mais données manquantes
@@ -1243,6 +1293,7 @@ class LLMManager:
             logger.info(
                 f"[ENSURE_SESSION] ✅ Session OK avec données permanentes: {session_key}"
             )
+            _schedule_billing_catchup(session)
             return session
         
         # Session n'existe pas OU données manquantes → Initialiser
@@ -1306,6 +1357,7 @@ class LLMManager:
                             logger.info(
                                 f"[ENSURE_SESSION] ✅ Session prête après {waited}s: {session_key}"
                             )
+                            _schedule_billing_catchup(session)
                             return session
             
             # Timeout
@@ -1331,7 +1383,7 @@ class LLMManager:
             logger.info(
                 f"[ENSURE_SESSION] ✅ Session initialisée avec données permanentes: {session_key}"
             )
-            
+            _schedule_billing_catchup(session)
             return session
     
     async def _initialize_session_background(
@@ -3234,6 +3286,8 @@ class LLMManager:
                         "message": "Vous avez rejoint un workflow en cours. Vous pouvez interagir."
                     }
                 })
+
+            # NOTE: Le catch-up billing est déclenché au niveau session dans _ensure_session_initialized()
             
             return {
                 "success": True,
@@ -4470,14 +4524,20 @@ The intermediation session has been closed {reason_text}. You can now continue t
         """
         try:
             # Extraire le type de message depuis le message RTDB
-            message_type = message.get('message_type') or message.get('type')
+            original_message_type = message.get('message_type') or message.get('type')
             
-            if not message_type:
+            if not original_message_type:
                 logger.warning(
                     f"[ONBOARDING_WSS] ⚠️ Type de message manquant, utilisation de 'MESSAGE' par défaut "
                     f"thread={thread_key}"
                 )
-                message_type = 'MESSAGE'
+                original_message_type = 'MESSAGE'
+
+            # ⭐ Normalisation WSS : certains types RTDB sont des signaux internes mais doivent
+            # être affichés côté UI comme des événements génériques (ex: FOLLOW_CARD → CARD).
+            ws_message_type = original_message_type
+            if original_message_type == "FOLLOW_CARD":
+                ws_message_type = "CARD"
             
             # Construire le payload avec les champs essentiels
             payload_data = {
@@ -4496,20 +4556,27 @@ The intermediation session has been closed {reason_text}. You can now continue t
                 k: v for k, v in message.items() 
                 if k not in excluded_fields
             }
+
+            # ✅ IMPORTANT (frontend streaming guard):
+            # ChatState déduit souvent `mt = message_type or type` depuis le payload.
+            # Donc on force `message_type` à matcher le type WSS (ex: CARD) pour éviter le DROP.
+            # On conserve le type RTDB d'origine dans un champ séparé pour debug/compat.
+            additional_fields["message_type"] = ws_message_type
+            additional_fields["rtdb_type"] = original_message_type
             
             # Utiliser la méthode centralisée avec le format général_chat
             await self._send_websocket_message(
                 user_id=user_id,
                 collection_name=collection_name,
                 thread_key=thread_key,
-                message_type=message_type,  # ✅ Utilise le vrai type (CARD, WORKFLOW, CMMD)
+                message_type=ws_message_type,  # ✅ Type WSS normalisé (ex: FOLLOW_CARD → CARD)
                 payload_data=payload_data,
                 additional_fields=additional_fields if additional_fields else None
             )
             
             logger.info(
                 f"[ONBOARDING_WSS] ✅ Message non-MESSAGE routé via WebSocket centralisé - "
-                f"type={message_type} thread={thread_key}"
+                f"type={ws_message_type} rtdb_type={original_message_type} thread={thread_key}"
             )
             
         except Exception as e:
@@ -6415,6 +6482,49 @@ L'utilisateur a demandé la reprise du workflow{f' avec le message suivant: "{us
                         
                         # Le résultat sera réinjecté dans le prochain tour
                 
+                # ───────────────────────────────────────────────────────
+                # 💳 BILLING (CHAT): Enregistrer l'usage tokens par "bucket" journalier
+                # - Compatible multi-instances (Firestore entries/ + agrégats)
+                # - Idempotence via entry_id basé sur assistant_message_id + turn
+                # ───────────────────────────────────────────────────────
+                try:
+                    billing_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    mandate_path = (
+                        (session.user_context or {}).get("mandate_path")
+                        or (getattr(brain, "user_context", None) or {}).get("mandate_path")
+                    )
+
+                    # Par défaut: job virtuel journalier pour le chat général
+                    if chat_mode == "general_chat":
+                        billing_job_id = f"chat:{user_id}:{collection_name}:{billing_date}"
+                        billing_project_id = f"chat_{user_id}_{collection_name}_{billing_date}"
+                    else:
+                        # Pour les modes job-like (router_chat/banker_chat/...), garder une clé stable par thread
+                        billing_job_id = thread_key
+                        billing_project_id = collection_name
+
+                    brain.pinnokio_agent.load_token_usage_to_db(
+                        project_id=billing_project_id,
+                        job_id=billing_job_id,
+                        workflow_step=f"chat_turn_{turn_count}",
+                        file_name=f"assistant_message:{assistant_message_id}",
+                        entry_id=f"{assistant_message_id}:{turn_count}",
+                        function="chat",
+                        thread_key=thread_key,
+                        message_id=assistant_message_id,
+                        collection_name=collection_name,
+                        mandate_path=mandate_path,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[BILLING] Impossible d'enregistrer token_usage (thread=%s, msg=%s, turn=%s): %s",
+                        thread_key,
+                        assistant_message_id,
+                        turn_count,
+                        str(e),
+                        exc_info=True,
+                    )
+
                 # ─── FIN DU TOUR : Préparer prochain input ───
                 if mission_completed:
                     break

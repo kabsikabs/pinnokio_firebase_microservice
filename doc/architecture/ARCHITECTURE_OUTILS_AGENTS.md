@@ -34,7 +34,30 @@ LLMSessionManager (Singleton Global)
 | `jobs_data` | Redis (UI) / Firebase (BACKEND) | APBOOKEEPER, ROUTER, BANK avec listes de jobs |
 | `jobs_metrics` | Calculé depuis jobs_data | Compteurs to_do, in_process, pending, processed |
 
-### 1.3 Exemple de workflow_params
+### 1.3 Contextes métier Firestore (mandate_path/context)
+
+En plus de `user_context` (profil mandat) et `jobs_data` (jobs), le système maintient des **contextes métier persistants** dans Firestore sous :
+
+- `{mandate_path}/context/*`
+
+**Documents actuellement supportés par les outils de contexte (ContextTools)** :
+
+- **`router_context`** : règles de routage / classification
+  - Champ: `router_prompt` (dict par service: `hr`, `invoices`, `banks_cash`, etc.)
+- **`accounting_context`** : règles comptables globales
+  - Champ: `data.accounting_context_0` (texte)
+- **`bank_context`** : règles & conventions de rapprochement bancaire
+  - Champ: `data.bank_context_0` (texte)
+- **`general_context`** : profil entreprise
+  - Champ: `context_company_profile_report` (texte)
+
+⚠️ **RÈGLE CRITIQUE (anti-confusion)** :
+
+- `router_context/router_prompt` = **règles de routage** (choix du département/service)
+- `bank_context` = **contexte bancaire** (règles de rapprochement)
+- `{mandate_path}/setup/function_table` = **règles d’approbation** par département (lecture seule), **ce n’est PAS un contexte métier**.
+
+### 1.4 Exemple de workflow_params
 
 ```python
 workflow_params = {
@@ -223,11 +246,82 @@ key = f"workflow_state:{collection_name}:{thread_key}"
 | Fichier | Rôle |
 |---------|------|
 | `tool_help_registry.py` | Registre centralisé + DETAILED_HELP |
-| `job_tools.py` | GET_APBOOKEEPER_JOBS, GET_ROUTER_JOBS, GET_BANK_TRANSACTIONS, Context tools |
+| `job_tools.py` | GET_APBOOKEEPER_JOBS, GET_ROUTER_JOBS, GET_BANK_TRANSACTIONS, GET_EXPENSES_INFO, **ContextTools** (`ROUTER_PROMPT`, `APBOOKEEPER_CONTEXT`, `BANK_CONTEXT`, `COMPANY_CONTEXT`, `UPDATE_CONTEXT`) |
+| `task_manager_tools.py` | **Lecture contractuelle “Solution A”** : index des travaux + timeline d’audit (`GET_TASK_MANAGER_INDEX`, `GET_TASK_MANAGER_DETAILS`) |
 | `lpt_client.py` | LPT_APBookkeeper, LPT_Router, LPT_Banker, versions ALL et STOP |
 | `spt_tools.py` | GET_FIREBASE_DATA, SEARCH_CHROMADB |
 | `task_tools.py` | CREATE_TASK, CREATE_CHECKLIST, UPDATE_STEP, WAIT_ON_LPT |
 | `pinnokio_brain.py` | Assemblage final + VIEW_DRIVE_DOCUMENT, TERMINATE_TASK |
+
+### 6.6 Outils de contexte (ContextTools)
+
+Les **ContextTools** sont des outils “courts” (accès direct Firestore) intégrés au `tool_set` des modes qui utilisent `_build_general_tools` (ex: `general_chat`, `accounting_chat`, `onboarding_chat`, `task_execution`).
+
+**Outils disponibles** :
+
+- `ROUTER_PROMPT(service)` : lire les règles de routage d’un service (source: `{mandate_path}/context/router_context`)
+- `APBOOKEEPER_CONTEXT()` : lire le contexte comptable (source: `{mandate_path}/context/accounting_context`, champ `data.accounting_context_0`)
+- `BANK_CONTEXT()` : lire le contexte bancaire (source: `{mandate_path}/context/bank_context`, champ `data.bank_context_0`)
+- `COMPANY_CONTEXT()` : lire le profil entreprise (source: `{mandate_path}/context/general_context`)
+- `UPDATE_CONTEXT(context_type, ...)` : modifier un contexte avec opérations `add/replace/delete` + approbation + sauvegarde Firestore
+  - `context_type` supporte : `router`, `accounting`, `bank`, `company`
+  - ⚠️ `service_name` requis uniquement pour `router`
+
+### 6.7 Outils Task Manager (Index + Audit) — Contrat “Solution A”
+
+Ces outils donnent à `general_chat` une **vision “travaux”** basée sur le contrat inter-départements (index + timeline append-only).
+
+#### 6.7.1 Source de vérité (Firestore)
+
+Les outils lisent **uniquement** dans les chemins contractuels suivants :
+
+- **Index job** : `clients/{userId}/task_manager/{job_id}`
+- **Audit events** : `clients/{userId}/task_manager/{job_id}/events/{event_id}`
+
+#### 6.7.2 Outils disponibles
+
+- **`GET_TASK_MANAGER_INDEX`**
+  - Rôle : lister les travaux (dashboard / filtres / pagination).
+  - Filtres : `department`, `status_final`, `status`, `last_outcome`, période (`started_from`, `started_to`), `file_name_contains`, pagination `start_after_job_id`.
+
+- **`GET_TASK_MANAGER_DETAILS`**
+  - Rôle : ouvrir un travail (`job_id`) et retourner **index + timeline**.
+  - Paramètres : `job_id` + `events_limit` + `events_order`.
+
+#### 6.7.3 Garantie de respect du contrat général (sécurité & segmentation)
+
+**Règle critique** : `mandate_path` est **imposé** côté serveur et ne peut pas être fourni par l’agent.
+
+Concrètement :
+
+- **Base path imposé** : `userId` est récupéré depuis le contexte du brain (`brain.firebase_user_id`).
+- **Filtre imposé** : `mandate_path` est récupéré depuis `brain.user_context["mandate_path"]` et appliqué via `where("mandate_path", "==", mandate_path)` sur l’index.
+- **Accès refusé** : `GET_TASK_MANAGER_DETAILS(job_id=...)` refuse si le doc n’a pas le même `mandate_path`.
+
+➡️ Résultat : l’agent ne peut **pas** “explorer” d’autres mandats ni d’autres users, même par erreur ou prompt injection.
+
+#### 6.7.4 Pattern d’intégration (conforme au framework outils)
+
+**Code**
+
+- Implémentation : `app/pinnokio_agentic_workflow/tools/task_manager_tools.py`
+  - Définitions courtes : `get_task_manager_index_definition()` + `get_task_manager_details_definition()`
+  - Exécution : `get_index(...)` + `get_details(job_id, ...)`
+
+- Wiring : `app/pinnokio_agentic_workflow/orchestrator/pinnokio_brain.py`
+  - Ajout des définitions dans `tool_set`
+  - Ajout des handlers dans `tool_mapping`
+
+**Documentation**
+
+- Doc détaillée via `GET_TOOL_HELP` :
+  - Entrées ajoutées dans `app/pinnokio_agentic_workflow/tools/tool_help_registry.py` (`DETAILED_HELP["GET_TASK_MANAGER_INDEX"]`, `DETAILED_HELP["GET_TASK_MANAGER_DETAILS"]`)
+  - Le registre `ToolHelpRegistry` expose `GET_TOOL_HELP` dynamiquement (uniquement pour les outils réellement chargés).
+
+#### 6.7.5 Notes de compatibilité “départements”
+
+Le contrat autorise des extensions sous `department_data.<DEPARTMENT>`. Selon les départements, la clé `<DEPARTMENT>` peut varier en casse (ex: `router`, `banker`, `APbookeeper`).  
+Ces outils renvoient `department_data` **tel quel** (pas de normalisation), pour éviter toute perte d’information.
 
 ### 6.3 Comment Ajouter un Nouvel Outil
 
@@ -388,7 +482,7 @@ app/pinnokio_agentic_workflow/
 
 ## 🔗 Références
 
-- `doc/ARCHITECTURE_AGENTIQUE_COMPLETE.md` - Documentation complète
-- `doc/REDIS_ARCHITECTURE_COHERENTE_SCALABILITE.md` - Architecture Redis
-- `doc/ARCHITECTURE_REDIS_JOBS_METRICS.md` - Jobs et métriques
+- `doc/architecture/ARCHITECTURE_AGENTIQUE_COMPLETE.md` - Documentation complète
+- `doc/infrastructure/REDIS_ARCHITECTURE_COHERENTE_SCALABILITE.md` - Architecture Redis
+- `doc/architecture/ARCHITECTURE_REDIS_JOBS_METRICS.md` - Jobs et métriques
 

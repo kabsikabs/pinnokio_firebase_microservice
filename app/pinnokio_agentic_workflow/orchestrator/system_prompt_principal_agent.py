@@ -251,7 +251,7 @@ def build_principal_agent_prompt(user_context: dict, jobs_metrics: dict = None) 
       |- **Rôle** : Recherche, analyse, filtrage rapide (< 30 secondes)
       |- **Question** : "Quelles données ? Quels filtres ?"
       |- **Exemples** :
-      - Outils de contexte intégrés : `ROUTER_PROMPT`, `APBOOKEEPER_CONTEXT`, `COMPANY_CONTEXT` ✅ **DISPONIBLES**
+      - Outils de contexte intégrés : `ROUTER_PROMPT`, `APBOOKEEPER_CONTEXT`, `BANK_CONTEXT`, `COMPANY_CONTEXT` ✅ **DISPONIBLES**
       - `SPT_JobManager` : Accès aux jobs (documents, factures, transactions)
       - `SPT_TaskManager` : Planification et suivi des tâches *(À VENIR)*
       - `SPT_FirebaseAccess` : Lecture/écriture en base de données *(À VENIR)*
@@ -398,12 +398,19 @@ def build_principal_agent_prompt(user_context: dict, jobs_metrics: dict = None) 
 
       #### **Outils d'accès aux contextes métier** 📋 ✅ **DISPONIBLES**
 
-      Vous avez maintenant accès direct à 3 types de contextes métier, plus 2 outils de modification :
+      Vous avez maintenant accès direct à 4 types de contextes métier, plus 1 outil de modification :
+      
+      ⚠️ **RÈGLE CRITIQUE (anti-confusion)** :
+      - `ROUTER_PROMPT` = **règles de routage / classification** (choix du département/service: hr, invoices, banks_cash, taxes, etc.)
+      - `BANK_CONTEXT` = **contexte bancaire** (règles & conventions de rapprochement)
+      - `workflow_params.function_table` (dans le contexte système) = **règles d'approbation** (lecture seule), ce n'est PAS un contexte métier
+      - N'utilisez PAS `ROUTER_PROMPT` pour des règles de rapprochement bancaire, et inversement.
 
       ##### **1. `ROUTER_PROMPT`** - Règles de classification (services: `hr`, `invoices`, `expenses`, `banks_cash`, `taxes`, `contrats`, `letters`, `financial_statement`)
       ##### **2. `APBOOKEEPER_CONTEXT`** - Règles comptables de l'entreprise
-      ##### **3. `COMPANY_CONTEXT`** - Profil complet de l'entreprise cliente
-      ##### **4. `UPDATE_CONTEXT`** - Modifier un contexte avec approbation (operations: add/replace/delete sur beg/mid/end)
+      ##### **3. `BANK_CONTEXT`** - Règles & conventions de rapprochement bancaire
+      ##### **4. `COMPANY_CONTEXT`** - Profil complet de l'entreprise cliente
+      ##### **5. `UPDATE_CONTEXT`** - Modifier un contexte avec approbation (context_type: router/accounting/bank/company ; operations: add/replace/delete sur beg/mid/end)
 
       ---
 

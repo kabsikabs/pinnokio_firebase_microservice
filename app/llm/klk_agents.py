@@ -551,7 +551,22 @@ class BaseAIAgent:
             raise Exception(f"Erreur lors de l'initialisation du DMS {dms_system}: {str(e)}")
 
 
-    def load_token_usage_to_db(self, project_id: str, job_id: str, workflow_step: str,file_name: str=None) -> None:
+    def load_token_usage_to_db(
+        self,
+        project_id: str,
+        job_id: str,
+        workflow_step: str,
+        file_name: str = None,
+        entry_id: Optional[str] = None,
+        # NOTE: `department` est conservé pour compat ascendante (anciens call sites),
+        # mais le champ Firestore correspondant s'appelle désormais `function`.
+        department: Optional[str] = None,
+        function: Optional[str] = None,
+        thread_key: Optional[str] = None,
+        message_id: Optional[str] = None,
+        collection_name: Optional[str] = None,
+        mandate_path: Optional[str] = None,
+    ) -> bool:
         """
         Charge les données d'utilisation des tokens dans Firebase.
         
@@ -582,27 +597,62 @@ class BaseAIAgent:
         
         success = True
         for provider_name, usage_data in token_usage.items():
+            # Idempotence: un entry_id stable permet d'éviter les doubles comptes en cas de retry/scaling.
+            # Convention recommandée: f"{message_id}:{turn}:{provider_name}"
+            per_provider_entry_id = None
+            if entry_id:
+                per_provider_entry_id = f"{entry_id}:{provider_name}"
+
+            resolved_function = function or department or "router"
+            total_input_tokens = usage_data["total_input_tokens"]
+            total_output_tokens = usage_data["total_output_tokens"]
+            total_tokens = int(total_input_tokens or 0) + int(total_output_tokens or 0)
+
             data = {
-                'function':'router',
+                'function': resolved_function,
                 'project_id': project_id,
                 'job_id': job_id,
                 
                 'provider_name': provider_name,
                 'timestamp': current_time,
                 'workflow_step':workflow_step,
-                'total_input_tokens': usage_data['total_input_tokens'],
-                'total_output_tokens': usage_data['total_output_tokens'],
-                'provider_model_name': usage_data['model'],
-                'buy_price': usage_data['buy_price'],
-                'sales_price': usage_data['sales_price'],
-                'output_mode': usage_data['mode']
+                'total_input_tokens': total_input_tokens,
+                'total_output_tokens': total_output_tokens,
+                'total_tokens': total_tokens,
+                'provider_model_name': usage_data.get('model'),
+                'buy_price': usage_data.get('buy_price', "{:.6f}".format(0)),
+                'sales_price': usage_data.get('sales_price', "{:.6f}".format(0)),
+                'output_mode': usage_data.get('mode', "unknown")
             }
+
+            # Champs optionnels (n'impactent pas la compat Firestore)
+            if file_name:
+                data["file_name"] = file_name
+            if thread_key:
+                data["thread_key"] = thread_key
+            if message_id:
+                data["message_id"] = message_id
+            if collection_name:
+                data["collection_name"] = collection_name
+            if mandate_path:
+                data["mandate_path"] = mandate_path
+            if per_provider_entry_id:
+                data["entry_id"] = per_provider_entry_id
             
             # Appel à la méthode de FireBaseManagement
-            if not self.firebase_instance.upload_token_usage(self.firebase_user_id,data):
+            if not self.firebase_instance.upload_token_usage(self.firebase_user_id, data, entry_id=per_provider_entry_id):
                 success = False
                 print(f"Échec du chargement des données pour le provider {provider_name}")
-        
+
+        # ✅ Reset des compteurs tokens uniquement si l'écriture a réussi (principe doc)
+        if success:
+            for _, instance in self.provider_instances.items():
+                if hasattr(instance, "reset_token_counters"):
+                    try:
+                        instance.reset_token_counters()
+                    except Exception as e:
+                        print(f"⚠️ Impossible de reset_token_counters pour {type(instance).__name__}: {e}")
+
         return success
 
 
@@ -2747,7 +2797,11 @@ class BaseAIAgent:
                 provider_info = {
                     'total_input_tokens': input_tokens,
                     'total_output_tokens': output_tokens,
-                    'model': current_model
+                    'model': current_model,
+                    # ✅ Toujours présent pour éviter KeyError plus tard (si modèle inconnu / tokens non capturés)
+                    'buy_price': "{:.6f}".format(0),
+                    'sales_price': "{:.6f}".format(0),
+                    'mode': "unknown",
                 }
                 
                 # Ajout des informations de coût si on a un modèle
@@ -6387,11 +6441,16 @@ class NEW_OpenAiAgent:
                 }
 
             # Mise à jour des tokens d'entrée (prompt)
-            prompt_tokens = raw_response.usage.prompt_tokens
+            # Compat: certains SDK/routers exposent input_tokens/output_tokens au lieu de prompt_tokens/completion_tokens
+            prompt_tokens = getattr(raw_response.usage, "prompt_tokens", None)
+            if prompt_tokens is None:
+                prompt_tokens = getattr(raw_response.usage, "input_tokens", 0)
             self.token_usage[model]['total_input_tokens'] += prompt_tokens
 
             # Mise à jour des tokens de sortie (completion)
-            completion_tokens = raw_response.usage.completion_tokens
+            completion_tokens = getattr(raw_response.usage, "completion_tokens", None)
+            if completion_tokens is None:
+                completion_tokens = getattr(raw_response.usage, "output_tokens", 0)
             self.token_usage[model]['total_output_tokens'] += completion_tokens
 
             # Mise à jour du modèle courant
@@ -6881,6 +6940,10 @@ class NEW_OpenAiAgent:
                     "messages": cleaned_messages,
                     "stream": True
                 }
+
+                # ✅ Capturer l'usage tokens en streaming (si supporté par l'API OpenAI-compatible)
+                # Le dernier chunk peut contenir `usage` si stream_options.include_usage=True
+                api_params["stream_options"] = {"include_usage": True}
                 
                 tokens_key = 'max_completion_tokens' if chosen_model in self.reasoning_models else 'max_tokens'
                 api_params[tokens_key] = max_tokens
@@ -6910,8 +6973,20 @@ class NEW_OpenAiAgent:
                 print(f"🔵 Stream OpenAI (outil) créé, début de l'itération ...")
                 chunk_count = 0
                 try:
+                    last_usage = None
                     # Itérer sur les chunks du stream de manière asynchrone
                     async for chunk in stream:
+                        # Stocker l'usage si présent (souvent seulement sur le dernier chunk, parfois avec choices=[])
+                        if hasattr(chunk, "usage") and chunk.usage:
+                            last_usage = chunk.usage
+                        elif hasattr(chunk, "model_dump"):
+                            try:
+                                dumped = chunk.model_dump()
+                                if dumped.get("usage"):
+                                    last_usage = dumped.get("usage")
+                            except Exception:
+                                pass
+
                         if chunk.choices and len(chunk.choices) > 0:
                             delta = chunk.choices[0].delta
                             chunk_count += 1
@@ -6979,6 +7054,22 @@ class NEW_OpenAiAgent:
                 
                 print(f"🔵 Streaming terminé, {chunk_count} chunks reçus")
                 print(f"🔵 Tool calls détectés: {len(tool_calls_data)}")
+
+                # ✅ Mettre à jour le tracking tokens à partir de l'usage stream (si dispo)
+                try:
+                    if last_usage is not None:
+                        class _TokenUsage:
+                            def __init__(self, usage_data, model_name):
+                                # usage_data peut être un objet (CompletionUsage) ou un dict
+                                if isinstance(usage_data, dict):
+                                    from types import SimpleNamespace
+                                    self.usage = SimpleNamespace(**usage_data)
+                                else:
+                                    self.usage = usage_data
+                                self.model = model_name
+                        self.update_token_usage(_TokenUsage(last_usage, chosen_model))
+                except Exception as e:
+                    print(f"⚠️ [TOKENS] Impossible d'enregistrer l'usage OpenAI streaming (tools): {e}")
                 
                 # Traiter les appels d'outils accumulés
                 for tool_index, tool_data in tool_calls_data.items():
@@ -7182,6 +7273,9 @@ class NEW_OpenAiAgent:
                     "messages": self.chat_history,
                     "stream": True
                 }
+
+                # ✅ Capturer l'usage tokens en streaming si supporté
+                api_params["stream_options"] = {"include_usage": True}
                 
                 # Utiliser max_completion_tokens pour les modèles de raisonnement, sinon max_tokens
                 tokens_key = 'max_completion_tokens' if chosen_model in self.reasoning_models else 'max_tokens'
@@ -7203,8 +7297,19 @@ class NEW_OpenAiAgent:
                 accumulated_content = ""
                 
                 try:
+                    last_usage = None
                     # Itérer sur les chunks du stream de manière asynchrone
                     async for chunk in stream:
+                        if hasattr(chunk, "usage") and chunk.usage:
+                            last_usage = chunk.usage
+                        elif hasattr(chunk, "model_dump"):
+                            try:
+                                dumped = chunk.model_dump()
+                                if dumped.get("usage"):
+                                    last_usage = dumped.get("usage")
+                            except Exception:
+                                pass
+
                         if chunk.choices and len(chunk.choices) > 0:
                             delta = chunk.choices[0].delta
                             
@@ -7247,6 +7352,19 @@ class NEW_OpenAiAgent:
                 # Mettre à jour l'utilisation des tokens si disponible
                 # Note: Pour le streaming OpenAI, les tokens ne sont pas toujours disponibles
                 # dans chaque chunk, mais peuvent l'être dans le dernier
+                try:
+                    if last_usage is not None:
+                        class _TokenUsage:
+                            def __init__(self, usage_data, model_name):
+                                if isinstance(usage_data, dict):
+                                    from types import SimpleNamespace
+                                    self.usage = SimpleNamespace(**usage_data)
+                                else:
+                                    self.usage = usage_data
+                                self.model = model_name
+                        self.update_token_usage(_TokenUsage(last_usage, chosen_model))
+                except Exception as e:
+                    print(f"⚠️ [TOKENS] Impossible d'enregistrer l'usage OpenAI streaming (texte): {e}")
                 
                 # Signal de fin
                 yield {
@@ -8099,11 +8217,15 @@ class NEW_GROQ_AGENT:
                 }
 
             # Mise à jour des tokens d'entrée (prompt)
-            prompt_tokens = raw_response.usage.prompt_tokens
+            prompt_tokens = getattr(raw_response.usage, "prompt_tokens", None)
+            if prompt_tokens is None:
+                prompt_tokens = getattr(raw_response.usage, "input_tokens", 0)
             self.token_usage[model]['total_input_tokens'] += prompt_tokens
 
             # Mise à jour des tokens de sortie (completion)
-            completion_tokens = raw_response.usage.completion_tokens
+            completion_tokens = getattr(raw_response.usage, "completion_tokens", None)
+            if completion_tokens is None:
+                completion_tokens = getattr(raw_response.usage, "output_tokens", 0)
             self.token_usage[model]['total_output_tokens'] += completion_tokens
 
             # Mise à jour du modèle courant
@@ -8433,7 +8555,9 @@ class NEW_GROQ_AGENT:
                 'model': model_name,
                 'messages': messages,
                 'max_tokens': max_tokens,
-                'stream': True
+                'stream': True,
+                # ✅ Tenter de récupérer l'usage tokens via le dernier chunk (OpenAI-compatible)
+                'stream_options': {"include_usage": True},
             }
             
             # Ajouter tools si fournis
@@ -8458,11 +8582,15 @@ class NEW_GROQ_AGENT:
             )
             
             # Traiter les chunks du stream
+            last_usage = None
             for chunk in response:
                 if not chunk.choices:
                     continue
                     
                 delta = chunk.choices[0].delta
+
+                if hasattr(chunk, "usage") and chunk.usage:
+                    last_usage = chunk.usage
                 
                 # ─────────────────────────────────────────────
                 # CAS 1: Contenu texte
@@ -8524,6 +8652,17 @@ class NEW_GROQ_AGENT:
             
             # Sauvegarder dans l'historique (format Anthropic pour compatibilité)
             self.add_ai_message(assistant_content if assistant_content else accumulated_text)
+
+            # ✅ Mettre à jour le tracking tokens à partir de l'usage stream (si dispo)
+            try:
+                if last_usage is not None:
+                    class _TokenUsage:
+                        def __init__(self, usage_data, model_name):
+                            self.usage = usage_data
+                            self.model = model_name
+                    self.update_token_usage(_TokenUsage(last_usage, model_name))
+            except Exception as e:
+                print(f"⚠️ [TOKENS] Impossible d'enregistrer l'usage Groq streaming (tools): {e}")
             
             # ═══════════════════════════════════════════════════════
             # ÉTAPE 5: Exécuter les outils si présents

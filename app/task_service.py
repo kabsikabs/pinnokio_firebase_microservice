@@ -5,6 +5,7 @@ Intégré avec le système de registre unifié pour l'isolation par utilisateur/
 
 import os
 from celery import Celery
+from celery.schedules import crontab
 from .config import get_settings
 
 # Configuration Celery utilisant votre Redis existant
@@ -90,6 +91,13 @@ celery_app.conf.beat_schedule = {
     'cleanup-expired-listeners': {
         'task': 'app.maintenance_tasks.cleanup_expired_listeners',
         'schedule': 60.0,  # Toutes les minutes - Nettoie les listeners expirés
+    },
+    # 💳 Facturation chat journalière (veille UTC)
+    'billing-finalize-daily-chat': {
+        'task': 'app.maintenance_tasks.finalize_daily_chat_billing',
+        # Toutes les heures à :20 UTC (rattrape automatiquement les jours manqués)
+        'schedule': crontab(minute=20, hour='*/1'),
+        'kwargs': {'days_back': 7},
     },
 }
 

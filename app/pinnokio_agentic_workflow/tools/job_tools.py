@@ -878,6 +878,66 @@ class ContextTools:
                 "success": False,
                 "error": str(e)
             }
+
+    def get_bank_context_definition(self) -> Dict:
+        """Définition COURTE de l'outil BANK_CONTEXT (pour l'API)."""
+        return {
+            "name": "BANK_CONTEXT",
+            "description": "🏦 Contexte bancaire de l'entreprise (règles & conventions de rapprochement, libellés, tolérances, comptes, etc.). ⚠️ Ne pas confondre avec ROUTER_PROMPT (règles de routage). Utilisez GET_TOOL_HELP pour plus de détails.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+
+    async def get_bank_context(self) -> Dict:
+        """
+        Récupère le contexte bancaire complet.
+        
+        Source Firebase:
+            {mandate_path}/context/bank_context (champ data.bank_context_0)
+        """
+        try:
+            logger.info("[BANK_CONTEXT] Récupération du contexte bancaire")
+            
+            if not self.mandate_path:
+                return {
+                    "success": False,
+                    "error": "mandate_path non configuré"
+                }
+            
+            all_contexts = self.firebase_management.get_all_contexts(self.mandate_path)
+            
+            if not all_contexts or "bank" not in all_contexts:
+                return {
+                    "success": False,
+                    "error": "bank_context non trouvé dans Firebase"
+                }
+            
+            bank_context = all_contexts["bank"]
+            bank_content = bank_context.get("bank_context_0", "")
+            
+            if not bank_content:
+                return {
+                    "success": False,
+                    "error": "bank_context_0 est vide"
+                }
+            
+            return {
+                "success": True,
+                "bank_context": bank_content,
+                "last_refresh": bank_context.get("last_refresh"),
+                "content_length": len(str(bank_content)),
+                "summary": f"🏦 Contexte bancaire récupéré ({len(str(bank_content))} caractères)"
+            }
+        
+        except Exception as e:
+            logger.error(f"[BANK_CONTEXT] Erreur: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
     
     def get_company_context_definition(self) -> Dict:
         """Définition COURTE de l'outil COMPANY_CONTEXT (pour l'API)."""
@@ -993,6 +1053,14 @@ class ContextTools:
                 )
                 
                 context_path = f"{self.mandate_path}/context/accounting_context/data/accounting_context_0"
+
+            elif context_type == "bank":
+                success = self.firebase_management.update_bank_context(
+                    mandate_path=self.mandate_path,
+                    updated_content=updated_text
+                )
+                
+                context_path = f"{self.mandate_path}/context/bank_context/data/bank_context_0"
             
             elif context_type == "company":
                 success = self.firebase_management.update_general_context(
@@ -1028,13 +1096,13 @@ class ContextTools:
         """Définition COURTE de l'outil UPDATE_CONTEXT (pour l'API)."""
         return {
             "name": "UPDATE_CONTEXT",
-            "description": "✏️ Mise à jour atomique d'un contexte (router/accounting/company). Opérations: add, replace, delete. Demande approbation automatique. Utilisez GET_TOOL_HELP pour plus de détails.",
+            "description": "✏️ Mise à jour atomique d'un contexte (router/accounting/bank/company). Opérations: add, replace, delete. Demande approbation automatique. ⚠️ router=Règles de routage, bank=Contexte bancaire. Utilisez GET_TOOL_HELP pour plus de détails.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "context_type": {
                         "type": "string",
-                        "enum": ["router", "accounting", "company"],
+                        "enum": ["router", "accounting", "bank", "company"],
                         "description": "Type de contexte à modifier"
                     },
                     "service_name": {
@@ -1183,6 +1251,25 @@ class ContextTools:
                     logger.info("[UPDATE_CONTEXT] accounting_context_0 vide, création de contenu via 'add'")
                     original_text = ""  # Travailler sur chaîne vide
             
+            elif context_type == "bank":
+                bank_context = all_contexts.get("bank", {})
+                original_text = bank_context.get("bank_context_0", "")
+                context_source = "bank_context/data/bank_context_0"
+                
+                # ✅ Gérer le cas d'un contexte vide (permettre création via "add")
+                if not original_text:
+                    all_operations_are_add = all(
+                        op.get("operation") == "add"
+                        for op in operations
+                    )
+                    if not all_operations_are_add:
+                        return {
+                            "success": False,
+                            "error": "bank_context_0 est vide - seules les opérations 'add' sont autorisées pour créer du contenu"
+                        }
+                    logger.info("[UPDATE_CONTEXT] bank_context_0 vide, création de contenu via 'add'")
+                    original_text = ""
+
             elif context_type == "company":
                 general_context = all_contexts.get("general", {})
                 original_text = general_context.get("context_company_profile_report", "")
