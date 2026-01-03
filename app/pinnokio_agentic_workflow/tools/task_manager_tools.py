@@ -187,6 +187,20 @@ class TaskManagerTools:
             # Filtre de sécurité (obligatoire)
             query = col.where(filter=firestore.FieldFilter("mandate_path", "==", mandate_path))
 
+            # Log des filtres appliqués
+            logger.info(
+                "[GET_TASK_MANAGER_INDEX] Filtres appliqués - "
+                f"mandate_path={mandate_path}, "
+                f"department={department}, "
+                f"status_final={status_final}, "
+                f"status={status}, "
+                f"last_outcome={last_outcome}, "
+                f"started_from={started_from}, "
+                f"started_to={started_to}, "
+                f"file_name_contains={file_name_contains}, "
+                f"limit={limit}"
+            )
+
             # Filtres optionnels
             if department:
                 query = query.where(filter=firestore.FieldFilter("department", "==", department))
@@ -231,9 +245,18 @@ class TaskManagerTools:
 
             items: List[Dict[str, Any]] = []
             needle = (file_name_contains or "").strip().lower()
+            
+            # Collecter les départements uniques pour diagnostic
+            departments_found = set()
+            
             for d in docs:
                 dd = d.to_dict() or {}
                 dd_job_id = dd.get("job_id") or d.id
+                
+                # Collecter le département pour diagnostic
+                dept = dd.get("department")
+                if dept:
+                    departments_found.add(str(dept))
 
                 file_name = str(dd.get("file_name") or "")
                 if needle and needle not in file_name.lower():
@@ -262,10 +285,49 @@ class TaskManagerTools:
 
             next_cursor = items[-1]["job_id"] if len(items) == limit else None
 
+            # Diagnostic : si aucun résultat et filtre department appliqué, suggérer les départements disponibles
+            diagnostic_info = {}
+            if len(items) == 0 and department:
+                # Récupérer tous les départements disponibles pour ce mandate_path (sans filtre department)
+                try:
+                    base_query = col.where(filter=firestore.FieldFilter("mandate_path", "==", mandate_path))
+                    all_docs_sample = await asyncio.to_thread(lambda: list(base_query.limit(100).stream()))
+                    all_departments = set()
+                    for doc in all_docs_sample:
+                        data = doc.to_dict() or {}
+                        dept = data.get("department")
+                        if dept:
+                            all_departments.add(str(dept))
+                    if all_departments:
+                        diagnostic_info["available_departments"] = sorted(list(all_departments))
+                        diagnostic_info["suggestion"] = (
+                            f"Aucun résultat avec department='{department}'. "
+                            f"Départements disponibles: {', '.join(sorted(all_departments))}"
+                        )
+                        logger.warning(
+                            f"[GET_TASK_MANAGER_INDEX] 🔍 DIAGNOSTIC - "
+                            f"Recherche department='{department}' → 0 résultats. "
+                            f"Départements trouvés dans la base: {', '.join(sorted(all_departments))}"
+                        )
+                    else:
+                        logger.warning(
+                            f"[GET_TASK_MANAGER_INDEX] 🔍 DIAGNOSTIC - "
+                            f"Aucun document trouvé pour mandate_path='{mandate_path}' "
+                            f"(même sans filtre department)"
+                        )
+                except Exception as e:
+                    logger.warning(f"[GET_TASK_MANAGER_INDEX] Erreur lors du diagnostic: {e}", exc_info=True)
+
+            logger.info(
+                f"[GET_TASK_MANAGER_INDEX] Résultats - count={len(items)}, "
+                f"departments_trouvés={sorted(list(departments_found)) if departments_found else 'aucun'}"
+            )
+
             return {
                 "success": True,
                 "fixed_context": {"user_id": user_id, "mandate_path": mandate_path},
                 "filters_applied": {
+                    "mandate_path": mandate_path,  # ⭐ Ajouté pour visibilité
                     "department": department,
                     "status_final": status_final,
                     "status": status,
@@ -277,6 +339,7 @@ class TaskManagerTools:
                 "count": len(items),
                 "results": _serialize(items),
                 "next_start_after_job_id": next_cursor,
+                "diagnostic": diagnostic_info if diagnostic_info else None,
             }
 
         except Exception as e:

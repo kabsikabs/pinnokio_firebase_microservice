@@ -1264,14 +1264,30 @@ class PinnokioBrain:
         import pytz
         
         try:
-            # Utiliser la timezone du mandat si non fournie
+            # Utiliser la timezone du mandat si non fournie.
+            # ⚠️ Défensif: neutraliser anciennes valeurs de cache ("no timezone found") et values None/""
+            if timezone == "no timezone found":
+                timezone = None
+
             if not timezone:
-                timezone = self.user_context.get("timezone", "UTC") if self.user_context else "UTC"
+                tz_from_context = None
+                if self.user_context:
+                    tz_from_context = self.user_context.get("timezone")
+                    if tz_from_context == "no timezone found":
+                        tz_from_context = None
+                timezone = tz_from_context or "UTC"
             
             logger.info(f"[GET_CURRENT_DATETIME] Timezone: {timezone}, Format: {format}")
             
             # Obtenir l'heure actuelle dans la timezone
-            tz = pytz.timezone(timezone)
+            try:
+                tz = pytz.timezone(timezone)
+            except Exception:
+                logger.warning(
+                    f"[GET_CURRENT_DATETIME] ⚠️ Timezone invalide '{timezone}', repli sur UTC"
+                )
+                timezone = "UTC"
+                tz = pytz.timezone("UTC")
             now = datetime.now(tz)
             
             result = {

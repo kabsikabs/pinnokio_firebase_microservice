@@ -708,6 +708,42 @@ class LLMSession:
 
             workflow_params["function_table"] = function_table_info
             
+            # ⭐ Résolution timezone (sans appel LLM)
+            # But: éviter le sentinel "no timezone found" dans le contexte, et persister dès qu'on peut.
+            resolved_timezone = full_profile.get("mandate_timezone")
+            if not resolved_timezone or resolved_timezone == "no timezone found":
+                try:
+                    from ..pinnokio_agentic_workflow.tools.timezone_enum import get_timezone_for_country
+                    import pytz
+
+                    country_value = (full_profile.get("mandate_country") or "").strip()
+                    tz_guess = get_timezone_for_country(country_value) if country_value else None
+
+                    if tz_guess:
+                        # Valider IANA + persister dans le mandat
+                        try:
+                            pytz.timezone(tz_guess)
+                            firebase_service.save_timezone_to_mandate(mandate_path, tz_guess)
+                            resolved_timezone = tz_guess
+                            logger.info(
+                                "[SESSION_DATA] ✅ Timezone auto-déduite depuis pays=%s → %s (persistée)",
+                                country_value,
+                                tz_guess,
+                            )
+                        except Exception as persist_error:
+                            # On garde la timezone déduite pour la session même si la persistance échoue
+                            resolved_timezone = tz_guess
+                            logger.warning(
+                                "[SESSION_DATA] ⚠️ Timezone auto-déduite (%s) mais persistance a échoué: %s",
+                                tz_guess,
+                                persist_error,
+                            )
+                except Exception as tz_error:
+                    logger.warning(
+                        "[SESSION_DATA] ⚠️ Impossible de déduire la timezone depuis le pays: %s",
+                        tz_error,
+                    )
+            
             # ⭐ Construire user_context avec les BONS noms de champs
             self.user_context = {
                 # Identifiants
@@ -722,7 +758,6 @@ class LLMSession:
                 "contact_space_name": full_profile.get("mandate_contact_space_name"),
                 "legal_name": full_profile.get("mandate_legal_name"),
                 "country":full_profile.get("mandate_country",),
-                "timezone":full_profile.get("mandate_timezone","no timezone found"),
                 "user_language": full_profile.get("mandate_user_language", "fr"),
                 
                 # DMS (Document Management System)
@@ -755,6 +790,10 @@ class LLMSession:
                 # ⭐ WORKFLOW PARAMS (paramètres d'approbation)
                 "workflow_params": workflow_params
             }
+
+            # Injecter timezone uniquement si valide/résolue
+            if resolved_timezone and resolved_timezone != "no timezone found":
+                self.user_context["timezone"] = resolved_timezone
             
             # 🔍 DEBUG : Vérifier que workflow_params est bien inclus
             workflow_params = self.user_context.get("workflow_params", {})

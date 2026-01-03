@@ -1896,6 +1896,7 @@ class LPTClient:
                 notifications_payload.append({
                     "job_id": job_id,
                     "bank_account": account_name,
+                    "bank_account_id": account_id,  # ✅ NOUVEAU : ID du compte bancaire
                     "transactions": tx_payload
                 })
             
@@ -1956,6 +1957,7 @@ class LPTClient:
                                     batch_id=batch_id,
                                     job_id=notif["job_id"],
                                     bank_account=notif["bank_account"],
+                                    bank_account_id=notif.get("bank_account_id", ""),  # ✅ NOUVEAU : ID du compte bancaire
                                     transactions=notif["transactions"],
                                     user_context=context  # ✅ Pour mise à jour Redis
                                 )
@@ -2318,6 +2320,7 @@ class LPTClient:
                                 batch_id=batch_id,
                                 job_id=batch_id,
                                 bank_account=bank_account,
+                                bank_account_id=first_bank_account_id,  # ✅ NOUVEAU : ID du compte bancaire
                                 transactions=valid_transactions,
                                 user_context=context  # ✅ Pour mise à jour Redis
                             )
@@ -2919,6 +2922,7 @@ class LPTClient:
         batch_id: str,
         job_id: str,
         bank_account: str,
+        bank_account_id: str,  # ✅ NOUVEAU : ID du compte bancaire
         transactions: List[Dict[str, Any]],
         user_context: Optional[Dict] = None  # ⭐ NOUVEAU: Contexte pour mise à jour Redis
     ):
@@ -2934,6 +2938,7 @@ class LPTClient:
                 'job_id': job_id,
                 'batch_id': batch_id,
                 'bank_account': bank_account,
+                'bank_account_id': bank_account_id,  # ✅ NOUVEAU : ID du compte bancaire à la racine
                 'transactions': transactions,
                 'status': 'in queue',
                 'read': False,
@@ -3073,6 +3078,35 @@ class LPTClient:
             # ⭐ Construire le mandate_path complet (chemin Firebase réel)
             mandate_path = f'clients/{user_id}/bo_clients/{client_id}/mandates/{mandate_id}'
             
+            # ⭐ Résolution timezone (sans appel LLM)
+            # Aligner avec LLMManager: pas de défaut silencieux "UTC" si la timezone n'est pas définie.
+            resolved_timezone = full_profile.get("mandate_timezone")
+            if not resolved_timezone:
+                try:
+                    from .timezone_enum import get_timezone_for_country
+                    import pytz
+
+                    country_value = (full_profile.get("mandate_country") or "").strip()
+                    tz_guess = get_timezone_for_country(country_value) if country_value else None
+
+                    if tz_guess:
+                        try:
+                            pytz.timezone(tz_guess)
+                            firebase_service.save_timezone_to_mandate(mandate_path, tz_guess)
+                            resolved_timezone = tz_guess
+                            logger.info(
+                                f"[LPT_CONTEXT] ✅ Timezone auto-déduite depuis pays={country_value} → {tz_guess} (persistée)"
+                            )
+                        except Exception as persist_error:
+                            resolved_timezone = tz_guess
+                            logger.warning(
+                                f"[LPT_CONTEXT] ⚠️ Timezone auto-déduite ({tz_guess}) mais persistance a échoué: {persist_error}"
+                            )
+                except Exception as tz_error:
+                    logger.warning(
+                        f"[LPT_CONTEXT] ⚠️ Impossible de déduire la timezone depuis le pays: {tz_error}"
+                    )
+
             # ⭐ Construire le contexte avec les noms de champs standardisés
             context = {
                 # Identifiants
@@ -3114,13 +3148,16 @@ class LPTClient:
                 
                 # Localisation
                 "country": full_profile.get("mandate_country", ""),
-                "timezone": full_profile.get("mandate_timezone", "UTC"),
                 "user_language": full_profile.get("mandate_user_language", "fr"),
                 "base_currency": full_profile.get("mandate_base_currency", "CHF"),
                 
                 # ⭐ WORKFLOW PARAMS (paramètres d'approbation)
                 "workflow_params": full_profile.get("workflow_params", {})
             }
+
+            # Injecter timezone uniquement si résolue/valide
+            if resolved_timezone:
+                context["timezone"] = resolved_timezone
             
             logger.info(
                 f"[LPT_CONTEXT] ✅ Contexte reconstruit - "

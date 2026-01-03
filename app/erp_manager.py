@@ -362,6 +362,35 @@ class ODOO_KLK_VISION:
         
         return models.execute_kw(self.db, self.uid, self.password, model, method, args, kwargs)
 
+    def _execute_kw(self, model, method, args, kwargs=None):
+        """
+        Wrapper de compatibilité autour de execute_kw().
+
+        Objectif:
+        - Fournir l'API attendue par certaines méthodes/imports (ex: méthodes assets, OdooModelManager).
+        - Injecter un context multi-société "safe" (allowed_company_ids / company_id / force_company)
+          quand self.company_id est disponible, sans modifier les appels existants à execute_kw().
+        """
+        kw = dict(kwargs or {})
+
+        # Pendant __init__ (get_company_id), self.company_id n'est pas encore défini.
+        company_id = getattr(self, "company_id", None)
+        try:
+            company_id = int(company_id) if company_id not in (None, {}, "") else None
+        except Exception:
+            company_id = None
+
+        if company_id:
+            ctx = dict(kw.get("context") or {})
+            # Ne pas écraser un contexte explicitement fourni par l'appelant.
+            ctx.setdefault("allowed_company_ids", [company_id])
+            ctx.setdefault("company_id", company_id)
+            # Utilisé par certains modules pour forcer la société lors de créations/écritures.
+            ctx.setdefault("force_company", company_id)
+            kw["context"] = ctx
+
+        return self.execute_kw(model, method, args, kw)
+
     def test_connection(self):
         """
         Teste la connexion à Odoo et retourne un résultat avec un message approprié.
@@ -547,7 +576,406 @@ class ODOO_KLK_VISION:
         company_id = co_info['id']
         return company_id
 
-   
+    def _create_asset_group(self, name, account_asset_id, account_depreciation_id, account_depreciation_expense_id, method, method_number, method_period, journal_id=None, is_model=False):
+        """
+        Crée un groupe d'immobilisations ou un modèle d'actif dans Odoo.
+
+        Args:
+            name (str): Nom du groupe d'immobilisations.
+            account_asset_id (int): ID du compte d'immobilisation.
+            account_depreciation_id (int): ID du compte de dépréciation.
+            account_depreciation_expense_id (int): ID du compte de charges.
+            method (str): Méthode d'amortissement ('linear', 'degressive', etc.).
+            method_number (int): Nombre de périodes (durée totale de l'amortissement).
+            method_period (int): Durée de chaque période (en mois, trimestres, etc.).
+            journal_id (int, optional): ID du journal comptable associé. Default: None.
+            is_model (bool, optional): Indique si le groupe doit être un modèle d'actif. Default: False.
+
+        Returns:
+            dict: Dictionnaire contenant les détails de la catégorie ou du modèle d'actif créé.
+        """
+        asset_category_model = 'account.asset'
+
+        # Récupération de l'ID de la société
+        co_info = self.get_odoo_company_names(company_name=self.company_name)
+        print("Tentative de création d'un groupe d'immobilisations pour une société multi-sociétés.")
+        
+        if 'error' in co_info:
+            print(f"❌ Erreur : Impossible de récupérer les informations de la société '{self.company_name}'.")
+            return {}
+
+        company_id = co_info['id']
+
+        # Définir les valeurs pour le groupe ou le modèle d'actif
+        values = {
+            'name': name,
+            'account_asset_id': account_asset_id,
+            'account_depreciation_id': account_depreciation_id,
+            'account_depreciation_expense_id': account_depreciation_expense_id,
+            'method': method,
+            'method_number': method_number,
+            'method_period': method_period,
+            'company_id': company_id,
+        }
+
+        # Ajouter le journal si fourni
+        if journal_id:
+            values['journal_id'] = journal_id
+
+        # Si c'est un modèle d'actif, ajouter l'état 'model'
+        if is_model:
+            values['state'] = 'model'
+
+        try:
+            # Création du groupe d'immobilisations ou modèle d'actif
+            category_id = self._execute_kw(asset_category_model, 'create', [values])
+            print(f"✅ Groupe d'immobilisations ou modèle d'actif '{name}' créé avec succès (ID: {category_id}).")
+            return {'id': category_id, **values}
+        except Exception as e:
+            print(f"❌ Erreur lors de la création du groupe d'immobilisations ou du modèle d'actif : {str(e)}")
+            return {}
+
+    def _get_odoo_company_names(self, company_name=None):
+        """
+        Compat: méthode ajoutée lors d'une migration/import.
+        Ce repo possède déjà `get_odoo_company_names()`. On délègue pour éviter les doublons.
+        
+        Args:
+            company_name (str, optional): The name of the company to retrieve. Default is None.
+        
+        Returns:
+            dict: Dictionary containing the 'name' and 'id' of the company, or an error message.
+        """
+        return self.get_odoo_company_names(company_name=company_name)
+
+
+
+    def list_asset_models(self):
+        """Liste les modèles d’actifs (state='model') avec code, nom et id des comptes."""
+        co = self.get_odoo_company_names(company_name=self.company_name)
+        if 'error' in co:
+            return []
+
+        models = self._execute_kw(
+            'account.asset', 'search_read',
+            [[('state', '=', 'model'), ('company_id', '=', co['id'])]],
+            {'fields': [
+                'id', 'name',
+                'account_asset_id', 'account_depreciation_id',
+                'account_depreciation_expense_id',
+                'method', 'method_number', 'method_period',
+                'journal_id'
+            ]}
+        )
+
+        # 1) collecter tous les ids de comptes
+        acc_ids = set()
+        for m in models:
+            for f in ('account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id'):
+                if isinstance(m[f], list):
+                    acc_ids.add(m[f][0])
+
+        # 2) récupérer code + nom des comptes
+        id2code, id2name = {}, {}
+        if acc_ids:
+            accounts = self._execute_kw(
+                'account.account', 'search_read',
+                [[('id', 'in', list(acc_ids))]],
+                {'fields': ['id', 'code', 'name']}
+            )
+            id2code = {a['id']: a['code'] for a in accounts}
+            id2name = {a['id']: a['name'] for a in accounts}
+
+        # 3) enrichir chaque modèle
+        for m in models:
+            # asset
+            aid = m['account_asset_id'][0] if isinstance(m['account_asset_id'], list) else m['account_asset_id']
+            m['account_asset_number'] = id2code.get(aid)      # ← code
+            m['account_asset_name']   = id2name.get(aid)      # ← nom
+            m['account_asset_id']     = aid
+
+            # depreciation
+            did = m['account_depreciation_id'][0] if isinstance(m['account_depreciation_id'], list) else m['account_depreciation_id']
+            m['account_depreciation_number'] = id2code.get(did)
+            m['account_depreciation_name']   = id2name.get(did)
+            m['account_depreciation_id']     = did
+
+            # depreciation expense
+            eid = m['account_depreciation_expense_id'][0] if isinstance(m['account_depreciation_expense_id'], list) else m['account_depreciation_expense_id']
+            m['account_depreciation_expense_number'] = id2code.get(eid)
+            m['account_depreciation_expense_name']   = id2name.get(eid)
+            m['account_depreciation_expense_id']     = eid
+
+            # journal
+            if isinstance(m['journal_id'], list):
+                m['journal_name'] = m['journal_id'][1]
+                m['journal_id']   = m['journal_id'][0]
+
+        return models
+
+    def _create_journal(self, name, type, currency_id=None, specific_code=None):
+        """
+        Crée un journal dans Odoo, associé à la société définie dans self.company_name.
+
+        Args:
+            name (str): Nom du journal (exemple : "Ventes", "Achats", etc.).
+            type (str): Type du journal (valeurs possibles : 'sale', 'purchase', 'cash', 'bank', 'general').
+            currency_id (int, optional): ID de la devise associée au journal (par défaut : None).
+            specific_code (str, optional): Code spécifique pour les journaux de type 'general' (par défaut : None).
+            Soit 'Fixed asset' ou 'Accruals'
+
+        Returns:
+            dict: Détails du journal créé ou un message d'erreur.
+        """
+        journal_model = 'account.journal'
+
+        # Récupération de l'ID de la société associée à self.company_name
+        co_info = self.get_odoo_company_names(company_name=self.company_name)
+        if 'error' in co_info:
+            print(f"❌ Erreur : Impossible de récupérer les informations de la société '{self.company_name}'.")
+            return {}
+
+        company_id = co_info['id']  # ID de la société
+
+        # Méthode imbriquée pour générer un code unique
+        def generate_code(journal_type):
+            """
+            Génère un code unique basé sur le type du journal.
+
+            Args:
+                journal_type (str): Type du journal.
+
+            Returns:
+                str: Code unique.
+            """
+            # Préfixes pour chaque type de journal
+            prefixes = {
+                'sale': 'sa',
+                'purchase': 'pu',
+                'cash': 'ca',
+                'bank': 'ba',
+            }
+
+            # Gestion particulière pour le type 'general'
+            if journal_type == 'general':
+                if specific_code == 'Fixed asset':
+                    prefix = 'FA'
+                elif specific_code == 'Accruals':
+                    prefix = 'AC'
+                else:
+                    raise ValueError("L'argument 'specific_code' est obligatoire pour les journaux de type 'general'.")
+            else:
+                prefix = prefixes.get(journal_type)
+
+            if not prefix:
+                raise ValueError(f"Type de journal invalide : '{journal_type}'.")
+
+            # Rechercher les journaux existants pour le type donné
+            domain = [('type', '=', journal_type), ('company_id', '=', company_id)]
+            existing_journals = self._execute_kw(journal_model, 'search_read', [domain], {'fields': ['code']})
+
+            # Extraire les codes existants et générer le prochain code
+            existing_codes = [journal['code'] for journal in existing_journals if journal['code'].startswith(prefix)]
+            next_number = 1
+            if existing_codes:
+                # Trier les codes existants et incrémenter le plus grand
+                existing_numbers = [int(code[len(prefix):]) for code in existing_codes if code[len(prefix):].isdigit()]
+                next_number = max(existing_numbers) + 1 if existing_numbers else 1
+
+            return f"{prefix}{str(next_number).zfill(3)}"
+
+        # Générer le code pour le journal
+        try:
+            code = generate_code(type)
+        except ValueError as e:
+            print(f"❌ Erreur lors de la génération du code : {str(e)}")
+            return {'error': str(e)}
+
+        # Construction des valeurs pour la création
+        values = {
+            'name': name,
+            'type': type,
+            'code': code,  # Code généré
+            'company_id': company_id,  # Association de la société
+        }
+
+        # Ajouter la devise si spécifiée
+        if currency_id:
+            values['currency_id'] = currency_id
+
+        try:
+            # Création du journal
+            journal_id = self._execute_kw(journal_model, 'create', [values])
+            print(f"✅ Journal '{name}' créé avec succès pour la société '{self.company_name}' (ID: {journal_id}).")
+            return {'id': journal_id, **values}
+        except Exception as e:
+            print(f"❌ Erreur lors de la création du journal : {str(e)}")
+            return {'error': str(e)}
+
+    def create_asset_model_with_journal(self, name, account_asset_id, account_depreciation_id, account_depreciation_expense_id, method, method_number, method_period, is_model=True):
+        """
+        Crée un journal et un modèle d'actif dans Odoo, avec le journal associé au modèle.
+
+        Args:
+            name (str): Nom du modèle d'actif et du journal.
+            account_asset_id (int): ID du compte d'immobilisation.
+            account_depreciation_id (int): ID du compte de dépréciation.
+            account_depreciation_expense_id (int): ID du compte de charges.
+            method (str): Méthode d'amortissement ('linear', 'degressive', etc.).
+            method_number (int): Nombre de périodes (durée totale de l'amortissement).
+            method_period (int): Durée de chaque période (en mois, trimestres, etc.).
+            is_model (bool, optional): Indique si un modèle d'actif doit être créé. Default: True.
+
+        Returns:
+            dict: Détails du modèle d'actif et du journal créé.
+        """
+        # Création du journal
+        print("Création du journal associé...")
+        journal_name = name  # Utiliser le même nom que celui du modèle d'actif
+        journal_type = "general"  # Type par défaut pour les immobilisations
+        specific_code = "Fixed asset"  # Code spécifique par défaut pour les actifs fixes
+        journal = self._create_journal(name=journal_name, type=journal_type, specific_code=specific_code)
+
+        if 'error' in journal:
+            print(f"❌ Erreur lors de la création du journal : {journal['error']}")
+            return {'error': journal['error']}
+
+        journal_id = journal['id']
+        print(f"✅ Journal créé avec succès (ID: {journal_id}).")
+
+        # Création du modèle d'actif
+        print("Création du modèle d'actif associé...")
+        asset_model = self._create_asset_group(
+            name=name,
+            account_asset_id=account_asset_id,
+            account_depreciation_id=account_depreciation_id,
+            account_depreciation_expense_id=account_depreciation_expense_id,
+            method=method,
+            method_number=method_number,
+            method_period=method_period,
+            journal_id=journal_id,  # Associer le journal au modèle
+            is_model=is_model
+        )
+
+        if 'error' in asset_model:
+            print(f"❌ Erreur lors de la création du modèle d'actif : {asset_model['error']}")
+            return {'error': asset_model['error']}
+
+        print(f"✅ Modèle d'actif créé avec succès (ID: {asset_model['id']}).")
+        return {
+            'journal': journal,
+            'asset_model': asset_model
+        }
+
+    def update_asset_model(self, model_id: int, values: dict) -> dict:
+        """
+        Met à jour un modèle d'actif existant dans Odoo.
+
+        Args:
+            model_id (int): ID du modèle d'actif à mettre à jour.
+            values (dict): Dictionnaire des champs à mettre à jour.
+                Champs possibles:
+                - name (str): Nom du modèle
+                - method (str): Méthode d'amortissement ('linear', 'degressive')
+                - method_number (int): Nombre de périodes
+                - method_period (int): Durée de chaque période (1, 3, 6, 12 mois)
+                - account_asset_id (int): ID du compte d'immobilisation
+                - account_depreciation_id (int): ID du compte de dépréciation
+                - account_depreciation_expense_id (int): ID du compte de charges
+
+        Returns:
+            dict: {'success': True} ou {'error': str}
+        """
+        try:
+            # Vérifier que le modèle existe et appartient à cette société
+            co = self.get_odoo_company_names(company_name=self.company_name)
+            if 'error' in co:
+                return {'error': f"Société non trouvée: {self.company_name}"}
+
+            existing = self._execute_kw(
+                'account.asset', 'search_read',
+                [[('id', '=', model_id), ('state', '=', 'model'), ('company_id', '=', co['id'])]],
+                {'fields': ['id', 'name']}
+            )
+
+            if not existing:
+                return {'error': f"Modèle d'actif ID {model_id} non trouvé ou non accessible"}
+
+            # Filtrer les valeurs valides
+            allowed_fields = {
+                'name', 'method', 'method_number', 'method_period',
+                'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id'
+            }
+            filtered_values = {k: v for k, v in values.items() if k in allowed_fields and v is not None}
+
+            if not filtered_values:
+                return {'error': "Aucun champ valide à mettre à jour"}
+
+            # Mettre à jour
+            self._execute_kw('account.asset', 'write', [[model_id], filtered_values])
+            print(f"✅ Modèle d'actif ID {model_id} mis à jour avec succès: {filtered_values}")
+
+            return {'success': True, 'updated_fields': list(filtered_values.keys())}
+
+        except Exception as e:
+            print(f"❌ Erreur lors de la mise à jour du modèle d'actif: {str(e)}")
+            return {'error': str(e)}
+
+    def delete_asset_model(self, model_id: int) -> dict:
+        """
+        Supprime un modèle d'actif dans Odoo.
+        Note: Seuls les modèles (state='model') peuvent être supprimés, pas les actifs en cours.
+
+        Args:
+            model_id (int): ID du modèle d'actif à supprimer.
+
+        Returns:
+            dict: {'success': True} ou {'error': str}
+        """
+        try:
+            # Vérifier que le modèle existe, est bien un modèle (pas un actif), et appartient à cette société
+            co = self.get_odoo_company_names(company_name=self.company_name)
+            if 'error' in co:
+                return {'error': f"Société non trouvée: {self.company_name}"}
+
+            existing = self._execute_kw(
+                'account.asset', 'search_read',
+                [[('id', '=', model_id), ('state', '=', 'model'), ('company_id', '=', co['id'])]],
+                {'fields': ['id', 'name', 'journal_id']}
+            )
+
+            if not existing:
+                return {'error': f"Modèle d'actif ID {model_id} non trouvé ou non supprimable (doit être un modèle, pas un actif)"}
+
+            model_name = existing[0].get('name', 'Unknown')
+            journal_id = existing[0].get('journal_id')
+            if isinstance(journal_id, list):
+                journal_id = journal_id[0]
+
+            # Supprimer le modèle d'actif
+            self._execute_kw('account.asset', 'unlink', [[model_id]])
+            print(f"✅ Modèle d'actif '{model_name}' (ID: {model_id}) supprimé avec succès")
+
+            # Optionnel: Supprimer le journal associé si existant et non utilisé
+            if journal_id:
+                try:
+                    # Vérifier que le journal n'est pas utilisé ailleurs
+                    journal_usage = self._execute_kw(
+                        'account.move', 'search_count',
+                        [[('journal_id', '=', journal_id)]]
+                    )
+                    if journal_usage == 0:
+                        self._execute_kw('account.journal', 'unlink', [[journal_id]])
+                        print(f"✅ Journal associé (ID: {journal_id}) supprimé")
+                except Exception as je:
+                    print(f"⚠️ Impossible de supprimer le journal associé: {je}")
+
+            return {'success': True, 'deleted_model': model_name}
+
+        except Exception as e:
+            print(f"❌ Erreur lors de la suppression du modèle d'actif: {str(e)}")
+            return {'error': str(e)}
+
     def get_accounts_with_active_tax_codes(self):
         """Liste tous les comptes configurés sur des codes TVA actifs"""
         tax_lines = self.execute_kw(

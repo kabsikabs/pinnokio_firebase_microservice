@@ -316,6 +316,36 @@ class DriveClientServiceSingleton:
             print(f"Erreur lors de la recherche du dossier : {e}")
             return None
 
+    def folder_exists_by_id(self, user_id, folder_id):
+        """
+        Vérifie si un dossier existe réellement dans Google Drive par son ID.
+        
+        Args:
+            user_id (str): ID de l'utilisateur Firebase
+            folder_id (str): ID du dossier à vérifier
+            
+        Returns:
+            bool: True si le dossier existe et n'est pas dans la corbeille, False sinon
+        """
+        try:
+            # Utiliser files().get() pour vérifier l'existence du dossier
+            file = self.drive_service.files().get(
+                fileId=folder_id, 
+                fields='id, trashed, mimeType'
+            ).execute()
+            
+            # Vérifier que c'est bien un dossier et qu'il n'est pas dans la corbeille
+            is_folder = file.get('mimeType') == 'application/vnd.google-apps.folder'
+            is_not_trashed = not file.get('trashed', False)
+            
+            return is_folder and is_not_trashed
+        except Exception as e:
+            # Si une erreur survient (dossier introuvable, permissions, etc.), le dossier n'existe pas
+            print(f"⚠️ Erreur lors de la vérification du dossier {folder_id}: {e}")
+            return False
+
+
+
     def Archived_Pinnokio_folder(self,user_id:str, folder_id: str):
         """Version singleton avec user_id obligatoire"""
         try:

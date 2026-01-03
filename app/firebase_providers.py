@@ -868,9 +868,116 @@ class FirebaseManagement:
             print(f"Erreur lors de la récupération des départements: {str(e)}")
             return []
 
-
-
     def get_batch_details(self,user_id, batch_id):
+        """
+        Récupère les détails d'un lot bancaire à partir de son ID dans notifications.
+        
+        ⚠️ CHANGEMENT : Lit maintenant depuis notifications/{batch_id} au lieu de task_manager/{batch_id}
+        Les transactions sont extraites directement depuis le tableau 'transactions' au niveau racine.
+        
+        Args:
+            user_id (str): ID de l'utilisateur Firebase
+            batch_id (str): ID du lot à récupérer
+            
+        Returns:
+            dict: Dictionnaire contenant le job_id, bank_account et transactions, ou None si non trouvé
+        """
+        try:
+            if not user_id:
+                print("Erreur: L'ID utilisateur est requis pour accéder aux détails du lot")
+                return None
+            
+            # ⚠️ CHANGEMENT : Chemin vers le document notifications au lieu de task_manager
+            notifications_path = f"clients/{user_id}/notifications"
+            notification_doc_ref = self.db.collection(notifications_path).document(batch_id)
+            notification_doc = notification_doc_ref.get()
+            
+            if not notification_doc.exists:
+                print(f"Aucun document notifications trouvé pour le lot {batch_id}")
+                return None
+            
+            notification_data = notification_doc.to_dict()
+            
+            # Structure de base pour les détails du lot
+            batch_details = {
+                'job_id': notification_data.get('job_id', batch_id),  # Utiliser job_id du document ou batch_id en fallback
+                'bank_account': '',
+                'transactions': [],
+                'start_instructions': '',  # Laissé vide car non présent dans notifications
+            }
+            
+            # ⚠️ CHANGEMENT : Récupérer le compte bancaire directement au niveau racine
+            if 'bank_account' in notification_data:
+                batch_details['bank_account'] = notification_data['bank_account']
+            
+            if 'bank_account_id' in notification_data:
+                batch_details['bank_account_id'] = notification_data['bank_account_id']
+
+            if 'start_instructions' in notification_data:
+                batch_details['start_instructions'] = notification_data['start_instructions']
+
+            # ⚠️ CHANGEMENT : Récupérer les transactions directement au niveau racine
+            if 'transactions' in notification_data and isinstance(notification_data['transactions'], list):
+                batch_details['transactions'] = notification_data['transactions']
+            else:
+                print(f"⚠️ Aucune transaction trouvée dans le document notifications pour le lot {batch_id}")
+
+            return batch_details
+            
+        except Exception as e:
+            print(f"Erreur lors de la récupération des détails du lot {batch_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def delete_task_manager_document(self, user_id: str, document_id: str):
+        """
+        Supprime un document dans task_manager par son ID.
+        
+        Args:
+            user_id (str): ID de l'utilisateur Firebase
+            document_id (str): ID du document à supprimer (chemin composé)
+            
+        Returns:
+            bool: True si succès, False sinon
+        """
+        try:
+            if user_id:
+                base_path = f'clients/{user_id}/task_manager'
+            else:
+                base_path = 'task_manager'
+            
+            task_manager_ref = self.db.collection(base_path).document(document_id)
+            
+            # Vérifier si le document existe
+            doc = task_manager_ref.get()
+            
+            if doc.exists:
+                # Supprimer les sous-collections d'abord
+                subcollections = task_manager_ref.collections()
+                for subcollection in subcollections:
+                    sub_docs = subcollection.stream()
+                    for sub_doc in sub_docs:
+                        print(f"Suppression du document {sub_doc.id} dans la sous-collection {subcollection.id} de task_manager/{document_id}")
+                        sub_doc.reference.delete()
+                
+                # Supprimer le document principal
+                task_manager_ref.delete()
+                print(f"Document {document_id} supprimé de task_manager.")
+                return True
+            else:
+                print(f"Document {document_id} non trouvé dans task_manager.")
+                return False
+                
+        except Exception as e:
+            print(f"Erreur lors de la suppression du document {document_id} dans task_manager: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+
+
+    def x_get_batch_details(self,user_id, batch_id):
         """
         Récupère les détails d'un lot bancaire à partir de son ID dans task_manager.
         
@@ -6348,9 +6455,10 @@ class FirebaseManagement:
                 
     def restart_job(self,user_id, job_id: str) -> bool:
         """
-        Redémarre un job en supprimant les données initiales et le rapport d'audit.
+        Redémarre un job en supprimant les données initiales, le rapport d'audit et les événements.
         Supprime les champs: APBookeeper_step_status, current_step, Document_information
         Supprime les documents: initial_data, audit_report
+        Supprime la collection: events
         
         Args:
             user_id (str): L'identifiant de l'utilisateur
@@ -6475,6 +6583,21 @@ class FirebaseManagement:
                     print(f"Successfully deleted audit_report for job {job_id}")
             else:
                 print(f"audit_report document does not exist for job {job_id}, skipping deletion")
+            
+            # Supprimer la collection 'events'
+            print(f"Deleting events collection for job {job_id}...")
+            events_collection_ref = job_doc_ref.collection('events')
+            events_docs = events_collection_ref.get()
+            
+            deleted_events_count = 0
+            for event_doc in events_docs:
+                event_doc.reference.delete()
+                deleted_events_count += 1
+            
+            if deleted_events_count > 0:
+                print(f"Successfully deleted {deleted_events_count} events for job {job_id}")
+            else:
+                print(f"No events found in 'events' collection for job {job_id}")
             
             print(f"Successfully restarted job {job_id}")
             return True

@@ -982,15 +982,6 @@ class ListenersManager:
                 self.logger.debug("invoice_changes_no_data uid=%s job_id=%s reason=no_initial_data", uid, job_id)
                 return
 
-            # Champs de facture à surveiller
-            invoice_fields = [
-                "invoiceReference", "recipient", "invoiceDescription",
-                "totalAmountDueVATExcluded", "totalAmountDueVATIncluded", "VATAmount",
-                "recipientAddress", "dueDate", "sender", "invoiceDate",
-                "currency", "VATPercentages", "sender_country",
-                "account_number", "account_name"
-            ]
-
             # Construire la clé de cache
             cache_key = f"{uid}_invoice_{job_id}"
             previous_data = self._workflow_cache.get(cache_key, {})
@@ -998,16 +989,22 @@ class ListenersManager:
             self.logger.debug("invoice_changes_cache_check uid=%s job_id=%s cache_key=%s has_previous=%s",
                             uid, job_id, cache_key, bool(previous_data))
 
-            # Détecter les changements
+            # Détecter les changements (diff dynamique sur TOUTES les clés, incluant invoice_lines)
             invoice_changes = {}
-            for field in invoice_fields:
-                current_value = initial_data.get(field)
+            for field, current_value in initial_data.items():
                 previous_value = previous_data.get(field)
 
                 if current_value != previous_value:
-                    invoice_changes[field] = current_value
-                    self.logger.debug("invoice_field_changed uid=%s job_id=%s field=%s previous=%s current=%s",
-                                    uid, job_id, field, previous_value, current_value)
+                    # Conversion sécurisée pour JSON (ex: dates Firestore ou datetime Python)
+                    serializable_value = current_value
+                    if hasattr(current_value, "to_datetime"):  # Cas des Timestamps Firestore
+                        serializable_value = current_value.to_datetime().isoformat()
+                    elif isinstance(current_value, datetime):
+                        serializable_value = current_value.isoformat()
+                    
+                    invoice_changes[field] = serializable_value
+                    self.logger.debug("invoice_field_changed uid=%s job_id=%s field=%s",
+                                    uid, job_id, field)
 
             # Publier seulement s'il y a des changements
             if invoice_changes:
@@ -1154,9 +1151,9 @@ class ListenersManager:
             
             # Construire le chemin Firestore à écouter
             if user_id:
-                firestore_path = f'clients/{user_id}/task_manager/{batch_id}'
+                firestore_path = f'clients/{user_id}/notifications/{batch_id}'
             else:
-                firestore_path = f"task_manager/{batch_id}"
+                firestore_path = f"notifications/{batch_id}"
             
             # Créer le listener Firestore
             document_ref = self.db.document(firestore_path)
@@ -1241,19 +1238,16 @@ class ListenersManager:
             for doc in doc_snapshot:
                 current_data = doc.to_dict()
                 
-                # Vérifier la structure: jobs_data -> transactions
-                if 'jobs_data' not in current_data:
-                    self.logger.debug("transaction_status_no_jobs_data user_id=%s batch_id=%s", user_id, batch_id)
+                # Vérifier la structure: transactions directement dans le document notifications
+                if 'transactions' not in current_data:
+                    self.logger.debug("transaction_status_no_transactions user_id=%s batch_id=%s", user_id, batch_id)
                     return
                 
-                jobs_data = current_data['jobs_data']
-                if not jobs_data or len(jobs_data) == 0:
-                    self.logger.debug("transaction_status_empty_jobs user_id=%s batch_id=%s", user_id, batch_id)
+                # Extraire directement les transactions depuis le document notifications
+                current_transactions = current_data.get('transactions', [])
+                if not current_transactions or len(current_transactions) == 0:
+                    self.logger.debug("transaction_status_empty_transactions user_id=%s batch_id=%s", user_id, batch_id)
                     return
-                
-                # Prendre le premier job (généralement il n'y en a qu'un)
-                job_data = jobs_data[0]
-                current_transactions = job_data.get('transactions', [])
                 
                 changes_detected = False
                 transaction_changes = {}
@@ -1371,14 +1365,40 @@ class ListenersManager:
                     self.logger.error("workflow_job_snapshot_error uid=%s job_id=%s error=%s", 
                                     uid, job_id, repr(e), exc_info=True)
             
-            # Attacher le listener sur le document spécifique
-            unsub = doc_ref.on_snapshot(on_job_snapshot)
+            # Attacher le listener sur le document principal (pour les steps)
+            unsub_job = doc_ref.on_snapshot(on_job_snapshot)
             
-            # Sauvegarder le callback de désinscription
+            # --- Listener 2: Document Facture (initial_data) ---
+            # Puisque 'document' est une sous-collection, on doit l'écouter spécifiquement
+            invoice_doc_ref = doc_ref.collection("document").document("initial_data")
+            
+            def on_invoice_snapshot(inv_snapshot, inv_changes, inv_read_time):
+                """Callback spécifique pour les changements de données de facture"""
+                try:
+                    snapshot = inv_snapshot
+                    if isinstance(snapshot, list) and snapshot:
+                        snapshot = snapshot[0]
+                    
+                    if not snapshot or not getattr(snapshot, "exists", False):
+                        return
+                    
+                    inv_data = snapshot.to_dict() or {}
+                    # Envelopper les données pour correspondre à la structure attendue par _process_invoice_changes
+                    wrapped_data = {"document": {"initial_data": inv_data}}
+                    
+                    self.logger.debug("workflow_invoice_snapshot_received uid=%s job_id=%s", uid, job_id)
+                    self._process_invoice_changes(uid, job_id, wrapped_data, None)
+                except Exception as e:
+                    self.logger.error("workflow_invoice_snapshot_error uid=%s job_id=%s error=%s", 
+                                    uid, job_id, repr(e))
+
+            unsub_invoice = invoice_doc_ref.on_snapshot(on_invoice_snapshot)
+            
+            # Sauvegarder les callbacks de désinscription (on en a maintenant deux)
             with self._lock:
-                self._workflow_unsubs[key] = [unsub]
+                self._workflow_unsubs[key] = [unsub_job, unsub_invoice]
             
-            self.logger.info("workflow_listener_attached_for_job uid=%s job_id=%s", uid, job_id)
+            self.logger.info("workflow_listener_attached_for_job uid=%s job_id=%s (2 listeners active)", uid, job_id)
             return True
             
         except Exception as e:

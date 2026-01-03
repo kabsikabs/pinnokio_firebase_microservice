@@ -403,3 +403,107 @@ async def switch_to_job(self, new_job_id: str):
 **Auteur** : Architecture Team  
 **Version** : 1.0.0
 
+********************MISE A JOUR*****************
+[17 tools called]
+
+Voici une documentation détaillée des valeurs stockées dans `self.validator` et synchronisées en temps réel vers Firebase dans le chemin `/task_manager/{job_id}`.
+
+### 📋 Documentation Technique : Synchronisation `task_manager`
+
+Cette documentation décrit les champs persistés dans Firebase pour permettre au frontend de suivre l'état de l'extraction et de la validation des documents.
+
+#### 1. Informations de l'En-tête (Header)
+Ces valeurs représentent les données extraites directement du document.
+
+| Nom du champ | Type | Description |
+| :--- | :--- | :--- |
+| `sender` | `String` | Nom du fournisseur (expéditeur). |
+| `recipient` | `String` | Nom de l'entreprise destinataire. |
+| `invoiceReference` | `String` | Numéro de facture ou référence unique. |
+| `invoiceDate` | `String` | Date d'émission (format `YYYY-MM-DD`). |
+| `dueDate` | `String` | Date d'échéance (format `YYYY-MM-DD`). |
+| `currency` | `String` | Code de la devise (ex: `CHF`, `EUR`). |
+| `totalAmountDueVATIncluded` | `Number` | Montant total toutes taxes comprises (TTC). |
+| `totalAmountDueVATExcluded` | `Number` | Montant total hors taxes (HT). |
+| `VATAmount` | `Number` | Montant total de la TVA. |
+| `VATPercentages` | `List[Number]` | Liste des taux de TVA détectés (ex: `[7.7, 8.1]`). |
+
+#### 2. Informations Fournisseur & Partenaire (Master Data)
+Champs liés à la correspondance avec la base de données Odoo.
+
+| Nom du champ | Type | Description |
+| :--- | :--- | :--- |
+| `partner_id` | `Integer` | ID interne Odoo du partenaire. |
+| `supplier_id` | `Integer` | Alias de `partner_id` pour la compatibilité. |
+| `sender_country_code` | `String` | Code ISO du pays (ex: `CH`, `FR`). |
+| `sender_country_id` | `Integer` | ID Odoo du pays. |
+| `senderAddress` | `String` | Adresse complète extraite. |
+| `sender_zip` | `String` | Code postal. |
+| `sender_city` | `String` | Ville. |
+| `sender_vat` | `String` | Numéro de TVA du fournisseur. |
+| `sender_email` | `String` | Adresse email de contact. |
+| `sender_phone` | `String` | Numéro de téléphone. |
+
+#### 3. Paramètres Comptables & Processus
+Données utilisées pour la génération des écritures dans l'ERP.
+
+| Nom du champ | Type | Description |
+| :--- | :--- | :--- |
+| `accounting_date` | `String` | Date de comptabilisation (format `YYYY-MM-DD`). |
+| `account_ids` | `List[Integer]` | Liste des IDs Odoo des comptes de charge/immobilisation. |
+| `tax_ids` | `List[Integer]` | Liste des IDs Odoo des taxes applicables. |
+| `currency_id` | `Integer` | ID Odoo de la devise utilisée. |
+| `currency_xrate` | `Number` | Taux de change appliqué (si devise étrangère). |
+| `new_invoice_y_n` | `String` | Statut du document (`NEW_INVOICE` ou `EXISTING_INVOICE`). |
+| `booking_type` | `String` | Mode de saisie (`single_line` ou `multi_lines`). |
+| `booking_method` | `String` | Logique appliquée (`historical` ou `complex`). |
+
+#### 4. Structures Complexes (Payloads JSON)
+Données structurées pour les flux avancés (ex: Immobilisations).
+
+- **`accounting_lines_to_post`** : Un objet JSON contenant le détail des lignes (nom, compte, montant, taxes, analytique).
+- **`immobilisation_data`** : Un dictionnaire contenant les paramètres spécifiques aux actifs à créer (modèle, durée, montant amortissable).
+- **`created_asset_ids`** : Une liste d'entiers contenant les IDs des actifs déjà créés dans Odoo.
+- **`asset_creation_completed`** : Un booléen indiquant si l'étape de création des actifs est terminée.
+
+---
+
+### 🚀 Format du Payload de Mise à Jour (Real-time)
+
+Le frontend reçoit les mises à jour via un `patch` sur le document Firebase. 
+
+**Exemple de payload envoyé lors d'une mise à jour :**
+```json
+{
+  "sender": "Swisscom AG",
+  "invoiceReference": "INV-2023-001",
+  "partner_id": 4502,
+  "totalAmountDueVATIncluded": 125.50,
+  "accounting_date": "2023-12-25",
+  "account_ids": [1024, 1025],
+  "asset_creation_completed": false
+}
+```
+
+**Note pour le Frontend :** Les mises à jour sont partielles (seuls les champs modifiés sont envoyés). Le backend détecte dynamiquement **tous les changements** dans `document/initial_data` (incluant `invoice_lines`, `totalAmountDueVATIncluded`, etc.) et les transmet via l'événement `workflow.invoice_update`.
+
+#### 🧩 Format de l'événement `workflow.invoice_update`
+
+```json
+{
+  "type": "workflow.invoice_update",
+  "uid": "USER_ID",
+  "job_id": "JOB_ID",
+  "timestamp": "ISO-8601",
+  "payload": {
+    "invoice_changes": {
+      "invoiceReference": "INV-2025-001",
+      "invoice_lines": [
+        {"name": "Produit A", "quantity": 1, "price_unit": 100.0}
+      ]
+    }
+  }
+}
+```
+
+Il est recommandé d'écouter les changements sur `task_manager/{job_id}` pour refléter les modifications en temps réel dans l'interface utilisateur.
