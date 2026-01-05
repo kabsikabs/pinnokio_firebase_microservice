@@ -4891,6 +4891,9 @@ class FirebaseManagement:
                     if context_doc.id == "accounting_context":
                         accounting_data = context_data.get('data', {}).get('accounting_context_0', {})
                         mandate["context_details"]["accounting_context"] = accounting_data
+                    elif context_doc.id == "bank_context":
+                        bank_data = context_data.get('data', {}).get('bank_context_0', '')
+                        mandate["context_details"]["bank_context"] = bank_data
                     elif context_doc.id == "general_context":
                         general_data = context_data.get('context_company_profile_report', '')
                         mandate["context_details"]["general_context"] = general_data
