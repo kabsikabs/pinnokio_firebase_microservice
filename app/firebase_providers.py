@@ -3700,8 +3700,8 @@ class FirebaseManagement:
 
     def create_or_get_chat_threadkey(self,user_id, department_index):
         departments = {
-            "Bankbookeeper": "Bankbookeeper",
-            "Router": "Router",
+            "banker": "banker",
+            "router": "router",
             "APbookeeper": "APbookeeper",
             "HRmanager": "HRmanager",
             "Admanager": "Admanager",

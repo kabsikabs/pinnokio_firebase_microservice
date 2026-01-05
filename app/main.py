@@ -1136,6 +1136,25 @@ class InvalidateContextRequest(BaseModel):
     collection_name: str = Field(..., description="Chemin de collecte (mandate_path)")
 
 
+class CloudWatchListRequest(BaseModel):
+    """Requête pour lister les streams de logs CloudWatch."""
+    limit: Optional[int] = None
+    order_by: str = 'LastEventTime'
+    descending: bool = True
+    days: Optional[int] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
+
+class CloudWatchDownloadRequest(BaseModel):
+    """Requête pour télécharger un log CloudWatch."""
+    log_stream_name: str = Field(..., description="Nom du stream de logs à télécharger")
+    output_file: Optional[str] = None
+    json_format: bool = False
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
+
 @app.post("/invalidate-context")
 async def invalidate_context(req: InvalidateContextRequest):
     """
@@ -1858,3 +1877,161 @@ def _get_task_status(task_id: str) -> dict:
             "error": str(e),
             "task_id": task_id
         }
+
+
+# ═══════════════════════════════════════════════════════════════
+# CLOUDWATCH LOGS ENDPOINTS
+# ═══════════════════════════════════════════════════════════════
+
+@app.post("/cloudwatch/logs/list")
+async def cloudwatch_list_logs(req: CloudWatchListRequest, authorization: str | None = Header(default=None, alias="Authorization")):
+    """
+    Liste les streams de logs CloudWatch pour le groupe /ecs/pinnokio_microservice.
+    
+    Peut être appelé depuis l'extérieur avec authentification.
+    """
+    try:
+        from .tools.cloudwatch_logs import CloudWatchLogsExtractor
+        from datetime import datetime, timedelta
+        
+        _require_auth(authorization)
+        
+        extractor = CloudWatchLogsExtractor(
+            region_name=settings.aws_region_name,
+            log_group_name='/ecs/pinnokio_microservice'
+        )
+        
+        # Calculer les dates si spécifiées
+        start_time = None
+        end_time = None
+        
+        if req.days:
+            start_time = datetime.now() - timedelta(days=req.days)
+        
+        if req.start_date:
+            start_time = datetime.fromisoformat(req.start_date)
+        
+        if req.end_date:
+            end_time = datetime.fromisoformat(req.end_date)
+        
+        streams = extractor.list_log_streams(
+            limit=req.limit,
+            order_by=req.order_by,
+            descending=req.descending,
+            start_time=start_time,
+            end_time=end_time
+        )
+        
+        return {
+            "status": "success",
+            "count": len(streams),
+            "streams": streams
+        }
+    except Exception as e:
+        logger.error("cloudwatch_list_logs_error error=%s", repr(e))
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération des logs: {str(e)}")
+
+
+@app.post("/cloudwatch/logs/download")
+async def cloudwatch_download_log(req: CloudWatchDownloadRequest, authorization: str | None = Header(default=None, alias="Authorization")):
+    """
+    Télécharge un log CloudWatch depuis un stream spécifique.
+    
+    Peut être appelé depuis l'extérieur avec authentification.
+    Retourne le contenu du log au format texte ou JSON selon le paramètre json_format.
+    """
+    try:
+        from .tools.cloudwatch_logs import CloudWatchLogsExtractor
+        from datetime import datetime
+        import tempfile
+        import os
+        
+        _require_auth(authorization)
+        
+        extractor = CloudWatchLogsExtractor(
+            region_name=settings.aws_region_name,
+            log_group_name='/ecs/pinnokio_microservice'
+        )
+        
+        # Calculer les dates si spécifiées
+        start_time = None
+        end_time = None
+        
+        if req.start_date:
+            start_time = datetime.fromisoformat(req.start_date)
+        
+        if req.end_date:
+            end_time = datetime.fromisoformat(req.end_date)
+        
+        # Créer un fichier temporaire si aucun fichier de sortie n'est spécifié
+        temp_file_created = False
+        if not req.output_file:
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json' if req.json_format else '.log') as tmp_file:
+                req.output_file = tmp_file.name
+                temp_file_created = True
+        
+        # Télécharger le log
+        if req.json_format:
+            output_file = extractor.download_log_json(
+                log_stream_name=req.log_stream_name,
+                output_file=req.output_file,
+                start_time=start_time,
+                end_time=end_time
+            )
+        else:
+            output_file = extractor.download_log(
+                log_stream_name=req.log_stream_name,
+                output_file=req.output_file,
+                start_time=start_time,
+                end_time=end_time
+            )
+        
+        # Lire le contenu du fichier
+        with open(output_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Nettoyer le fichier temporaire si créé
+        if temp_file_created:
+            try:
+                os.unlink(output_file)
+            except:
+                pass
+        
+        return {
+            "status": "success",
+            "log_stream_name": req.log_stream_name,
+            "format": "json" if req.json_format else "text",
+            "content": content if not req.json_format else _json.loads(content),
+            "file_path": output_file
+        }
+    except Exception as e:
+        logger.error("cloudwatch_download_log_error error=%s", repr(e))
+        raise HTTPException(status_code=500, detail=f"Erreur lors du téléchargement du log: {str(e)}")
+
+
+@app.get("/cloudwatch/logs/info")
+async def cloudwatch_logs_info(authorization: str | None = Header(default=None, alias="Authorization")):
+    """
+    Récupère les informations sur le groupe de journaux CloudWatch.
+    
+    Peut être appelé depuis l'extérieur avec authentification.
+    """
+    try:
+        from .tools.cloudwatch_logs import CloudWatchLogsExtractor
+        
+        _require_auth(authorization)
+        
+        extractor = CloudWatchLogsExtractor(
+            region_name=settings.aws_region_name,
+            log_group_name='/ecs/pinnokio_microservice'
+        )
+        
+        info = extractor.get_log_group_info()
+        
+        return {
+            "status": "success",
+            "info": info
+        }
+    except Exception as e:
+        logger.error("cloudwatch_logs_info_error error=%s", repr(e))
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération des informations: {str(e)}")

@@ -391,7 +391,7 @@ Permet d’obtenir une **vue générale** des travaux exécutés (jobs) stockés
 ## Paramètres
 | Paramètre | Type | Description |
 |-----------|------|-------------|
-| `department` | string | Filtre exact sur `department` (optionnel) |
+| `department` | string | Filtre exact sur `department` (optionnel). ⚠️ **Casse sensible** : valeurs valides : `"banker"`, `"router"`, `"APbookeeper"` |
 | `status_final` | string | Filtre exact sur `status_final` (optionnel) |
 | `status` | string | Filtre exact sur `status` runtime (optionnel) |
 | `last_outcome` | string | Filtre exact sur `last_outcome` (info\\|success\\|failure\\|pending) (optionnel) |
@@ -402,6 +402,12 @@ Permet d’obtenir une **vue générale** des travaux exécutés (jobs) stockés
 | `start_after_job_id` | string | Pagination: reprendre après ce job_id (optionnel) |
 | `include_raw` | boolean | Si true, inclut le doc complet en plus des champs utiles (défaut: false) |
 
+## Valeurs valides pour `department`
+⚠️ **Important** : Le filtre est **exact** (==), la casse compte !
+- `"banker"` (tout en minuscule)
+- `"router"` (tout en minuscule)
+- `"APbookeeper"` (A et P majuscules, reste en minuscule)
+
 ## Exemples d'utilisation
 
 **1) Derniers travaux en erreur :**
@@ -409,9 +415,19 @@ Permet d’obtenir une **vue générale** des travaux exécutés (jobs) stockés
 {"status_final":"error","limit":25}
 ```
 
-**2) Travaux d’un département sur une période :**
+**2) Travaux d'un département sur une période :**
 ```json
 {"department":"router","started_from":"2025-12-01T00:00:00Z","started_to":"2025-12-20T23:59:59Z","limit":50}
+```
+
+**3) Travaux du département banker :**
+```json
+{"department":"banker","status_final":"completed","limit":50}
+```
+
+**4) Travaux APbookeeper en attente :**
+```json
+{"department":"APbookeeper","status":"pending","limit":100}
 ```
 
 ## Output

@@ -114,8 +114,8 @@ Les documents `task_manager` contiennent un champ `department_data` qui est un d
       "partner_name": "Client ABC",
       // ... autres champs spécifiques au département banker
     },
-    "APBookeeper": {
-      // ... champs spécifiques APBookeeper (si présent)
+    "APbookeeper": {
+      // ... champs spécifiques APbookeeper (si présent)
     },
     "router": {
       // ... champs spécifiques router (si présent)
