@@ -2124,8 +2124,7 @@ class FirebaseManagement:
             print(f"✅ [MIGRATION] {migrated_count} expenses migrées vers sous-collection items")
             
             # Supprimer le champ items du document (garder le document pour la sous-collection)
-            from google.cloud.firestore import FieldValue
-            doc_ref.update({"items": FieldValue.delete()})
+            doc_ref.update({"items": firestore.DELETE_FIELD})
             print(f"🗑️ [MIGRATION] Champ 'items' supprimé du document: {base_doc_path}")
             
             print(f"✅ [MIGRATION] Migration terminée avec succès pour: {mandate_path}")
@@ -2262,7 +2261,6 @@ class FirebaseManagement:
             bool: True si succès, False sinon
         """
         try:
-            from google.cloud.firestore import FieldValue
             base_doc_path = f"{mandate_path}/working_doc/expenses_details"
             items_collection_path = f"{base_doc_path}/items"
             
@@ -2288,7 +2286,7 @@ class FirebaseManagement:
                     if isinstance(items.get(expense_id), dict) and items[expense_id].get("status") == "close":
                         print("⚠️ [FIREBASE] Impossible de supprimer une expense avec status 'close'")
                         return False
-                    doc_ref.update({f"items.{expense_id}": FieldValue.delete()})
+                    doc_ref.update({f"items.{expense_id}": firestore.DELETE_FIELD})
                     print(f"✅ [FIREBASE] Expense {expense_id} supprimée avec succès (champ items)")
                     return True
             
@@ -2303,7 +2301,7 @@ class FirebaseManagement:
                     if isinstance(expenses_data.get(expense_id), dict) and expenses_data[expense_id].get("status") == "close":
                         print("⚠️ [FIREBASE] Impossible de supprimer une expense avec status 'close'")
                         return False
-                    legacy_doc_ref.update({f"expense_details.{expense_id}": FieldValue.delete()})
+                    legacy_doc_ref.update({f"expense_details.{expense_id}": firestore.DELETE_FIELD})
                     print(f"✅ [FIREBASE] Expense {expense_id} supprimée avec succès (legacy)")
                     return True
             
@@ -5607,14 +5605,15 @@ class FirebaseManagement:
         except Exception as e:
             print(f"Erreur lors de la suppression des sous-collections : {str(e)}")
 
-    def delete_client_if_no_mandates(self, user_id, client_name: str) -> tuple[bool, str]:
+    def delete_client_if_no_mandates(self, user_id, client_name: str) -> tuple[bool, str, list]:
         """
         Supprime un client sous clients/{user_id}/bo_clients uniquement s'il n'a pas de sous-collection 'mandates'.
 
         Returns:
-            (deleted, message)
+            (deleted, message, companies_list)
             - deleted True si la suppression a été effectuée, False sinon
             - message explicatif (en anglais en cas de blocage)
+            - companies_list: liste des noms de sociétés attachées (vide si suppression ok)
         """
         try:
             if user_id:
@@ -5624,16 +5623,25 @@ class FirebaseManagement:
 
             query = self.db.collection(base_path).where(filter=FieldFilter('client_name', '==', client_name)).limit(1).get()
             if not query:
-                return False, "Client not found."
+                return False, "Client not found.", []
 
             client_ref = query[0].reference
 
-            # Check mandates existence
-            mandates_cursor = client_ref.collection('mandates').limit(1).get()
-            if mandates_cursor:
+            # Check mandates existence and get their names
+            mandates_docs = client_ref.collection('mandates').stream()
+            companies_list = []
+            for mandate_doc in mandates_docs:
+                mandate_data = mandate_doc.to_dict()
+                # Get company name from contact_space_name or legal_name
+                company_name = mandate_data.get('contact_space_name') or mandate_data.get('legal_name') or mandate_doc.id
+                if mandate_data.get('isactive', True):  # Only include active mandates
+                    companies_list.append(company_name)
+            
+            if companies_list:
                 return (
                     False,
-                    "This client has mandates. Please delete the associated mandate(s) first before deleting the client."
+                    "This client has companies attached. Please delete the associated company/companies in Settings before deleting the client.",
+                    companies_list
                 )
 
             # Safe delete: remove subcollections (if any other) then the document
@@ -5642,10 +5650,81 @@ class FirebaseManagement:
                 self._delete_collection_recursive(subcoll)
 
             client_ref.delete()
-            return True, "Client deleted successfully."
+            return True, "Client deleted successfully.", []
         except Exception as e:
             print(f"Erreur delete_client_if_no_mandates: {e}")
-            return False, "Unexpected error while deleting client."
+            return False, "Unexpected error while deleting client.", []
+
+    def create_new_client(self, user_id: str, first_name: str, last_name: str, client_email: str) -> dict:
+        """
+        Crée un nouveau client dans Firebase sous clients/{user_id}/bo_clients.
+
+        Args:
+            user_id: ID de l'utilisateur Firebase
+            first_name: Prénom du client
+            last_name: Nom du client
+            client_email: Email du client
+
+        Returns:
+            dict: {
+                'success': bool,
+                'message': str,
+                'client_uuid': str (si success),
+                'client_name': str (si success)
+            }
+        """
+        try:
+            if not user_id:
+                return {'success': False, 'message': 'User ID is required.'}
+            
+            if not first_name or not last_name:
+                return {'success': False, 'message': 'First name and last name are required.'}
+            
+            if not client_email:
+                return {'success': False, 'message': 'Client email is required.'}
+
+            # Construct client name
+            client_name = f"{first_name.strip()} {last_name.strip()}"
+            
+            # Check if client with same name already exists
+            base_path = f"clients/{user_id}/bo_clients"
+            existing_query = self.db.collection(base_path).where(
+                filter=FieldFilter('client_name', '==', client_name)
+            ).limit(1).get()
+            
+            if existing_query:
+                return {'success': False, 'message': f'A client named "{client_name}" already exists.'}
+
+            # Generate unique client_uuid
+            client_uuid = f"klk_client_{str(uuid.uuid4())[:8]}"
+            
+            # Prepare client data
+            client_data = {
+                'client_name': client_name,
+                'client_mail': client_email.strip(),
+                'client_uuid': client_uuid,
+                'client_address': '',
+                'client_phone': '',
+                'created_at': firestore.SERVER_TIMESTAMP
+            }
+
+            # Add document to collection (auto-generated ID)
+            doc_ref = self.db.collection(base_path).add(client_data)
+            doc_id = doc_ref[1].id
+            
+            print(f"✅ Nouveau client créé: {client_name} (uuid: {client_uuid}, doc_id: {doc_id})")
+            
+            return {
+                'success': True,
+                'message': f'Client "{client_name}" created successfully.',
+                'client_uuid': client_uuid,
+                'client_name': client_name,
+                'doc_id': doc_id
+            }
+
+        except Exception as e:
+            print(f"❌ Erreur create_new_client: {e}")
+            return {'success': False, 'message': f'Error creating client: {str(e)}'}
 
     def add_message_to_internal_message(self,user_id, job_id, message, sent_to, sent_from):
         

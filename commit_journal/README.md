@@ -89,3 +89,4 @@ git log --since="1 week ago" --pretty=format:"%H|%an|%ai|%s" --no-color
 - Les commits les plus récents en haut de chaque fichier
 - Format cohérent pour faciliter la recherche et la lecture
 
+
