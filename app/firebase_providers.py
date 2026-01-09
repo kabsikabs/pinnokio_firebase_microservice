@@ -5400,11 +5400,22 @@ class FirebaseManagement:
 
 
 
-    def delete_items_by_job_id(self,user_id, job_ids):
+    def delete_items_by_job_id(self, user_id, job_ids, mandate_path=None):
+        """
+        Supprime les items par job_id dans task_manager, klk_vision et expenses_details.
+        
+        Args:
+            user_id: ID de l'utilisateur Firebase
+            job_ids: Liste de job_ids à supprimer
+            mandate_path: Chemin du mandat (optionnel, pour suppression expenses_details si EXbookeeper)
+        """
         if not isinstance(job_ids, list):
             job_ids = [job_ids]
         
         for job_id in job_ids:
+            exbookeeper_detected = False  # Flag pour détecter si EXbookeeper est concerné
+            klk_job_id = None  # Pour stocker le job_id original (format klk_xxx) si trouvé
+            
             print(f"Suppression de la collection sous task_manager pour le job_id: {job_id}")
             if user_id:
                 base_path = f'clients/{user_id}/task_manager'
@@ -5433,13 +5444,81 @@ class FirebaseManagement:
             docs = klk_vision_ref.stream()
             
             for doc in docs:
-                journal_ref = doc.reference.collection('journal')
-                journal_docs = journal_ref.where(filter=FieldFilter('job_id', '==', job_id)).stream()
+                doc_data = doc.to_dict()
+                department = doc_data.get('departement', '') if doc_data else ''
                 
-                for jdoc in journal_docs:
-                    print(f"Suppression du document avec job_id: {job_id} dans klk_vision/{doc.id}/journal")
+                journal_ref = doc.reference.collection('journal')
+                
+                # Chercher par job_id OU drive_file_id
+                # 1. D'abord chercher par job_id
+                journal_docs_by_job_id = list(journal_ref.where(filter=FieldFilter('job_id', '==', job_id)).stream())
+                
+                # 2. Ensuite chercher par drive_file_id
+                journal_docs_by_drive_id = list(journal_ref.where(filter=FieldFilter('drive_file_id', '==', job_id)).stream())
+                
+                # Combiner les résultats (éviter les doublons par ID de document)
+                seen_doc_ids = set()
+                all_journal_docs = []
+                for jdoc in journal_docs_by_job_id + journal_docs_by_drive_id:
+                    if jdoc.id not in seen_doc_ids:
+                        seen_doc_ids.add(jdoc.id)
+                        all_journal_docs.append(jdoc)
+                
+                for jdoc in all_journal_docs:
+                    # Récupérer le job_id original du document avant suppression
+                    jdoc_data = jdoc.to_dict()
+                    original_job_id = jdoc_data.get('job_id', '') if jdoc_data else ''
+                    
+                    print(f"Suppression du document avec job_id/drive_file_id: {job_id} dans klk_vision/{doc.id}/journal")
                     jdoc.reference.delete()
-        print(f"Suppression terminée pour le job_id: {job_id}")
+                    
+                    # Détecter si EXbookeeper est concerné et sauvegarder le job_id original
+                    if department == 'EXbookeeper':
+                        exbookeeper_detected = True
+                        # Sauvegarder le job_id original s'il commence par "klk"
+                        if original_job_id and original_job_id.startswith("klk"):
+                            klk_job_id = original_job_id
+                            print(f"🔍 [EXPENSES] Job_id original récupéré: {klk_job_id}")
+            
+            # Étape 3: Suppression dans expenses_details si EXbookeeper détecté et mandate_path fourni
+            if mandate_path and exbookeeper_detected:
+                try:
+                    expenses_items_path = f"{mandate_path}/working_doc/expenses_details/items"
+                    deleted = False
+                    
+                    # Essayer d'abord avec le job_id passé en argument
+                    expense_doc_path = f"{expenses_items_path}/{job_id}"
+                    expense_doc_ref = self.db.document(expense_doc_path)
+                    expense_doc = expense_doc_ref.get()
+                    
+                    if expense_doc.exists:
+                        expense_doc_ref.delete()
+                        print(f"🗑️ [EXPENSES] Document supprimé: {expense_doc_path}")
+                        deleted = True
+                    else:
+                        print(f"⚠️ [EXPENSES] Document non trouvé avec job_id: {expense_doc_path}")
+                    
+                    # Si pas trouvé et qu'on a un klk_job_id, essayer avec celui-ci
+                    if not deleted and klk_job_id:
+                        expense_doc_path_klk = f"{expenses_items_path}/{klk_job_id}"
+                        expense_doc_ref_klk = self.db.document(expense_doc_path_klk)
+                        expense_doc_klk = expense_doc_ref_klk.get()
+                        
+                        if expense_doc_klk.exists:
+                            expense_doc_ref_klk.delete()
+                            print(f"🗑️ [EXPENSES] Document supprimé avec klk_job_id: {expense_doc_path_klk}")
+                            deleted = True
+                        else:
+                            print(f"⚠️ [EXPENSES] Document non trouvé avec klk_job_id: {expense_doc_path_klk}")
+                    
+                    if not deleted:
+                        print(f"⚠️ [EXPENSES] Aucun document expense trouvé pour job_id={job_id} ou klk_job_id={klk_job_id}")
+                            
+                except Exception as e:
+                    print(f"⚠️ [EXPENSES] Erreur suppression expenses_details (non bloquant): {e}")
+        
+            print(f"Suppression terminée pour le job_id: {job_id}")
+        
         return True
         
 
@@ -5477,9 +5556,9 @@ class FirebaseManagement:
             return None, None
 
     # Alias pour la compatibilité RPC - redirige vers la version synchrone
-    def async_delete_items_by_job_id(self, user_id, job_ids):
+    def async_delete_items_by_job_id(self, user_id, job_ids, mandate_path=None):
         """Alias pour delete_items_by_job_id pour compatibilité RPC."""
-        return self.delete_items_by_job_id(user_id, job_ids)
+        return self.delete_items_by_job_id(user_id, job_ids, mandate_path=mandate_path)
 
     def delete_task_executions_collection(self, user_id: str, mandate_path: str, thread_key: str) -> bool:
         """

@@ -90,3 +90,4 @@ git log --since="1 week ago" --pretty=format:"%H|%an|%ai|%s" --no-color
 - Format cohérent pour faciliter la recherche et la lecture
 
 
+
