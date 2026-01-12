@@ -289,6 +289,44 @@ def finalize_daily_chat_billing(target_date: str | None = None, days_back: int =
                 expense_ref.set(expense_payload, merge=True)
                 expenses_written += 1
                 mandate_paths.add(mandate_path)
+                
+                # ═══════════════════════════════════════════════════════════════
+                # Indexation task_manager selon CONTRAT_UNIFIE_BILLING_TASK_MANAGER
+                # Indexer lors de la finalisation journalière avec les totaux cumulatifs
+                # ═══════════════════════════════════════════════════════════════
+                try:
+                    # Construire billing depuis les données token_usage agrégées
+                    billing_data = {
+                        "billed": False,  # Sera mis à True par le wallet
+                        "billing_timestamp": datetime.now(timezone.utc).isoformat(),
+                        "billing_kind": "chat_daily",
+                        "billing_date": td,
+                        "token_usage_job_id": job_id,
+                        "total_input_tokens": total_input,
+                        "total_output_tokens": total_output,
+                        "total_tokens": total_tokens,
+                        "total_buy_price": data.get("total_buy_price", 0.0),
+                        "total_sales_price": data.get("total_sales_price", 0.0),
+                        "collection_name": collection_name,
+                    }
+                    
+                    # Utiliser les mêmes valeurs que expense_payload pour cohérence
+                    task_file_name = expense_payload["file_name"]  # "Chat usage DD/MM/YYYY"
+                    task_department = expense_payload["function"]  # "chat"
+                    
+                    # Indexation best-effort dans task_manager
+                    # Champs écrits au même niveau que billing: timestamp, file_name, department
+                    fbm._upsert_task_manager_billing_index(
+                        user_id=user_id,
+                        task_doc_id=job_id,  # task_doc_id = job_id selon contrat
+                        billing_data=billing_data,
+                        department=task_department,  # Valeur du champ function
+                        file_name=task_file_name,    # Même nom que dans expense_payload
+                        mandate_path=mandate_path
+                    )
+                except Exception as e:
+                    # Best-effort: ne pas casser la facturation si l'indexation échoue
+                    logger.warning(f"[BILLING_CRON] Erreur non bloquante indexation task_manager: {e}")
 
             # Mettre à jour le solde une fois par mandate_path
             for mp in mandate_paths:

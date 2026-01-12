@@ -932,7 +932,10 @@ class FirebaseManagement:
 
     def delete_task_manager_document(self, user_id: str, document_id: str):
         """
-        Supprime un document dans task_manager par son ID.
+        ⚠️ PURGE (et non suppression totale) d'un document dans task_manager par son ID.
+        
+        Objectif: nettoyer les données de travail (payload, events, sous-collections, etc.)
+        tout en PRÉSERVANT le champ `billing` si présent (facturation immuable).
         
         Args:
             user_id (str): ID de l'utilisateur Firebase
@@ -953,6 +956,17 @@ class FirebaseManagement:
             doc = task_manager_ref.get()
             
             if doc.exists:
+                # Préserver la facturation + champs "index UI" nécessaires au dashboard si présents
+                current_data = doc.to_dict() or {}
+                billing_data = current_data.get("billing", None)
+                mandate_path = current_data.get("mandate_path", None)
+                file_name = current_data.get("file_name", None)
+                department = current_data.get("department", None)
+                departement = current_data.get("departement", None)
+                # timestamps possibles selon les writers
+                timestamp = current_data.get("timestamp", None)
+                updated_at = current_data.get("updated_at", None)
+
                 # Supprimer les sous-collections d'abord
                 subcollections = task_manager_ref.collections()
                 for subcollection in subcollections:
@@ -960,10 +974,30 @@ class FirebaseManagement:
                     for sub_doc in sub_docs:
                         print(f"Suppression du document {sub_doc.id} dans la sous-collection {subcollection.id} de task_manager/{document_id}")
                         sub_doc.reference.delete()
-                
-                # Supprimer le document principal
-                task_manager_ref.delete()
-                print(f"Document {document_id} supprimé de task_manager.")
+
+                # Remplacer le document principal en gardant uniquement les champs immuables/nécessaires:
+                # `billing` + contexte société (`mandate_path`) + index UI (`file_name`, département, timestamps).
+                # Sinon, comportement historique: suppression totale.
+                if billing_data is not None:
+                    task_manager_ref.set(
+                        {
+                            "billing": billing_data,
+                            **({"mandate_path": mandate_path} if mandate_path is not None else {}),
+                            **({"file_name": file_name} if file_name is not None else {}),
+                            **({"department": department} if department is not None else {}),
+                            **({"departement": departement} if departement is not None else {}),
+                            **({"timestamp": timestamp} if timestamp is not None else {}),
+                            **({"updated_at": updated_at} if updated_at is not None else {}),
+                            "purged": True,
+                            "purged_at": firestore.SERVER_TIMESTAMP,
+                        },
+                        merge=False,
+                    )
+                    print(f"Document {document_id} purgé (billing préservé) dans task_manager.")
+                else:
+                    task_manager_ref.delete()
+                    print(f"Document {document_id} supprimé de task_manager (aucun billing à préserver).")
+
                 return True
             else:
                 print(f"Document {document_id} non trouvé dans task_manager.")
@@ -977,69 +1011,7 @@ class FirebaseManagement:
 
 
 
-    def x_get_batch_details(self,user_id, batch_id):
-        """
-        Récupère les détails d'un lot bancaire à partir de son ID dans task_manager.
-        
-        Args:
-            batch_id (str): ID du lot à récupérer
-            
-        Returns:
-            dict: Dictionnaire contenant le job_id, bank_account et transactions, ou None si non trouvé
-        """
-        try:
-            if not user_id:
-                print("Erreur: L'ID utilisateur est requis pour accéder aux détails du lot")
-                return None
-            
-            # Chemin direct vers le document task_manager
-            task_manager_path = f"clients/{user_id}/task_manager"
-            task_doc_ref = self.db.collection(task_manager_path).document(batch_id)
-            task_doc = task_doc_ref.get()
-            
-            if not task_doc.exists:
-                print(f"Aucun document trouvé pour le lot {batch_id}")
-                return None
-            
-            task_data = task_doc.to_dict()
-            
-            # Structure de base pour les détails du lot
-            batch_details = {
-                'job_id': batch_id,
-                'bank_account': '',
-                'transactions': [],
-                'start_instructions':'',
-            }
-            
-            # Récupérer les données bancaires
-            if 'jobs_data' in task_data and isinstance(task_data['jobs_data'], list) and len(task_data['jobs_data']) > 0:
-                # Prendre le premier élément de jobs_data
-                jobs_data = task_data['jobs_data'][0]
-                
-                # Récupérer le compte bancaire
-                if 'bank_account' in jobs_data:
-                    batch_details['bank_account'] = jobs_data['bank_account']
-                
-                # Récupérer les transactions
-                if 'transactions' in jobs_data and isinstance(jobs_data['transactions'], list):
-                    batch_details['transactions'] = jobs_data['transactions']
-            
-            if 'start_instructions' in task_data:
-                batch_details['start_instructions']=task_data['start_instructions']
-
-            # Si bank_account n'a pas été trouvé dans jobs_data, essayer au niveau principal
-            if not batch_details['bank_account'] and 'journal_name' in task_data:
-                batch_details['bank_account'] = task_data['journal_name']
-            
-
-            return batch_details
-            
-        except Exception as e:
-            print(f"Erreur lors de la récupération des détails du lot {batch_id}: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
+    
     def delete_specific_pending_transactions(self, mandate_path, transaction_ids):
         """
         Supprime les transactions en attente spécifiées par leurs IDs du document Firebase
@@ -1851,6 +1823,78 @@ class FirebaseManagement:
             print(f"Erreur lors du téléchargement des données d'utilisation: {e}")
             return False
 
+    def _upsert_task_manager_billing_index(
+        self,
+        user_id: str,
+        task_doc_id: str,
+        billing_data: dict,
+        department: Optional[str] = None,
+        file_name: Optional[str] = None,
+        mandate_path: Optional[str] = None
+    ) -> bool:
+        """
+        Indexe les données de facturation dans task_manager selon le contrat unifié.
+        
+        ⚠️ Best-effort: ne doit pas casser la facturation si l'écriture échoue.
+        ⚠️ Appelé UNIQUEMENT lors de la finalisation journalière (finalize_daily_chat_billing)
+        
+        Contrat:
+        - On **écrase** toujours le sous-objet `task_manager.billing` (pas d'addition)
+        - On écrit avec merge=True pour ne pas toucher aux autres champs UI
+        - L'indexation ne doit jamais bloquer la facturation
+        
+        Champs écrits au même niveau que billing:
+        - timestamp: Firestore SERVER_TIMESTAMP (date de finalisation)
+        - file_name: Nom du fichier (ex: "Chat usage 12/01/2026")
+        - department: Valeur du champ function (ex: "chat")
+        
+        Args:
+            user_id: Firebase user ID
+            task_doc_id: Document ID dans task_manager (généralement = job_id)
+            billing_data: Objet billing à indexer (totaux cumulatifs)
+            department: Département (ex: "chat", "router") - sera aussi écrit comme champ racine
+            file_name: Nom de fichier pour affichage UI
+            mandate_path: Chemin du mandat (pour cohérence)
+            
+        Returns:
+            bool: True si succès, False sinon (non bloquant)
+        """
+        try:
+            task_manager_ref = self.db.document(f"clients/{user_id}/task_manager/{task_doc_id}")
+            
+            # Construire le patch selon le contrat
+            # Champs au même niveau que billing (demandé par l'utilisateur)
+            patch = {
+                "job_id": task_doc_id,
+                "billing": billing_data,  # Écrasement du sous-objet billing (pas d'addition)
+                "timestamp": firestore.SERVER_TIMESTAMP,  # Date de finalisation (format Firestore Timestamp)
+            }
+            
+            # Champs UI index au même niveau que billing
+            if department:
+                patch["department"] = department
+            if file_name:
+                patch["file_name"] = file_name
+            if mandate_path:
+                patch["mandate_path"] = mandate_path
+            
+            # Écriture avec merge=True (ne pas écraser les autres champs)
+            task_manager_ref.set(patch, merge=True)
+            
+            logger.debug(
+                f"[BILLING] Indexation task_manager réussie: {task_doc_id} "
+                f"(tokens={billing_data.get('total_tokens', 0)}, "
+                f"price={billing_data.get('total_sales_price', 0.0)})"
+            )
+            return True
+            
+        except Exception as e:
+            logger.warning(
+                f"[BILLING] Erreur non bloquante indexation task_manager "
+                f"(task_doc_id={task_doc_id}): {e}"
+            )
+            return False
+
 
 
     def test_strip(self):
@@ -1983,6 +2027,187 @@ class FirebaseManagement:
         except Exception as e:
             print(f"Erreur lors de la récupération des dépenses: {e}")
             return {}
+    
+    def fetch_task_manager_details(self, user_id: str, job_id: str, department: str, mandate_path: str = None) -> Optional[dict]:
+        """
+        Récupère les détails task_manager pour un job donné (APBookeeper et Router uniquement).
+        
+        Args:
+            user_id: ID de l'utilisateur Firebase
+            job_id: ID du job (correspond au job_id dans expenses - peut contenir un préfixe département)
+            department: Département du job ("apbookeeper", "router", etc.)
+            mandate_path: Chemin du mandat (optionnel, pour validation)
+            
+        Returns:
+            dict avec structure:
+            {
+                "payload": {...},           # Données du payload
+                "metrics": {...},            # Métriques de traitement (APBookeeper_step_status, etc.)
+                "initial_data": {...},       # Données depuis document/initial_data
+                "departement": str,          # Validation du département
+                "found": bool                # Si le document existe
+            }
+            ou None si erreur
+        """
+        try:
+            if not user_id or not job_id or not department:
+                print(f"❌ [TASK_MANAGER] Paramètres manquants: user_id={user_id}, job_id={job_id}, department={department}")
+                return None
+            
+            # Normaliser le département
+            department_lower = department.lower()
+            
+            # ══════════════════════════════════════════════════════════════
+            # Nettoyer le job_id : enlever les préfixes de département
+            # Le job_id dans expenses peut être "Apbookeeper_klk_xxx" ou "router_xxx"
+            # Mais dans task_manager, le document ID est juste "klk_xxx"
+            # ══════════════════════════════════════════════════════════════
+            clean_job_id = job_id
+            department_prefixes = [
+                "Apbookeeper_", "apbookeeper_", "APBookeeper_",
+                "Router_", "router_", "ROUTER_",
+                "Banker_", "banker_", "BANKER_",
+                "Bank_", "bank_", "BANK_"
+            ]
+            
+            for prefix in department_prefixes:
+                if clean_job_id.startswith(prefix):
+                    clean_job_id = clean_job_id[len(prefix):]
+                    print(f"🔧 [TASK_MANAGER] Job ID nettoyé: {job_id} → {clean_job_id}")
+                    break
+            
+            # Construire le chemin task_manager
+            if user_id:
+                task_manager_path = f'clients/{user_id}/task_manager'
+            else:
+                task_manager_path = 'task_manager'
+            
+            # Essayer d'abord avec le job_id nettoyé
+            task_doc_ref = self.db.collection(task_manager_path).document(clean_job_id)
+            task_doc = task_doc_ref.get()
+            
+            # Si pas trouvé avec le job_id nettoyé, essayer avec le job_id original
+            if not task_doc.exists and clean_job_id != job_id:
+                print(f"🔍 [TASK_MANAGER] Document non trouvé avec {clean_job_id}, tentative avec {job_id}")
+                task_doc_ref = self.db.collection(task_manager_path).document(job_id)
+                task_doc = task_doc_ref.get()
+            
+            if not task_doc.exists:
+                print(f"⚠️ [TASK_MANAGER] Document non trouvé: essayé {task_manager_path}/{clean_job_id} et {task_manager_path}/{job_id}")
+                return {
+                    "found": False,
+                    "payload": {},
+                    "metrics": {},
+                    "initial_data": {},
+                    "departement": None
+                }
+            
+            # Utiliser l'ID du document réellement trouvé
+            found_doc_id = task_doc.id
+            task_data = task_doc.to_dict() or {}
+            
+            # Validation: vérifier que le département correspond (case-insensitive)
+            task_department = task_data.get('departement', '').lower()
+            # Aussi chercher dans le champ 'department' (sans 'e')
+            if not task_department:
+                task_department = task_data.get('department', '').lower()
+            
+            if task_department and task_department != department_lower:
+                print(f"⚠️ [TASK_MANAGER] Département mismatch: attendu={department_lower}, trouvé={task_department}")
+                # On continue quand même, mais on log l'avertissement
+            else:
+                print(f"✓ [TASK_MANAGER] Document trouvé: {found_doc_id} (département: {task_department or department_lower})")
+            
+            # Extraire les données selon le département
+            result = {
+                "found": True,
+                "job_id_clean": found_doc_id,
+                "job_id_original": job_id,
+                "departement": task_data.get('departement') or task_data.get('department', department),
+                "status": task_data.get('status', ''),
+                "uri_file_link": task_data.get('uri_file_link', ''),
+                "payload": {},
+                "metrics": {},
+                "initial_data": {},
+                "department_data": {}
+            }
+            
+            # 1. Payload avec jobs_data
+            if 'payload' in task_data and isinstance(task_data['payload'], dict):
+                result["payload"] = task_data['payload']
+            
+            # 2. Métriques de traitement (spécifique à APBookeeper)
+            if department_lower == "apbookeeper":
+                if 'APBookeeper_step_status' in task_data:
+                    result["metrics"]["step_status"] = task_data['APBookeeper_step_status']
+            
+            # 3. department_data - Données métier du département
+            # Contient les données extraites spécifiques au département (APbookeeper, Router, etc.)
+            if 'department_data' in task_data and isinstance(task_data['department_data'], dict):
+                result["department_data"] = task_data['department_data']
+                print(f"📊 [TASK_MANAGER] department_data trouvé avec clés: {list(task_data['department_data'].keys())}")
+            
+            # 4. Données initiales depuis document/initial_data (sous-collection)
+            try:
+                initial_data_path = f'{task_manager_path}/{found_doc_id}/document/initial_data'
+                initial_data_ref = self.db.document(initial_data_path)
+                initial_data_doc = initial_data_ref.get()
+                
+                if initial_data_doc.exists:
+                    initial_data_dict = initial_data_doc.to_dict() or {}
+                    result["initial_data"] = initial_data_dict.get('initial_data', {})
+            except Exception as e:
+                print(f"⚠️ [TASK_MANAGER] Erreur récupération initial_data: {e}")
+                # Non bloquant, on continue
+            
+            print(f"✅ [TASK_MANAGER] Détails récupérés pour {job_id} (département: {department_lower})")
+            return result
+            
+        except Exception as e:
+            print(f"❌ [TASK_MANAGER] Erreur lors de la récupération des détails: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def list_task_manager_by_mandate_path(self, user_id: str, mandate_path: str, limit: int = 2000) -> list:
+        """
+        Liste les documents `clients/{user_id}/task_manager` filtrés par `mandate_path`.
+
+        Pourquoi:
+        - `task_manager` contient tous les jobs du compte utilisateur.
+        - Le dashboard doit afficher uniquement la société sélectionnée (mandate_path courant).
+        """
+        try:
+            if not user_id or not mandate_path:
+                return []
+
+            task_manager_path = f"clients/{user_id}/task_manager"
+            ref = self.db.collection(task_manager_path)
+
+            try:
+                query = ref.where(filter=FieldFilter("mandate_path", "==", mandate_path)).limit(int(limit))
+                docs = query.stream()
+                out = []
+                for doc in docs:
+                    data = doc.to_dict() or {}
+                    data["id"] = doc.id
+                    out.append(data)
+                return out
+            except Exception:
+                # Fallback: stream + filter en python (si FieldFilter/index non dispo)
+                docs = ref.stream()
+                out = []
+                for doc in docs:
+                    data = doc.to_dict() or {}
+                    if data.get("mandate_path") == mandate_path:
+                        data["id"] = doc.id
+                        out.append(data)
+                        if len(out) >= int(limit):
+                            break
+                return out
+        except Exception as e:
+            print(f"❌ Erreur list_task_manager_by_mandate_path: {e}")
+            return []
     
     def fetch_expenses_by_mandate(self, mandate_path: str, status: Optional[str] = None) -> Dict:
         """
@@ -5404,6 +5629,8 @@ class FirebaseManagement:
         """
         Supprime les items par job_id dans task_manager, klk_vision et expenses_details.
         
+        ⚠️ IMPORTANT: côté task_manager, on fait un PURGE qui PRÉSERVE le champ `billing` si présent.
+        
         Args:
             user_id: ID de l'utilisateur Firebase
             job_ids: Liste de job_ids à supprimer
@@ -5416,24 +5643,12 @@ class FirebaseManagement:
             exbookeeper_detected = False  # Flag pour détecter si EXbookeeper est concerné
             klk_job_id = None  # Pour stocker le job_id original (format klk_xxx) si trouvé
             
-            print(f"Suppression de la collection sous task_manager pour le job_id: {job_id}")
-            if user_id:
-                base_path = f'clients/{user_id}/task_manager'
-            else:
-                base_path = 'task_manager'
-            task_manager_ref = self.db.collection(base_path).document(job_id)
-            
-            # Étape 1: Parcours et suppression des sous-collections de task_manager
-            subcollections = task_manager_ref.collections()
-            for subcollection in subcollections:
-                docs = subcollection.stream()
-                for doc in docs:
-                    print(f"Suppression du document {doc.id} dans la sous-collection {subcollection.id} de task_manager/{job_id}")
-                    doc.reference.delete()
-
-            # Suppression du document principal de task_manager
-            task_manager_ref.delete()
-            print(f"Document {job_id} supprimé de task_manager.")
+            # Étape 1: PURGE task_manager (préserver billing)
+            print(f"[PURGE] task_manager pour le job_id: {job_id} (préserver billing si présent)")
+            try:
+                self.delete_task_manager_document(user_id=user_id, document_id=job_id)
+            except Exception as e:
+                print(f"⚠️ Erreur purge task_manager pour {job_id} (non bloquant): {e}")
             
             # Étape 2: Parcours et suppression dans klk_vision/journal
             if user_id:
@@ -8235,43 +8450,10 @@ class FirebaseManagement:
         return list(set(shared_clients))
 
     
-    def delete_document_and_subcollections(self, document_ref):
-        """Supprime un document et toutes ses sous-collections."""
-        # Supprimer les documents dans les sous-collections
-        for sub_collection in document_ref.collections():
-            sub_docs = sub_collection.stream()
-            for sub_doc in sub_docs:
-                sub_doc.reference.delete()
-        
-        # Supprimer le document lui-même
-        document_ref.delete()
-        print(f"Document et ses sous-collections supprimés avec succès : {document_ref.id}")
-
     
     
-    def x_delete_messages_in_internal_message_by_id(self,user_id, document_id):
-        """Supprime tous les documents dans la sous-collection 'messages' de 'internal_message' pour un document spécifié."""
-        
-        # Construire le chemin de référence au document spécifié dans task_manager
-        if user_id:
-            base_path = f'clients/{user_id}/task_manager'
-        else:
-            base_path = 'task_manager'
-        document_ref = self.db.collection(base_path).document(document_id)
-        
-        # Accéder à la sous-collection 'internal_message', puis à 'messages'
-        messages_ref = document_ref.collection('internal_message').document('messages')
-        
-        try:
-            # Itérer sur chaque document dans la sous-collection 'messages' et les supprimer
-            messages_docs = messages_ref.collection('messages').stream()
-            for message_doc in messages_docs:
-                message_doc.reference.delete()
-            print(f"Tous les messages ont été supprimés pour le document ID: {document_id}")
-        except Exception as e:
-            print(f"Erreur lors de la suppression des messages pour le document ID {document_id}: {e}")
-
     
+        
     def create_or_get_working_doc_2(self, mandate_path):
         """
         Crée ou récupère le document 'pending_item_docsheet' dans la collection 'working_doc'

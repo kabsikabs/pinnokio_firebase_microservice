@@ -198,13 +198,80 @@ Planification effective (repo):
 - Celery Beat: **toutes les heures** (ex: `:20 UTC`) avec `days_back=7`.
 
 Règles:
-- par défaut (sans `target_date`), traiter les **N derniers jours hors aujourd’hui** (rattrapage).
+- par défaut (sans `target_date`), traiter les **N derniers jours hors aujourd'hui** (rattrapage).
 - pour chaque date:
   - query collection group `token_usage` où:
     - `billing_kind == "chat_daily"`
     - `billing_date == YYYY-MM-DD`
   - upsert `{mandate_path}/billing/topping/expenses/{job_id}` avec `billed=false`
+  - **indexation dans `task_manager`** (voir section ci-dessous)
   - appeler `get_user_balance(mandate_path)` (lock Redis)
+
+---
+
+## Indexation task_manager (contrat unifié)
+
+### Objectif
+Le dashboard peut afficher les dépenses (tokens + coût + état facturé) **sans jointure** en lisant **uniquement** `clients/{user_id}/task_manager/{job_id}`.
+
+### Quand l'indexation est effectuée
+- **UNIQUEMENT lors de la finalisation journalière** (`finalize_daily_chat_billing`)
+- ⚠️ **Pas à chaque `upload_token_usage`** (les données sont en cours d'accumulation pendant la journée)
+
+### Fonction d'indexation
+- `FirebaseManagement._upsert_task_manager_billing_index()`
+- **Fichier**: `app/firebase_providers.py`
+
+### Chemin Firestore
+- `clients/{user_id}/task_manager/{job_id}`
+- Le `job_id` utilisé est le même que celui de `token_usage` et `expenses` (format `chat:{user_id}:{collection_name}:{YYYY-MM-DD}`)
+
+### Structure du document task_manager
+
+Champs écrits au même niveau (racine du document):
+
+| Champ | Type | Description |
+|-------|------|-------------|
+| `job_id` | string | ID du job (= task_doc_id) |
+| `timestamp` | Firestore Timestamp | Date de finalisation (SERVER_TIMESTAMP) |
+| `file_name` | string | Nom pour affichage UI (ex: "Chat usage 12/01/2026") |
+| `department` | string | Valeur du champ `function` (ex: "chat") |
+| `mandate_path` | string | Chemin du mandat |
+| `billing` | dict | Objet billing (voir ci-dessous) |
+
+### Structure de `task_manager.billing`
+
+```json
+{
+  "billed": false,
+  "billing_timestamp": "2026-01-12T10:20:00.000000+00:00",
+  "billing_kind": "chat_daily",
+  "billing_date": "2026-01-11",
+  "token_usage_job_id": "chat:user123:space_456:2026-01-11",
+  "total_input_tokens": 15000,
+  "total_output_tokens": 8500,
+  "total_tokens": 23500,
+  "total_buy_price": 0.0235,
+  "total_sales_price": 0.1175,
+  "collection_name": "space_456"
+}
+```
+
+### Conformité au contrat unifié
+
+| Règle | Implémentation |
+|-------|----------------|
+| Cumulation uniquement dans source de vérité | ✅ Cumulation dans `token_usage/{job_id}` |
+| `task_manager` = index UI (pas de cumulation) | ✅ Écrasement du sous-objet `billing` |
+| Écriture `merge=True` | ✅ Ne pas écraser les autres champs |
+| Best-effort | ✅ Encapsulé dans `try/except` |
+| Idempotence | ✅ Overwrite (pas d'addition) |
+| Champs minimum | ✅ `billed`, `billing_timestamp`, `total_tokens`, `total_sales_price` |
+| Champs recommandés | ✅ `billing_kind`, `token_usage_job_id`, `total_input_tokens`, etc. |
+
+### Préservation du billing lors de purge
+- La fonction `delete_task_manager_document()` préserve le champ `billing` si présent
+- Conforme à la règle "billing immuable" du contrat unifié
 
 ---
 
