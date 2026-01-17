@@ -92,6 +92,22 @@ class RedisTTL:
     
     # Lock CRON: 5 minutes (évite locks orphelins)
     LOCK = 300
+    
+    # HR Module: Données RH et paie
+    HR_EMPLOYEES = 3600      # 1 heure (données modifiées occasionnellement)
+    HR_CONTRACTS = 3600      # 1 heure (données stables)
+    HR_REFERENCES = 86400    # 24 heures (données statiques: types contrat, etc.)
+    HR_CLUSTERS = 86400      # 24 heures (configuration rarement modifiée)
+
+    # Firebase Cache: Données Firebase centralisées dans le backend
+    MANDATE_SNAPSHOT = 3600      # 1 heure (données société)
+    EXPENSES_DETAILS = 2400      # 40 minutes (liste dépenses)
+    AP_DOCUMENTS = 2400          # 40 minutes (documents APBookkeeper)
+    BANK_TRANSACTIONS = 2400     # 40 minutes (transactions bancaires)
+    APPROVAL_PENDINGLIST = 2400  # 40 minutes (liste approbations)
+
+    # Drive Cache: Documents Google Drive
+    DRIVE_DOCUMENTS = 1800       # 30 minutes (documents to_do/in_process/processed)
 
 
 # ═══════════════════════════════════════════════════════════════

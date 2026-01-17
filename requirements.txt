@@ -43,3 +43,6 @@ google-genai==0.3.0
 aiohttp==3.13.1
 # AWS SDK pour CloudWatch Logs
 boto3>=1.35.0
+# PostgreSQL async driver pour Neon (module HR)
+asyncpg>=0.29.0# HTTP async client pour Jobber HR
+httpx>=0.27.0

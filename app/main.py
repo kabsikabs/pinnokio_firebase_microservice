@@ -772,6 +772,30 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
         if callable(target):
             return target, "DMS"
 
+    # === HR (Human Resources - Neon PostgreSQL) ===
+    if method.startswith("HR."):
+        name = method.split(".", 1)[1]
+        from .hr_rpc_handlers import hr_rpc_handlers
+        target = getattr(hr_rpc_handlers, name, None)
+        if callable(target):
+            return target, "HR"
+
+    # === FIREBASE_CACHE (Firebase data with Redis cache) ===
+    if method.startswith("FIREBASE_CACHE."):
+        name = method.split(".", 1)[1]
+        from .firebase_cache_handlers import firebase_cache_handlers
+        target = getattr(firebase_cache_handlers, name, None)
+        if callable(target):
+            return target, "FIREBASE_CACHE"
+
+    # === DRIVE_CACHE (Google Drive with Redis cache) ===
+    if method.startswith("DRIVE_CACHE."):
+        name = method.split(".", 1)[1]
+        from .drive_cache_handlers import drive_cache_handlers
+        target = getattr(drive_cache_handlers, name, None)
+        if callable(target):
+            return target, "DRIVE_CACHE"
+
     # === ERP (Enterprise Resource Planning) ===
     if method.startswith("ERP."):
         name = method.split(".", 1)[1]
@@ -793,6 +817,16 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
         target = getattr(get_erp_service(), name, None)
         if callable(target):
             return target, "ERP"
+
+    # === DASHBOARD (Next.js Dashboard - NEW) ===
+    # Ce namespace est NOUVEAU et ne modifie pas les méthodes existantes
+    # Endpoints: DASHBOARD.full_data, DASHBOARD.get_metrics, DASHBOARD.invalidate_cache
+    if method.startswith("DASHBOARD."):
+        name = method.split(".", 1)[1]
+        from .dashboard_handlers import get_dashboard_handlers
+        target = getattr(get_dashboard_handlers(), name, None)
+        if callable(target):
+            return target, "DASHBOARD"
 
     raise KeyError(method)
 
@@ -948,7 +982,33 @@ async def rpc_endpoint(req: RpcRequest, authorization: str | None = Header(defau
             # SAUF pour test_connection en mode direct
             if "company_id" not in kwargs and not is_test_connection_direct:
                 raise ValueError("company_id is required for ERP methods")
-        
+
+        elif _ns == "HR":
+            # HR: Injecter user_id automatiquement depuis le contexte RPC
+            # Les méthodes HR utilisent firebase_user_id pour le cache Redis
+            if "firebase_user_id" not in kwargs and req.user_id:
+                kwargs["firebase_user_id"] = req.user_id
+
+        elif _ns == "FIREBASE_CACHE":
+            # FIREBASE_CACHE: Injecter user_id automatiquement depuis le contexte RPC
+            # Les méthodes Firebase cache utilisent user_id pour le cache Redis
+            if "user_id" not in kwargs and req.user_id:
+                kwargs["user_id"] = req.user_id
+
+        elif _ns == "DRIVE_CACHE":
+            # DRIVE_CACHE: Injecter user_id automatiquement depuis le contexte RPC
+            # Les méthodes Drive cache utilisent user_id pour le cache Redis
+            if "user_id" not in kwargs and req.user_id:
+                kwargs["user_id"] = req.user_id
+
+        elif _ns == "DASHBOARD":
+            # DASHBOARD (Next.js): Injecter user_id automatiquement
+            # Les méthodes Dashboard utilisent user_id et company_id pour le cache
+            if "user_id" not in kwargs and req.user_id:
+                kwargs["user_id"] = req.user_id
+            # company_id doit être fourni par le client (dans kwargs)
+            # car il n'y a pas de company_id dans le contexte RPC par défaut
+
         if inspect.iscoroutinefunction(func):
             result = await func(*args, **kwargs)
         else:
@@ -1128,6 +1188,44 @@ class InvalidateCacheRequest(BaseModel):
     user_id: str = Field(..., description="ID Firebase de l'utilisateur")
     collection_name: str = Field(..., description="Nom de la collection (company)")
     cache_types: list[str] = Field(default=["context", "jobs"], description="Types de cache à invalider: context, jobs, all")
+
+
+# ═══════════════════════════════════════════════════════════════
+# MODÈLE DE CALLBACK POUR LE JOBBER HR
+# ═══════════════════════════════════════════════════════════════
+
+class HRCallbackRequest(BaseModel):
+    """
+    Modèle pour les callbacks du Jobber HR après traitement d'un job.
+    
+    Le Jobber appelle ce endpoint quand un calcul de paie, génération PDF,
+    ou batch est terminé.
+    """
+    # Identifiants pour routage
+    user_id: str = Field(..., description="Firebase UID de l'utilisateur")
+    session_id: Optional[str] = Field(None, description="Session ID pour routage WebSocket")
+    mandate_path: Optional[str] = Field(None, description="Chemin Firebase pour traçabilité")
+    company_id: Optional[str] = Field(None, description="UUID de la company PostgreSQL")
+    
+    # Identifiant du job
+    job_id: str = Field(..., description="ID unique du job")
+    job_type: str = Field(..., description="Type: payroll_calculate, payroll_batch, pdf_generate, etc.")
+    
+    # Résultat
+    status: str = Field(..., description="Status: completed, failed, partial")
+    result: Optional[Dict[str, Any]] = Field(None, description="Données de résultat")
+    error: Optional[str] = Field(None, description="Message d'erreur si échec")
+    
+    # Métadonnées d'exécution
+    started_at: Optional[str] = Field(None, description="ISO timestamp début")
+    completed_at: Optional[str] = Field(None, description="ISO timestamp fin")
+    execution_time_ms: Optional[int] = Field(None, description="Durée en millisecondes")
+    
+    # Données additionnelles pour certains types de jobs
+    employee_id: Optional[str] = Field(None, description="Employee concerné")
+    period_year: Optional[int] = Field(None, description="Année de la période")
+    period_month: Optional[int] = Field(None, description="Mois de la période")
+    batch_progress: Optional[Dict[str, Any]] = Field(None, description="Progression batch: {total, completed, failed}")
 
 
 class InvalidateContextRequest(BaseModel):
@@ -1511,6 +1609,167 @@ async def lpt_callback(req: LPTCallbackRequest, authorization: str | None = Head
         dt_ms = int((time.time() - t0) * 1000)
         logger.error("lpt_callback_error code=INTERNAL task_id=%s dt_ms=%s error=%s", req.task_id, dt_ms, repr(e))
         return {"ok": False, "error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════
+# ENDPOINT DE CALLBACK POUR LE JOBBER HR
+# ═══════════════════════════════════════════════════════════════
+
+@app.post("/hr/callback")
+async def hr_callback(
+    req: HRCallbackRequest,
+    authorization: str | None = Header(default=None, alias="Authorization")
+):
+    """
+    ⭐ Callback du Jobber HR après traitement d'un job asynchrone.
+    
+    Le Jobber (pinnokio_hr) appelle ce endpoint quand :
+    - Un calcul de paie est terminé
+    - Un batch de paies est terminé
+    - Un PDF a été généré
+    - Un export comptable est prêt
+    
+    Responsabilités :
+    1. Authentifier l'appel (API Key ou Service Token)
+    2. Logger pour traçabilité
+    3. Broadcaster au client via WebSocket Hub
+    4. Optionnel: Mettre à jour métriques/quotas compte
+    5. Optionnel: Buffer si user déconnecté
+    """
+    t0 = time.time()
+    
+    try:
+        logger.info(
+            "hr_callback_in job_id=%s user=%s status=%s type=%s company=%s",
+            req.job_id, req.user_id, req.status, req.job_type, req.company_id
+        )
+        
+        # 1. Authentification
+        _require_auth(authorization)
+        
+        # 2. Construire le payload WebSocket selon le type de job
+        ws_payload = {
+            "type": "hr_job_completed",
+            "job_id": req.job_id,
+            "job_type": req.job_type,
+            "status": req.status,
+            "timestamp": req.completed_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        }
+        
+        # Ajouter les données spécifiques selon le type
+        if req.job_type == "payroll_calculate":
+            ws_payload["data"] = {
+                "employee_id": req.employee_id,
+                "period": f"{req.period_year}-{req.period_month:02d}" if req.period_year and req.period_month else None,
+                "result": req.result,
+                "error": req.error,
+            }
+        elif req.job_type == "payroll_batch":
+            ws_payload["data"] = {
+                "progress": req.batch_progress,
+                "result": req.result,
+                "error": req.error,
+            }
+        elif req.job_type == "pdf_generate":
+            ws_payload["data"] = {
+                "employee_id": req.employee_id,
+                "pdf_url": req.result.get("pdf_url") if req.result else None,
+                "error": req.error,
+            }
+        else:
+            # Générique
+            ws_payload["data"] = {
+                "result": req.result,
+                "error": req.error,
+            }
+        
+        # Ajouter les métadonnées d'exécution
+        if req.execution_time_ms:
+            ws_payload["execution_time_ms"] = req.execution_time_ms
+        
+        # 3. Broadcast via WebSocket Hub
+        ws_sent = False
+        try:
+            await hub.broadcast(req.user_id, ws_payload)
+            ws_sent = True
+            logger.info(
+                "hr_callback_ws_sent user=%s job=%s type=%s",
+                req.user_id, req.job_id, req.job_type
+            )
+        except Exception as ws_err:
+            # User probablement déconnecté
+            logger.warning(
+                "hr_callback_ws_failed user=%s job=%s error=%s",
+                req.user_id, req.job_id, repr(ws_err)
+            )
+            
+            # 4. Buffer le message pour envoi ultérieur si WebSocket échoue
+            try:
+                from .ws_message_buffer import get_message_buffer
+                buffer = get_message_buffer()
+                buffer.add_message(
+                    user_id=req.user_id,
+                    thread_key=f"hr_job_{req.job_id}",
+                    message=ws_payload
+                )
+                logger.info(
+                    "hr_callback_buffered user=%s job=%s",
+                    req.user_id, req.job_id
+                )
+            except Exception as buf_err:
+                logger.warning(
+                    "hr_callback_buffer_failed user=%s error=%s",
+                    req.user_id, repr(buf_err)
+                )
+        
+        # 5. Optionnel: Mettre à jour Firestore pour progression
+        if req.job_type == "payroll_batch" and req.mandate_path:
+            try:
+                db = get_firestore()
+                progress_ref = db.document(f"{req.mandate_path}/hr_jobs/{req.job_id}")
+                progress_ref.set({
+                    "status": req.status,
+                    "progress": req.batch_progress,
+                    "completed_at": req.completed_at,
+                    "result_summary": {
+                        "total": req.batch_progress.get("total") if req.batch_progress else 0,
+                        "completed": req.batch_progress.get("completed") if req.batch_progress else 0,
+                        "failed": req.batch_progress.get("failed") if req.batch_progress else 0,
+                    } if req.batch_progress else None,
+                    "error": req.error,
+                }, merge=True)
+                logger.info(
+                    "hr_callback_firestore_updated job=%s path=%s",
+                    req.job_id, req.mandate_path
+                )
+            except Exception as fs_err:
+                logger.warning(
+                    "hr_callback_firestore_failed job=%s error=%s",
+                    req.job_id, repr(fs_err)
+                )
+        
+        dt_ms = int((time.time() - t0) * 1000)
+        
+        logger.info(
+            "hr_callback_ok job_id=%s status=%s ws_sent=%s dt_ms=%s",
+            req.job_id, req.status, ws_sent, dt_ms
+        )
+        
+        return {
+            "ok": True,
+            "job_id": req.job_id,
+            "ws_sent": ws_sent,
+            "dt_ms": dt_ms
+        }
+    
+    except Exception as e:
+        dt_ms = int((time.time() - t0) * 1000)
+        logger.error(
+            "hr_callback_error job_id=%s dt_ms=%s error=%s",
+            req.job_id, dt_ms, repr(e),
+            exc_info=True
+        )
+        return {"ok": False, "job_id": req.job_id, "error": str(e)}
 
 
 @app.websocket("/ws")
