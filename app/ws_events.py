@@ -26,8 +26,9 @@ Convention de nommage:
 Event count verification:
 - AUTH: 8 events
 - LLM: 12 events
+- USER: 1 event
 - COMPANY: 3 events
-- DASHBOARD: 4 events (added FULL_DATA)
+- DASHBOARD: 9 events (added orchestration events)
 - JOB: 2 events
 - APPROVAL: 2 events
 - ACTIVITY: 1 event
@@ -35,7 +36,7 @@ Event count verification:
 - WORKFLOW: 1 event
 - SESSION: 2 events
 - CONNECTION: 2 events
-TOTAL: 38 unique events (47 with legacy aliases counted)
+TOTAL: 44 unique events (53 with legacy aliases counted)
 """
 
 
@@ -74,6 +75,16 @@ class LLMEvents:
 
 
 # ============================================
+# User Events (3 events)
+# ============================================
+class UserEvents:
+    """Evenements utilisateur."""
+    PROFILE = "user.profile"
+    FIRST_CONNECT = "user.first_connect"  # First connection welcome with credit
+    SETTINGS_UPDATED = "user.settings_updated"  # User settings updated
+
+
+# ============================================
 # Company Events (3 events)
 # ============================================
 class CompanyEvents:
@@ -84,14 +95,26 @@ class CompanyEvents:
 
 
 # ============================================
-# Dashboard Events (4 events)
+# Dashboard Events (13 events)
 # ============================================
 class DashboardEvents:
     """Evenements dashboard."""
     METRICS_UPDATE = "dashboard.metrics_update"
     METRICS = "dashboard.metrics"
     REFRESH = "dashboard.refresh"
-    FULL_DATA = "dashboard.full_data"  # NEW: Complete dashboard data endpoint
+    FULL_DATA = "dashboard.full_data"  # Complete dashboard data endpoint
+    # Orchestration events
+    ORCHESTRATE_INIT = "dashboard.orchestrate_init"  # Initialize dashboard orchestration sequence
+    PHASE_START = "dashboard.phase_start"  # Signal start of a loading phase
+    PHASE_COMPLETE = "dashboard.phase_complete"  # Signal completion of a loading phase
+    DATA_LOADING_PROGRESS = "dashboard.data_loading_progress"  # Progress update during data loading
+    COMPANY_CHANGE = "dashboard.company_change"  # Company selection changed in dashboard context
+    SWITCH_ACCOUNT = "dashboard.switch_account"  # Switch between own account and shared accounts
+    # Widget-specific update events
+    STORAGE_UPDATE = "dashboard.storage_update"  # Storage info updated
+    EXPENSES_UPDATE = "dashboard.expenses_update"  # Expenses data updated
+    TASKS_UPDATE = "dashboard.tasks_update"  # Tasks data updated
+    APPROVALS_UPDATE = "dashboard.approvals_update"  # Approvals data updated
 
 
 # ============================================
@@ -104,12 +127,31 @@ class JobEvents:
 
 
 # ============================================
-# Approval Events (2 events)
+# Task Events (5 events)
+# ============================================
+class TaskEvents:
+    """Evenements tasks (taches planifiees)."""
+    LIST = "task.list"
+    EXECUTE = "task.execute"
+    EXECUTED = "task.executed"
+    STATUS_CHANGED = "task.status_changed"
+    TOGGLE_ENABLED = "task.toggle_enabled"
+    UPDATE = "task.update"
+    UPDATED = "task.updated"
+
+
+# ============================================
+# Approval Events (7 events)
 # ============================================
 class ApprovalEvents:
     """Evenements approbations."""
     NEW = "approval.new"
     STATUS_CHANGED = "approval.status_changed"
+    LIST = "approval.list"
+    SEND_ROUTER = "approval.send_router"
+    SEND_BANKER = "approval.send_banker"
+    SEND_APBOOKEEPER = "approval.send_apbookeeper"
+    RESULT = "approval.result"
 
 
 # ============================================
@@ -172,9 +214,11 @@ class WS_EVENTS:
     """
     AUTH = AuthEvents
     LLM = LLMEvents
+    USER = UserEvents
     COMPANY = CompanyEvents
     DASHBOARD = DashboardEvents
     JOB = JobEvents
+    TASK = TaskEvents
     APPROVAL = ApprovalEvents
     ACTIVITY = ActivityEvents
     INVOICE = InvoiceEvents
@@ -270,7 +314,7 @@ def get_all_events() -> list[str]:
 
     # Collecte tous les attributs de chaque classe d'evenements
     for event_class in [
-        AuthEvents, LLMEvents, CompanyEvents, DashboardEvents,
+        AuthEvents, LLMEvents, UserEvents, CompanyEvents, DashboardEvents,
         JobEvents, ApprovalEvents, ActivityEvents, InvoiceEvents,
         WorkflowEvents, SessionEvents, ConnectionEvents
     ]:
@@ -324,6 +368,11 @@ EVENT_DESCRIPTIONS = {
     WS_EVENTS.LLM.MESSAGE: "LLM message received",
     WS_EVENTS.LLM.RESPONSE: "LLM response received",
 
+    # User Events
+    WS_EVENTS.USER.PROFILE: "User profile received",
+    WS_EVENTS.USER.FIRST_CONNECT: "First connection welcome with credit",
+    WS_EVENTS.USER.SETTINGS_UPDATED: "User settings updated",
+
     # Company Events
     WS_EVENTS.COMPANY.LIST: "Company list received",
     WS_EVENTS.COMPANY.DETAILS: "Company details received",
@@ -334,6 +383,12 @@ EVENT_DESCRIPTIONS = {
     WS_EVENTS.DASHBOARD.METRICS: "Dashboard metrics request",
     WS_EVENTS.DASHBOARD.REFRESH: "Dashboard refresh requested",
     WS_EVENTS.DASHBOARD.FULL_DATA: "Dashboard full data request/response",
+    WS_EVENTS.DASHBOARD.ORCHESTRATE_INIT: "Dashboard orchestration sequence initialized",
+    WS_EVENTS.DASHBOARD.PHASE_START: "Dashboard loading phase started",
+    WS_EVENTS.DASHBOARD.PHASE_COMPLETE: "Dashboard loading phase completed",
+    WS_EVENTS.DASHBOARD.DATA_LOADING_PROGRESS: "Dashboard data loading progress update",
+    WS_EVENTS.DASHBOARD.COMPANY_CHANGE: "Dashboard company selection changed",
+    WS_EVENTS.DASHBOARD.SWITCH_ACCOUNT: "Switch between own account and shared accounts",
 
     # Job Events
     WS_EVENTS.JOB.STATUS_CHANGED: "Job status changed",
@@ -416,9 +471,11 @@ __all__ = [
     'WS_EVENTS',
     'AuthEvents',
     'LLMEvents',
+    'UserEvents',
     'CompanyEvents',
     'DashboardEvents',
     'JobEvents',
+    'TaskEvents',
     'ApprovalEvents',
     'ActivityEvents',
     'InvoiceEvents',

@@ -234,13 +234,14 @@ class DriveCacheHandlers:
         """
         try:
             # Import local pour éviter les dépendances circulaires
-            from .tools.g_cred import DriveClientService
+            from .driveClientService import DriveClientService
 
-            drive_service = DriveClientService(user_id=user_id, mode='prod')
+            # DriveClientService est un singleton - ne pas passer user_id au constructeur
+            # user_id est passé aux méthodes individuelles
+            drive_service = DriveClientService(mode='prod')
 
-            # Appel synchrone vers Drive API (dans thread séparé pour ne pas bloquer)
-            data = await asyncio.to_thread(
-                drive_service.list_files_in_doc_to_do,
+            # list_files_in_doc_to_do est async - l'appeler directement
+            data = await drive_service.list_files_in_doc_to_do(
                 user_id,
                 input_drive_id
             )

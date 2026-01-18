@@ -1778,6 +1778,7 @@ async def websocket_endpoint(ws: WebSocket):
     try:
         # Backend Reflex passera le uid via query string ?uid=...
         uid = ws.query_params.get("uid")
+        session_id = ws.query_params.get("session_id", "")
         space_code = ws.query_params.get("space_code")
         thread_key = ws.query_params.get("thread_key")
         chat_mode = ws.query_params.get("mode") or "auto"
@@ -1849,8 +1850,141 @@ async def websocket_endpoint(ws: WebSocket):
                 )
         
         while True:
-            # Lectures éventuellement inutilisées (backend peut ne rien envoyer)
-            await ws.receive_text()
+            # Reception et traitement des messages WebSocket du client
+            try:
+                raw_message = await ws.receive_text()
+
+                # Parse le message JSON
+                try:
+                    message = _json.loads(raw_message)
+                    msg_type = message.get("type")
+                    msg_payload = message.get("payload", {})
+
+                    logger.info(f"[WS] Message reçu - uid={uid} type={msg_type}")
+
+                    # Routage des messages vers les handlers appropriés
+                    if msg_type == "auth.firebase_token":
+                        # Handler d'authentification Firebase
+                        from .wrappers.auth_handlers import handle_firebase_token
+                        response = await handle_firebase_token(msg_payload)
+
+                        # Envoyer la réponse au client
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(
+                            f"[WS] Auth response sent - uid={uid} "
+                            f"type={response.get('type')} "
+                            f"success={response.get('payload', {}).get('success')}"
+                        )
+
+                    elif msg_type == "dashboard.orchestrate_init":
+                        # Handler d'orchestration du dashboard (après auth)
+                        from .wrappers.dashboard_orchestration_handlers import handle_orchestrate_init
+                        response = await handle_orchestrate_init(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Orchestration init response sent - uid={uid}")
+
+                    elif msg_type == "dashboard.company_change":
+                        # Handler de changement de société
+                        from .wrappers.dashboard_orchestration_handlers import handle_company_change
+                        response = await handle_company_change(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Company change response sent - uid={uid}")
+
+                    elif msg_type == "dashboard.refresh":
+                        # Handler de rafraîchissement forcé
+                        from .wrappers.dashboard_orchestration_handlers import handle_refresh
+                        response = await handle_refresh(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Dashboard refresh response sent - uid={uid}")
+
+                    # ============================================
+                    # TASK EVENTS
+                    # ============================================
+                    elif msg_type == "task.list":
+                        from .wrappers.task_handlers import handle_task_list
+                        response = await handle_task_list(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Task list response sent - uid={uid}")
+
+                    elif msg_type == "task.execute":
+                        from .wrappers.task_handlers import handle_task_execute
+                        response = await handle_task_execute(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Task execute response sent - uid={uid}")
+
+                    elif msg_type == "task.toggle_enabled":
+                        from .wrappers.task_handlers import handle_task_toggle
+                        response = await handle_task_toggle(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Task toggle response sent - uid={uid}")
+
+                    elif msg_type == "task.update":
+                        from .wrappers.task_handlers import handle_task_update
+                        response = await handle_task_update(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Task update response sent - uid={uid}")
+
+                    else:
+                        # Messages non gérés (pour future extension)
+                        logger.debug(
+                            f"[WS] Unhandled message type - uid={uid} type={msg_type}"
+                        )
+
+                except _json.JSONDecodeError as parse_err:
+                    logger.error(
+                        f"[WS] Invalid JSON received - uid={uid} error={parse_err}"
+                    )
+                    # Envoyer une erreur au client
+                    error_response = {
+                        "type": "error",
+                        "payload": {
+                            "error": "Invalid JSON format",
+                            "code": "PARSE_ERROR"
+                        }
+                    }
+                    await ws.send_text(_json.dumps(error_response))
+
+            except WebSocketDisconnect:
+                # Client déconnecté, sortir de la boucle proprement
+                logger.info(f"[WS] Client disconnected during receive - uid={uid}")
+                break
+            except Exception as msg_err:
+                logger.error(
+                    f"[WS] Message processing error - uid={uid} error={msg_err}",
+                    exc_info=True
+                )
+                # Vérifier si c'est une erreur de connexion fermée
+                if "disconnect" in str(msg_err).lower() or "closed" in str(msg_err).lower():
+                    logger.info(f"[WS] Connection closed, exiting loop - uid={uid}")
+                    break
     except WebSocketDisconnect as e:
         disconnect_reason = "unknown"
         try:

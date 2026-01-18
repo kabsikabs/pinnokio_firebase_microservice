@@ -8939,7 +8939,9 @@ class FirebaseManagement:
         """
         try:
             mandate_path = self._normalize_mandate_path(mandate_path)
-            tasks_ref = self.db.collection(f"{mandate_path}/tasks")
+            collection_path = f"{mandate_path}/tasks"
+            logger.info(f"[TASKS] list_tasks_for_mandate: Querying collection '{collection_path}'")
+            tasks_ref = self.db.collection(collection_path)
 
             if status:
                 query = tasks_ref.where(filter=FieldFilter("status", "==", status))
