@@ -1952,6 +1952,294 @@ async def websocket_endpoint(ws: WebSocket):
                         await ws.send_text(_json.dumps(response))
                         logger.info(f"[WS] Task update response sent - uid={uid}")
 
+                    # ============================================
+                    # BALANCE EVENTS (account top-up and refresh)
+                    # ============================================
+                    elif msg_type == "balance.top_up":
+                        from .wrappers.balance_handlers import handle_top_up
+                        await handle_top_up(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Balance top-up initiated - uid={uid}")
+
+                    elif msg_type == "balance.refresh":
+                        from .wrappers.balance_handlers import handle_refresh_balance
+                        await handle_refresh_balance(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Balance refresh completed - uid={uid}")
+
+                    # ============================================
+                    # CHAT EVENTS (session management)
+                    # ============================================
+                    elif msg_type == "chat.orchestrate_init":
+                        from .frontend.pages.chat import handle_orchestrate_init
+                        response = await handle_orchestrate_init(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Chat orchestrate_init response sent - uid={uid}")
+
+                    elif msg_type == "chat.session_select":
+                        from .frontend.pages.chat import handle_session_select
+                        response = await handle_session_select(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Chat session_select response sent - uid={uid}")
+
+                    elif msg_type == "chat.session_create":
+                        from .frontend.pages.chat import handle_session_create
+                        response = await handle_session_create(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Chat session_create response sent - uid={uid}")
+
+                    elif msg_type == "chat.session_delete":
+                        from .frontend.pages.chat import handle_session_delete
+                        response = await handle_session_delete(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Chat session_delete response sent - uid={uid}")
+
+                    elif msg_type == "chat.session_rename":
+                        from .frontend.pages.chat import handle_session_rename
+                        response = await handle_session_rename(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Chat session_rename response sent - uid={uid}")
+
+                    elif msg_type == "chat.mode_change":
+                        from .frontend.pages.chat import handle_mode_change
+                        response = await handle_mode_change(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Chat mode_change response sent - uid={uid}")
+
+                    elif msg_type == "chat.send_message":
+                        # Route message to LLM via existing send_message handler
+                        # Streaming response will be sent via LLM events (llm.stream_start, llm.stream_delta, llm.stream_end)
+                        from .llm_service import get_llm_manager
+
+                        thread_key = msg_payload.get("thread_key") or msg_payload.get("session_id")
+                        content = msg_payload.get("content", "")
+                        company_id = msg_payload.get("company_id")
+                        chat_mode = msg_payload.get("chat_mode", "general_chat")
+
+                        logger.info(f"[WS] Chat send_message - uid={uid} thread={thread_key} content_len={len(content)}")
+
+                        try:
+                            # Call LLM manager's send_message - streaming handled internally
+                            # Note: send_message uses collection_name (not company_id) and message (not content)
+                            result = await get_llm_manager().send_message(
+                                user_id=uid,
+                                collection_name=company_id,
+                                thread_key=thread_key,
+                                message=content,
+                                chat_mode=chat_mode,
+                            )
+                            response = {
+                                "type": "chat.message_sent",
+                                "payload": {
+                                    "success": True,
+                                    "message_id": result.get("message_id") if isinstance(result, dict) else None,
+                                }
+                            }
+                        except Exception as e:
+                            logger.error(f"[WS] Chat send_message error: {e}")
+                            response = {
+                                "type": "chat.error",
+                                "payload": {
+                                    "error": str(e),
+                                    "source": "send_message"
+                                }
+                            }
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Chat send_message response sent - uid={uid}")
+
+                    # ============================================
+                    # PAGE STATE EVENTS (for fast page recovery)
+                    # ============================================
+                    elif msg_type == "page.restore_state":
+                        from .wrappers.page_state_manager import get_page_state_manager
+                        from .ws_events import WS_EVENTS
+
+                        page = msg_payload.get("page")
+                        company_id = msg_payload.get("company_id")
+
+                        if not company_id:
+                            response = {
+                                "type": WS_EVENTS.PAGE_STATE.NOT_FOUND,
+                                "payload": {
+                                    "page": page,
+                                    "reason": "invalid_company",
+                                    "message": "company_id is required for page state recovery"
+                                }
+                            }
+                            logger.warning(f"[WS] Page state restore failed - no company_id - uid={uid} page={page}")
+                        else:
+                            manager = get_page_state_manager()
+
+                            # TEMP: Invalidate stale chat cache to force fresh orchestration
+                            if page == "chat":
+                                manager.invalidate_page_state(uid=uid, company_id=company_id, page="chat")
+                                logger.info(f"[WS] TEMP: Invalidated stale chat cache - uid={uid}")
+
+                            state = manager.get_page_state(
+                                uid=uid,
+                                company_id=company_id,
+                                page=page
+                            )
+
+                            if state:
+                                response = {
+                                    "type": WS_EVENTS.PAGE_STATE.RESTORED,
+                                    "payload": {
+                                        "success": True,
+                                        "page": page,
+                                        "data": state.get("data", {}),
+                                        "loaded_at": state.get("loaded_at"),
+                                        "company_id": state.get("company_id"),
+                                        "mandate_path": state.get("mandate_path"),
+                                    }
+                                }
+                                logger.info(f"[WS] Page state restored - uid={uid} page={page} company={company_id}")
+                            else:
+                                response = {
+                                    "type": WS_EVENTS.PAGE_STATE.NOT_FOUND,
+                                    "payload": {
+                                        "page": page,
+                                        "reason": "not_cached",
+                                    }
+                                }
+                                logger.info(f"[WS] Page state not found - uid={uid} page={page} company={company_id}")
+
+                        await ws.send_text(_json.dumps(response))
+
+                    elif msg_type == "page.invalidate_state":
+                        from .wrappers.page_state_manager import get_page_state_manager
+
+                        page = msg_payload.get("page")  # None = invalidate all
+                        company_id = msg_payload.get("company_id")
+
+                        if company_id:
+                            manager = get_page_state_manager()
+                            manager.invalidate_page_state(
+                                uid=uid,
+                                company_id=company_id,
+                                page=page
+                            )
+
+                            response = {
+                                "type": "page.state_invalidated",
+                                "payload": {
+                                    "success": True,
+                                    "page": page or "all",
+                                    "company_id": company_id,
+                                }
+                            }
+                            await ws.send_text(_json.dumps(response))
+                            logger.info(f"[WS] Page state invalidated - uid={uid} company={company_id} page={page or 'all'}")
+                        else:
+                            response = {
+                                "type": "page.state_invalidated",
+                                "payload": {
+                                    "success": False,
+                                    "error": "company_id is required",
+                                }
+                            }
+                            await ws.send_text(_json.dumps(response))
+                            logger.warning(f"[WS] Page state invalidate failed - no company_id - uid={uid}")
+
+                    # ============================================
+                    # PENDING ACTION EVENTS (OAuth/payments)
+                    # ============================================
+                    elif msg_type == "pending_action.save":
+                        from .wrappers.pending_action_manager import get_pending_action_manager
+                        from .ws_events import WS_EVENTS
+
+                        manager = get_pending_action_manager()
+                        try:
+                            state_token = manager.save_pending_action(
+                                uid=uid,
+                                session_id=msg_payload.get("session_id", session_id),
+                                action_type=msg_payload.get("action_type"),
+                                provider=msg_payload.get("provider"),
+                                return_page=msg_payload.get("return_page"),
+                                return_path=msg_payload.get("return_path"),
+                                context=msg_payload.get("context", {}),
+                            )
+
+                            # Build OAuth state for redirect URL
+                            oauth_state = manager.build_oauth_state(
+                                uid=uid,
+                                session_id=msg_payload.get("session_id", session_id),
+                                state_token=state_token
+                            )
+
+                            response = {
+                                "type": WS_EVENTS.PENDING_ACTION.SAVED,
+                                "payload": {
+                                    "success": True,
+                                    "state_token": state_token,
+                                    "oauth_state": oauth_state,
+                                }
+                            }
+                            logger.info(
+                                f"[WS] Pending action saved - uid={uid} "
+                                f"action={msg_payload.get('action_type')} "
+                                f"provider={msg_payload.get('provider')}"
+                            )
+                        except Exception as e:
+                            response = {
+                                "type": WS_EVENTS.PENDING_ACTION.SAVED,
+                                "payload": {
+                                    "success": False,
+                                    "error": str(e),
+                                }
+                            }
+                            logger.error(f"[WS] Pending action save error - uid={uid} error={e}")
+
+                        await ws.send_text(_json.dumps(response))
+
+                    elif msg_type == "pending_action.cancel":
+                        from .wrappers.pending_action_manager import get_pending_action_manager
+
+                        manager = get_pending_action_manager()
+                        cancelled = manager.cancel_pending_action(
+                            uid=uid,
+                            session_id=msg_payload.get("session_id", session_id)
+                        )
+
+                        response = {
+                            "type": "pending_action.cancelled",
+                            "payload": {
+                                "success": cancelled,
+                            }
+                        }
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Pending action cancelled - uid={uid} success={cancelled}")
+
                     else:
                         # Messages non gérés (pour future extension)
                         logger.debug(

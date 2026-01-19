@@ -444,7 +444,7 @@ class DashboardHandlers:
             }
         """
         try:
-            from .frontend.dashboard import get_account_balance_data
+            from app.frontend.pages.dashboard.providers import get_account_balance_data
 
             return await get_account_balance_data(user_id, company_id, mandate_path)
 

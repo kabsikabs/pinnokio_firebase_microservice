@@ -5,6 +5,24 @@ from typing import Dict, Set
 
 from starlette.websockets import WebSocket
 
+# Event type normalization mapping (legacy underscore → standard dot notation)
+# This ensures compatibility between old backend event names and new frontend expectations
+EVENT_TYPE_NORMALIZATION = {
+    # LLM streaming events
+    "llm_stream_start": "llm.stream_start",
+    "llm_stream_chunk": "llm.stream_delta",  # chunk → delta
+    "llm_stream_delta": "llm.stream_delta",
+    "llm_stream_complete": "llm.stream_end",  # complete → end
+    "llm_stream_end": "llm.stream_end",
+    "llm_stream_error": "llm.error",
+    "llm_stream_interrupted": "llm.error",
+    # Tool use events
+    "tool_use_start": "llm.tool_use_start",
+    "tool_use_progress": "llm.tool_use_progress",
+    "tool_use_complete": "llm.tool_use_complete",
+    "tool_use_error": "llm.tool_use_error",
+}
+
 
 class WebSocketHub:
     def __init__(self) -> None:
@@ -33,9 +51,17 @@ class WebSocketHub:
                     self._uid_to_conns.pop(uid, None)
 
     async def broadcast(self, uid: str, message: dict) -> None:
+        # Normalize event type for frontend compatibility
+        original_type = message.get("type", "unknown")
+        normalized_type = EVENT_TYPE_NORMALIZATION.get(original_type, original_type)
+
+        # Update message with normalized type if different
+        if normalized_type != original_type:
+            message = {**message, "type": normalized_type}
+
         # Envoie le message JSON (texte) à toutes les connexions pour ce uid
         data = json.dumps(message)
-        msg_type = message.get("type", "unknown")
+        msg_type = normalized_type
         channel = message.get("channel", "")
         
         async with self._lock:
@@ -83,9 +109,9 @@ class WebSocketHub:
                 self._logger.error("ws_send_error uid=%s error=%s", uid, repr(e))
         
         # Logs de broadcast (sauf chunks streaming pour éviter verbosité)
-        if msg_type == "llm_stream_chunk":
+        if msg_type == "llm.stream_delta" or original_type == "llm_stream_chunk":
             # Logs de chunks en DEBUG uniquement pour éviter verbosité
-            chunk_len = len(message.get("payload", {}).get("chunk", ""))
+            chunk_len = len(message.get("payload", {}).get("chunk", "") or message.get("payload", {}).get("delta", ""))
             self._logger.debug("ws_broadcast_chunk uid=%s chunk_len=%s connections=%s sent=%s", uid, chunk_len, len(conns), sent_count)
         else:
             self._logger.info("ws_broadcast uid=%s type=%s channel=%s connections=%s", uid, msg_type, channel, sent_count)

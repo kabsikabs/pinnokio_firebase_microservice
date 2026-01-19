@@ -51,8 +51,8 @@ async def get_account_balance_data(
         Dict with currentBalance, currentMonthExpenses, lastMonthExpenses, totalCost, totalTopping
     """
     try:
-        from ...firebase_client import get_firestore
-        from ...firebase_providers import FirebaseManagement
+        from app.firebase_client import get_firestore
+        from app.firebase_providers import FirebaseManagement
 
         db = get_firestore()
 

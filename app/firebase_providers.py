@@ -10066,13 +10066,63 @@ class FirebaseRealtimeChat:
             print("  Traceback:")
             print(traceback.format_exc())
             return {}
+    def get_thread_messages(self, space_code: str, thread_key: str, mode: str = 'chats', limit: int = 100) -> List[Dict]:
+        """
+        Récupère les messages d'un thread spécifique.
+
+        Args:
+            space_code (str): Code de l'espace (typiquement le companies_search_id)
+            thread_key (str): Clé du thread
+            mode (str): Mode de groupement ('job_chats' ou 'chats')
+            limit (int): Nombre maximum de messages à récupérer
+
+        Returns:
+            List[Dict]: Liste des messages triés par timestamp
+        """
+        try:
+            print(f"📨 Récupération des messages pour thread: {thread_key}, mode: {mode}")
+
+            # Construire le chemin du thread
+            thread_path = self._get_thread_path(space_code, thread_key, mode)
+            messages_ref = self.db.child(f'{thread_path}/messages')
+
+            # Récupérer les messages
+            messages_data = messages_ref.get()
+
+            if not messages_data:
+                print("ℹ️ Aucun message trouvé dans ce thread")
+                return []
+
+            # Convertir en liste avec les IDs
+            messages_list = []
+            for msg_id, msg_data in messages_data.items():
+                if isinstance(msg_data, dict):
+                    msg_data['message_id'] = msg_id
+                    messages_list.append(msg_data)
+
+            # Trier par timestamp (plus ancien en premier)
+            messages_list.sort(key=lambda x: x.get('timestamp', ''))
+
+            # Limiter le nombre de messages
+            if limit and len(messages_list) > limit:
+                messages_list = messages_list[-limit:]  # Garder les plus récents
+
+            print(f"✅ {len(messages_list)} messages récupérés")
+            return messages_list
+
+        except Exception as e:
+            print(f"❌ Erreur lors de la récupération des messages: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
     def _get_last_activity(self, messages: Dict) -> str:
         """
         Détermine la dernière activité d'un thread en fonction des timestamps des messages.
-        
+
         Args:
             messages (Dict): Dictionnaire des messages
-            
+
         Returns:
             str: Timestamp de la dernière activité au format ISO
         """

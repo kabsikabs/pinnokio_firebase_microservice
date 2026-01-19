@@ -96,14 +96,26 @@ async def handle_firebase_token(payload: Dict[str, Any]) -> Dict[str, Any]:
         logger.info(f"[AUTH] Processing Firebase token for uid={uid} session={session_id}")
 
         # 2. Verify token using existing Firebase Admin SDK
+        # clock_skew_seconds=5 allows for minor clock differences between client and server
+        # This prevents "Token used too early" errors when clocks are slightly out of sync
         try:
             # Call existing Firebase service (READ-ONLY operation)
             firebase_app = get_firebase_app()
-            decoded_token = firebase_auth.verify_id_token(token, app=firebase_app)
+            decoded_token = firebase_auth.verify_id_token(
+                token,
+                app=firebase_app,
+                clock_skew_seconds=5  # Allow 5 seconds tolerance for clock skew
+            )
 
             logger.info(f"[AUTH] Token verified successfully for uid={uid}")
 
         except firebase_admin.auth.InvalidIdTokenError as e:
+            error_msg = str(e)
+            # Check if this is a clock skew issue (Token used too early)
+            if "Token used too early" in error_msg:
+                logger.warning(f"[AUTH] Clock skew detected for uid={uid}: {e}")
+                # Log additional info for debugging
+                logger.warning(f"[AUTH] This may indicate server clock is behind. Consider NTP sync.")
             logger.error(f"[AUTH] Invalid Firebase token for uid={uid}: {e}")
             raise AuthenticationError("Invalid Firebase token")
         except firebase_admin.auth.ExpiredIdTokenError as e:

@@ -1,130 +1,199 @@
-# Frontend Data Providers
+# Frontend Migration Module
 
-This module organizes backend data fetching by frontend page/component.
-Each subfolder corresponds to a page, and each file corresponds to a frontend component.
+This module contains all handlers and utilities for the Next.js frontend migration.
+It wraps existing backend services without modifying them.
 
-## Structure
+## Directory Structure
 
 ```
 frontend/
-├── __init__.py
+├── __init__.py                       # Main exports
 ├── README.md                         # This file
-└── dashboard/                        # Dashboard page
+│
+├── core/                             # Shared utilities (all pages)
+│   ├── __init__.py
+│   ├── auth_handlers.py             # Firebase token verification & session
+│   ├── page_state_manager.py        # Page state recovery (Redis cache)
+│   └── pending_action_manager.py    # OAuth/redirect state management
+│
+└── pages/                            # Page-specific handlers
     ├── __init__.py
-    ├── account_balance_card.py      # AccountBalanceCard component
-    ├── storage_card.py              # StorageCard component (TODO)
-    ├── metrics_cards.py             # MetricsCards component (TODO)
-    ├── jobs_widget.py               # JobsWidget component (TODO)
-    ├── approvals_widget.py          # ApprovalsWidget component (TODO)
-    ├── tasks_widget.py              # TasksWidget component (TODO)
-    ├── expenses_table.py            # ExpensesTable component (TODO)
-    └── activity_feed.py             # ActivityFeed component (TODO)
+    │
+    ├── dashboard/                    # Dashboard page (85% complete)
+    │   ├── __init__.py
+    │   ├── handlers.py              # RPC endpoints (DASHBOARD.*)
+    │   ├── orchestration.py         # Post-auth data orchestration
+    │   ├── approval_handlers.py     # Approval workflow (router, banker, apbookeeper)
+    │   ├── task_handlers.py         # Task management (list, execute, toggle)
+    │   └── providers/               # Component-specific data fetchers
+    │       ├── __init__.py
+    │       └── account_balance_card.py
+    │
+    ├── chat/                         # Chat page (TODO)
+    ├── invoices/                     # Invoices page (TODO)
+    ├── expenses/                     # Expenses page (TODO)
+    ├── banking/                      # Banking page (TODO)
+    └── hr/                           # HR page (TODO)
 ```
 
-## Component to Module Mapping
+## Architecture Pattern
 
-| Python Module              | Frontend Component    | Path                                              |
-|---------------------------|----------------------|---------------------------------------------------|
-| `account_balance_card.py` | AccountBalanceCard   | `src/components/dashboard/account-balance-card.tsx` |
-| `storage_card.py`         | StorageCard          | `src/components/dashboard/storage-card.tsx`       |
-| `metrics_cards.py`        | MetricsCards         | `src/components/dashboard/metrics-cards.tsx`      |
-| `jobs_widget.py`          | JobsWidget           | `src/components/dashboard/jobs-widget.tsx`        |
-| `approvals_widget.py`     | ApprovalsWidget      | `src/components/dashboard/approvals-widget.tsx`   |
-| `tasks_widget.py`         | TasksWidget          | `src/components/dashboard/tasks-widget.tsx`       |
-| `expenses_table.py`       | ExpensesTable        | `src/components/dashboard/expenses-table.tsx`     |
-| `activity_feed.py`        | ActivityFeed         | `src/components/dashboard/activity-feed.tsx`      |
+```
+Frontend (Next.js)
+        │
+        │  wsClient.send({ type: 'dashboard.orchestrate_init', ... })
+        │
+        ▼
+frontend/pages/dashboard/orchestration.py
+        │
+        │  Uses existing singletons
+        │
+        ├──► firebase_providers.py (FirebaseManagement)
+        ├──► redis_client.py (Sessions, Cache)
+        ├──► erp_service.py (Odoo)
+        ├──► driveClientService.py (Drive)
+        └──► llm_service/ (Chat)
+        │
+        ▼
+Redis Cache + WebSocket Response
+```
 
-## Usage
+## Usage Examples
 
+### Import from main frontend module
 ```python
-from app.frontend.dashboard import get_account_balance_data
-
-# In dashboard_handlers.py
-data = await get_account_balance_data(user_id, company_id, mandate_path)
+from app.frontend import (
+    handle_firebase_token,
+    get_page_state_manager,
+    DashboardHandlers,
+)
 ```
 
-## Account Balance Card
-
-### Data Structure
-
-```json
-{
-    "currentBalance": 256.02,       // current_topping - current_expenses
-    "currentMonthExpenses": 150.00, // Sum of expenses for current month
-    "lastMonthExpenses": 200.00,    // Sum of expenses for previous month
-    "totalCost": 2743.98,           // Total of all expenses
-    "totalTopping": 3000.00         // Total top-ups
-}
-```
-
-### Data Sources
-
-1. **Balance & Topping**: `FirebaseManagement.get_balance_info(mandate_path)`
-   - Path: `clients/{user_id}/billing/current_balance`
-   - Returns: `{current_balance, current_expenses, current_topping}`
-
-2. **Monthly Costs**: Calculated from task_manager documents
-   - Path: `{mandate_path}/task_manager/{task_id}`
-   - Field: `billing.total_sales_price`
-   - Filtered by: `timestamp` (year/month)
-
-### Original Reflex Implementation
-
-From `JobHistory.py`:
+### Import from specific module
 ```python
-@rx.var
-def get_current_month_cost(self) -> float:
-    """Sum of costs for current calendar month."""
-    now = datetime.now()
-    total = 0.0
-    for exp in self.expenses:
-        if exp.timestamp.year == now.year and exp.timestamp.month == now.month:
-            total += float(exp.cost or 0.0)
-    return total
-
-@rx.var
-def get_last_month_cost(self) -> float:
-    """Sum of costs for previous calendar month."""
-    now = datetime.now()
-    prev_month = now.month - 1 if now.month > 1 else 12
-    prev_year = now.year if now.month > 1 else now.year - 1
-    total = 0.0
-    for exp in self.expenses:
-        if exp.timestamp.year == prev_year and exp.timestamp.month == prev_month:
-            total += float(exp.cost or 0.0)
-    return total
+from app.frontend.core import handle_firebase_token
+from app.frontend.pages.dashboard import handle_orchestrate_init
 ```
 
-## Adding a New Component
-
-1. Create `frontend/{page}/{component_name}.py`
-2. Implement `async def get_{component_name}_data(user_id, company_id, ...) -> Dict[str, Any]`
-3. Add docstring with frontend component mapping
-4. Export in `frontend/{page}/__init__.py`
-5. Update this README
-6. Use in appropriate handler (e.g., `dashboard_handlers.py`)
-
-## Architecture Flow
-
-```
-Frontend Component (Next.js)
-        │
-        ▼
-WebSocket (orchestration)
-        │
-        ▼
-dashboard_handlers.py (full_data)
-        │
-        ▼
-frontend/dashboard/{component}.py
-        │
-        ▼
-Firebase / External Services
+### Backward compatibility (deprecated)
+```python
+# Still works but deprecated - use app.frontend instead
+from app.wrappers import handle_firebase_token
 ```
 
-## Notes
+## Adding a New Page
 
-- All modules use async functions for non-blocking I/O
-- mandate_path is passed from orchestration context
-- Default values are returned on error to prevent frontend crashes
-- Logging includes component name for easy debugging
+### Step 1: Create directory structure
+```bash
+mkdir -p app/frontend/pages/new_page/providers
+touch app/frontend/pages/new_page/__init__.py
+touch app/frontend/pages/new_page/handlers.py
+touch app/frontend/pages/new_page/orchestration.py
+touch app/frontend/pages/new_page/providers/__init__.py
+```
+
+### Step 2: Implement handlers.py (RPC endpoints)
+```python
+"""
+New Page RPC Handlers
+"""
+from typing import Dict, Any
+
+def get_new_page_handlers() -> "NewPageHandlers":
+    return NewPageHandlers()
+
+class NewPageHandlers:
+    """RPC endpoints for NEW_PAGE namespace."""
+
+    async def full_data(self, uid: str, mandate_path: str, ...) -> Dict[str, Any]:
+        """NEW_PAGE.full_data - Fetch all data for the page."""
+        pass
+```
+
+### Step 3: Implement orchestration.py (post-auth flow)
+```python
+"""
+New Page Orchestration
+"""
+async def handle_orchestrate_init(payload: Dict[str, Any]) -> None:
+    """Handle new_page.orchestrate_init WebSocket event."""
+    pass
+```
+
+### Step 4: Add providers for components
+```python
+# providers/my_component.py
+async def get_my_component_data(uid: str, mandate_path: str) -> Dict[str, Any]:
+    """Fetch data for MyComponent."""
+    pass
+```
+
+### Step 5: Export in __init__.py files
+```python
+# pages/new_page/__init__.py
+from .handlers import NewPageHandlers, get_new_page_handlers
+from .orchestration import handle_orchestrate_init
+
+__all__ = ["NewPageHandlers", "get_new_page_handlers", "handle_orchestrate_init"]
+```
+
+### Step 6: Register in main.py
+```python
+# In main.py WebSocket handler
+elif msg_type == "new_page.orchestrate_init":
+    await handle_new_page_orchestrate_init(payload)
+```
+
+### Step 7: Update frontend/__init__.py
+```python
+from .pages.new_page import NewPageHandlers
+```
+
+## Core Module Details
+
+### auth_handlers.py
+- `handle_firebase_token(payload)`: Verify Firebase ID token, create session
+- `get_session(uid, session_id)`: Retrieve session from Redis
+- `invalidate_session(uid, session_id)`: Logout/cleanup
+
+### page_state_manager.py
+- `PageStateManager.save_page_state()`: Cache page data in Redis
+- `PageStateManager.get_page_state()`: Retrieve cached data for fast refresh
+
+### pending_action_manager.py
+- `PendingActionManager.save_pending_action()`: Store OAuth/payment state
+- `PendingActionManager.complete_pending_action()`: Resume after redirect
+
+## WebSocket Events (Dashboard)
+
+| Event | Handler | Purpose |
+|-------|---------|---------|
+| `auth.firebase_token` | `handle_firebase_token()` | Login/session creation |
+| `dashboard.orchestrate_init` | `handle_orchestrate_init()` | Initial dashboard load |
+| `dashboard.company_change` | `handle_company_change()` | Switch company context |
+| `dashboard.refresh` | `handle_refresh()` | Manual refresh |
+| `page.restore_state` | `PageStateManager.get_page_state()` | Fast refresh recovery |
+| `approval.*` | `ApprovalHandlers` | Approval operations |
+| `task.*` | `TaskHandlers` | Task operations |
+
+## Dependencies (Singletons - DO NOT MODIFY)
+
+| Singleton | File | Purpose |
+|-----------|------|---------|
+| `get_firebase_app()` | `firebase_client.py` | Firebase Admin SDK |
+| `get_redis()` | `redis_client.py` | Redis connection |
+| `FirebaseManagement` | `firebase_providers.py` | Firebase data layer |
+| `ERPService` | `erp_service.py` | Odoo ERP connection |
+| `DriveClientService` | `driveClientService.py` | Google Drive API |
+| `ws_hub` | `ws_hub.py` | WebSocket broadcast |
+
+## Migration Status
+
+| Page | Status | Notes |
+|------|--------|-------|
+| Dashboard | 85% | Tasks, Approvals, Metrics complete |
+| Chat | TODO | LLM service ready |
+| Invoices | TODO | Spec in docs/pages/invoices.md |
+| Expenses | TODO | Spec in docs/pages/expenses.md |
+| Banking | TODO | Spec in docs/pages/banking.md |
+| HR | TODO | hr_rpc_handlers.py exists |

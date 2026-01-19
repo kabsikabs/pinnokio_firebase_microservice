@@ -2461,22 +2461,44 @@ class LLMManager:
                         logger.info(f"[SEND_MESSAGE] ✅ Brain mis à jour avec chat_mode=general_chat")
             
             # ═══════════════════════════════════════════════════════════
-            # ÉTAPE 2 : VÉRIFIER QUE LE BRAIN EXISTE
+            # ÉTAPE 2 : VÉRIFIER/CRÉER LE BRAIN
             # ═══════════════════════════════════════════════════════════
-            # Note: Le brain doit avoir été créé par LLM.enter_chat() avant l'envoi du message
+            # Auto-créer le brain si il n'existe pas (migration Next.js)
             if thread_key not in session.active_brains:
-                logger.error(
-                    f"[SEND_MESSAGE] ❌ Brain non trouvé pour thread={thread_key}. "
-                    f"Le frontend doit appeler LLM.enter_chat() AVANT d'envoyer un message."
+                logger.warning(
+                    f"[SEND_MESSAGE] ⚠️ Brain non trouvé pour thread={thread_key}. "
+                    f"Auto-création en cours..."
                 )
-                return {
-                    "success": False,
-                    "error": "Brain not initialized",
-                    "message": f"Le chat doit être initialisé via enter_chat() avant d'envoyer des messages",
-                    "thread_key": thread_key
-                }
-            
-            logger.info(f"[SEND_MESSAGE] ✅ Brain trouvé et prêt")
+
+                # Charger l'historique depuis RTDB pour créer le brain
+                history = await self._load_history_from_rtdb(
+                    collection_name, thread_key, chat_mode
+                )
+
+                # Créer le brain via load_chat_history
+                load_result = await self.load_chat_history(
+                    user_id=user_id,
+                    collection_name=collection_name,
+                    thread_key=thread_key,
+                    history=history or []
+                )
+
+                if not load_result.get("success"):
+                    logger.error(
+                        f"[SEND_MESSAGE] ❌ Échec auto-création brain: {load_result.get('error')}"
+                    )
+                    return {
+                        "success": False,
+                        "error": "Brain auto-initialization failed",
+                        "message": load_result.get("message", "Échec création brain"),
+                        "thread_key": thread_key
+                    }
+
+                # Marquer la présence de l'utilisateur
+                session.enter_chat(thread_key)
+                logger.info(f"[SEND_MESSAGE] ✅ Brain auto-créé avec succès")
+            else:
+                logger.info(f"[SEND_MESSAGE] ✅ Brain trouvé et prêt")
             
             brain = session.active_brains[thread_key]
 
@@ -2490,15 +2512,68 @@ class LLMManager:
                 await brain.load_job_data(job_id)
 
             # ═══════════════════════════════════════════════════════════
-            # ÉTAPE 3 : PRÉPARER MESSAGE ASSISTANT RTDB
+            # ÉTAPE 2.5 : SAUVEGARDER MESSAGE UTILISATEUR DANS RTDB (Next.js)
             # ═══════════════════════════════════════════════════════════
-            # ⚠️ Note: Le message utilisateur est déjà sauvegardé par le frontend dans active_chats
-            # On ne sauvegarde que le message assistant pour éviter les doublons
-            assistant_message_id = str(uuid.uuid4())
-            assistant_timestamp = datetime.now(timezone.utc).isoformat()
+            # Note: Le frontend Next.js ne sauvegarde pas les messages - on le fait ici
+            user_message_id = str(uuid.uuid4())
+            user_timestamp = datetime.now(timezone.utc).isoformat()
             messages_base_path = self._get_messages_base_path(
                 collection_name, thread_key, session.context.chat_mode
             )
+
+            # Sauvegarder le message utilisateur
+            user_msg_path = f"{messages_base_path}/{user_message_id}"
+            user_msg_ref = self._get_rtdb_ref(user_msg_path)
+
+            user_message_data = self.rtdb_formatter.format_user_message(
+                content=message,
+                user_id=user_id,
+                message_id=user_message_id,
+                timestamp=user_timestamp
+            )
+
+            user_msg_ref.set(user_message_data)
+            logger.info(f"[SEND_MESSAGE] ✅ Message utilisateur sauvegardé: {user_message_id}")
+
+            # ═══════════════════════════════════════════════════════════
+            # ÉTAPE 2.6 : AUTO-NAMING POUR CHAT VIERGE
+            # ═══════════════════════════════════════════════════════════
+            # Détecter si c'est le premier message d'un chat (nouveau chat sans historique)
+            # Note: On vérifie par le nombre de messages, pas par le préfixe du thread_key
+            try:
+                from ..firebase_providers import get_firebase_realtime
+
+                realtime_service = get_firebase_realtime()
+                # Si le thread n'a pas de messages (ou juste celui qu'on vient d'ajouter), c'est le premier
+                existing_messages = realtime_service.get_thread_messages(
+                    space_code=collection_name,
+                    thread_key=thread_key,
+                    mode="chats",
+                    limit=3
+                )
+                # Si seulement 1 message (celui qu'on vient d'ajouter), c'est le premier
+                is_first_message = len(existing_messages or []) <= 1
+
+                if is_first_message:
+                    logger.info(f"[SEND_MESSAGE] 🏷️ Premier message détecté - lancement auto-naming pour thread={thread_key}")
+                    # Lancer l'auto-naming en arrière-plan
+                    asyncio.create_task(
+                        self._auto_name_virgin_chat(
+                            user_id=user_id,
+                            collection_name=collection_name,
+                            thread_key=thread_key,
+                            first_message=message,
+                            chat_mode=chat_mode
+                        )
+                    )
+            except Exception as e:
+                logger.warning(f"[SEND_MESSAGE] Auto-naming check failed: {e}")
+
+            # ═══════════════════════════════════════════════════════════
+            # ÉTAPE 3 : PRÉPARER MESSAGE ASSISTANT RTDB
+            # ═══════════════════════════════════════════════════════════
+            assistant_message_id = str(uuid.uuid4())
+            assistant_timestamp = datetime.now(timezone.utc).isoformat()
             
             # Message assistant initial (vide, pour streaming)
             assistant_msg_path = f"{messages_base_path}/{assistant_message_id}"
@@ -2562,7 +2637,7 @@ class LLMManager:
             
             return {
                 "success": True,
-                "user_message_id": None,  # ⚠️ Le frontend génère son propre ID pour le message utilisateur
+                "user_message_id": user_message_id,  # ✅ Backend saves user message now
                 "assistant_message_id": assistant_message_id,
                 "ws_channel": f"chat:{user_id}:{collection_name}:{thread_key}",
                 "message": "Message envoyé, réponse en cours de streaming via WebSocket"
@@ -2574,7 +2649,121 @@ class LLMManager:
                 "success": False,
                 "error": str(e)
             }
-    
+
+    async def _auto_name_virgin_chat(
+        self,
+        user_id: str,
+        collection_name: str,
+        thread_key: str,
+        first_message: str,
+        chat_mode: str = "general_chat"
+    ) -> None:
+        """
+        Auto-name a virgin chat based on the first message.
+        Runs in background - does not block message processing.
+
+        Uses heuristics to generate a name (can be enhanced with LLM later).
+        """
+        try:
+            logger.info(f"[AUTO_NAMING] 🏷️ Starting auto-naming for thread={thread_key}")
+
+            # Generate name using heuristics
+            generated_name = self._generate_chat_name_from_message(first_message)
+
+            if not generated_name:
+                logger.warning(f"[AUTO_NAMING] ⚠️ Failed to generate name, using default")
+                generated_name = f"Chat {datetime.now().strftime('%d/%m %H:%M')}"
+
+            # Rename the chat in Firebase
+            from ..firebase_providers import get_firebase_realtime
+
+            realtime_service = get_firebase_realtime()
+            mode = "chats"  # Default mode for user chats
+
+            success = realtime_service.update_thread_name(
+                space_code=collection_name,
+                thread_key=thread_key,
+                new_name=generated_name,
+                mode=mode
+            )
+
+            if success:
+                logger.info(f"[AUTO_NAMING] ✅ Chat renamed to: '{generated_name}'")
+
+                # Notify frontend via WebSocket
+                from ..ws_hub import hub
+                await hub.broadcast(user_id, {
+                    "type": "chat.sessions_list",
+                    "payload": {
+                        "action": "renamed",
+                        "thread_key": thread_key,
+                        "new_name": generated_name
+                    }
+                })
+            else:
+                logger.error(f"[AUTO_NAMING] ❌ Failed to rename chat")
+
+        except Exception as e:
+            logger.error(f"[AUTO_NAMING] ❌ Error: {e}", exc_info=True)
+
+    def _generate_chat_name_from_message(self, first_message: str, max_length: int = 50) -> str:
+        """
+        Generate a chat name from the first message using heuristics.
+
+        Algorithm:
+        1. Clean and sanitize the message
+        2. Remove common greetings (Bonjour, Hello, Hi, etc.)
+        3. Truncate at first sentence boundary
+        4. Limit to max_length characters (break at word boundary)
+        5. Capitalize first letter
+        6. Fallback: "Chat DD/MM HH:MM" if empty
+        """
+        if not first_message or not first_message.strip():
+            return f"Chat {datetime.now().strftime('%d/%m %H:%M')}"
+
+        # Clean the message
+        name = first_message.strip()
+
+        # Remove common greetings at the start (multilingual)
+        greetings = [
+            "bonjour", "bonsoir", "salut", "hello", "hi", "hey",
+            "guten tag", "hallo", "s'il vous plaît", "please",
+            "j'aimerais", "je voudrais", "i would like", "i want to",
+            "peux-tu", "pouvez-vous", "can you", "could you",
+            "ich möchte", "können sie", "könntest du",
+        ]
+        name_lower = name.lower()
+        for greeting in greetings:
+            if name_lower.startswith(greeting):
+                # Remove greeting and any following punctuation/space
+                name = name[len(greeting):].lstrip(" ,.:!?")
+                break
+
+        # Truncate at sentence boundary if possible
+        for delimiter in [". ", "? ", "! ", "\n"]:
+            if delimiter in name:
+                name = name.split(delimiter)[0]
+                break
+
+        # Truncate to max length
+        if len(name) > max_length:
+            # Try to break at word boundary
+            name = name[:max_length]
+            last_space = name.rfind(" ")
+            if last_space > max_length * 0.6:  # Don't truncate too much
+                name = name[:last_space]
+            name = name.rstrip() + "..."
+
+        # Capitalize first letter
+        if name:
+            name = name[0].upper() + name[1:] if len(name) > 1 else name.upper()
+
+        # Fallback if empty after processing
+        if not name or len(name) < 3:
+            return f"Chat {datetime.now().strftime('%d/%m %H:%M')}"
+
+        return name
+
     async def update_context(
         self,
         user_id: str,

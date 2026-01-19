@@ -59,5 +59,49 @@ class RTDBMessageFormatter:
         
         if metadata:
             message_data['metadata'] = metadata
-            
+
+        return message_data
+
+    @staticmethod
+    def format_user_message(
+        content: str,
+        user_id: str,
+        message_id: str = None,
+        metadata: dict = None,
+        timestamp: str = None
+    ) -> dict:
+        """
+        Formate un message utilisateur pour RTDB (type MESSAGE_PINNOKIO).
+        Format compatible avec handle_realtime_message() de Reflex.
+
+        Args:
+            content (str): Contenu du message utilisateur
+            user_id (str): ID de l'utilisateur
+            message_id (str, optional): ID du message. Généré automatiquement si non fourni
+            metadata (dict, optional): Métadonnées supplémentaires
+            timestamp (str, optional): Timestamp ISO 8601. Généré automatiquement si non fourni
+
+        Returns:
+            dict: Message formaté pour RTDB
+        """
+        if not message_id:
+            message_id = str(uuid.uuid4())
+
+        if not timestamp:
+            timestamp = datetime.now(timezone.utc).isoformat()
+
+        # Format pour messages utilisateur (plain text, pas de JSON structuré)
+        message_data = {
+            'id': message_id,
+            'content': content,  # Plain text for user messages
+            'sender_id': user_id,
+            'timestamp': timestamp,
+            'message_type': 'MESSAGE_PINNOKIO',  # Type pour messages utilisateur
+            'read': False,
+            'local_processed': False
+        }
+
+        if metadata:
+            message_data['metadata'] = metadata
+
         return message_data

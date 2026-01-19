@@ -447,6 +447,22 @@ async def handle_company_change(
         except Exception as e:
             logger.warning(f"[ORCHESTRATION] Failed to invalidate LLM session: {e}")
 
+    # 3b. Invalidate page_state for old company (all pages)
+    if old_company_id:
+        try:
+            from .page_state_manager import get_page_state_manager
+            page_state_manager = get_page_state_manager()
+            # Invalidate all pages for the OLD company
+            pages_to_invalidate = ["dashboard", "invoices", "expenses", "chat", "hr", "settings"]
+            for page in pages_to_invalidate:
+                page_state_manager.invalidate_page_state(uid, old_company_id, page)
+            logger.info(
+                f"[ORCHESTRATION] Invalidated page_state for company change: "
+                f"uid={uid} old_company={old_company_id} pages={pages_to_invalidate}"
+            )
+        except Exception as ps_error:
+            logger.warning(f"[ORCHESTRATION] Failed to invalidate page_state: {ps_error}")
+
     # 4. Cancel existing orchestration
     state_manager.request_cancellation(uid, session_id)
     await asyncio.sleep(0.1)
@@ -1511,6 +1527,25 @@ async def _run_data_phase(
             "type": WS_EVENTS.DASHBOARD.FULL_DATA,
             "payload": result
         })
+
+        # ════════════════════════════════════════════════════════════
+        # STEP 4: Save page_state for fast recovery on page refresh
+        # ════════════════════════════════════════════════════════════
+        if result.get("success") and result.get("data"):
+            try:
+                from .page_state_manager import get_page_state_manager
+                page_state_manager = get_page_state_manager()
+                page_state_manager.save_page_state(
+                    uid=uid,
+                    company_id=company_id,
+                    page="dashboard",
+                    mandate_path=mandate_path,
+                    data=result["data"]
+                )
+                logger.info(f"[ORCHESTRATION] Page state saved for dashboard - uid={uid} company={company_id}")
+            except Exception as ps_error:
+                # Non-critical - log but don't fail orchestration
+                logger.warning(f"[ORCHESTRATION] Failed to save page_state: {ps_error}")
 
         # Notify loading complete
         await _notify_loading_progress(uid, "all", "completed")

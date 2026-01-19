@@ -197,6 +197,99 @@ class ConnectionEvents:
 
 
 # ============================================
+# Page State Events (4 events) - NEW
+# ============================================
+class PageStateEvents:
+    """
+    Evenements pour la gestion d'etat des pages.
+
+    Permet le rechargement rapide des pages apres refresh
+    en restaurant l'etat depuis le cache Redis.
+    """
+    RESTORE = "page.restore_state"       # Frontend demande restauration
+    RESTORED = "page.state_restored"     # Backend retourne etat cache
+    NOT_FOUND = "page.state_not_found"   # Etat non trouve, orchestration necessaire
+    INVALIDATE = "page.invalidate_state" # Invalider cache d'une page
+
+
+# ============================================
+# Balance Events (6 events) - NEW
+# ============================================
+class BalanceEvents:
+    """
+    Events for account balance operations (top-up, refresh).
+
+    Flow:
+    - TOP_UP: Frontend requests top-up with amount
+    - TOP_UP_RESULT: Backend returns Stripe checkout URL
+    - TOP_UP_COMPLETE: After Stripe redirect, payment completed/cancelled
+    - REFRESH: Frontend requests fresh balance data
+    - REFRESHED: Backend returns updated balance data
+    - ERROR: Error during balance operations
+    """
+    TOP_UP = "balance.top_up"               # Request top-up
+    TOP_UP_RESULT = "balance.top_up_result" # Checkout URL or error
+    TOP_UP_COMPLETE = "balance.top_up_complete"  # Payment completed
+    REFRESH = "balance.refresh"             # Request balance refresh
+    REFRESHED = "balance.refreshed"         # Balance data updated
+    ERROR = "balance.error"                 # Error occurred
+
+
+# ============================================
+# Chat Events (12 events) - NEW
+# Chat session management (distinct from LLM streaming)
+# ============================================
+class ChatEvents:
+    """
+    Evenements pour la gestion des sessions de chat.
+
+    Distinct de LLMEvents qui gere le streaming des reponses.
+    ChatEvents gere:
+    - Orchestration de page chat
+    - Sessions de chat (CRUD)
+    - Historique des messages
+    - Mode chat (general, onboarding, etc.)
+    """
+    # Orchestration events
+    ORCHESTRATE_INIT = "chat.orchestrate_init"     # Initialize chat page data
+    FULL_DATA = "chat.full_data"                   # Complete chat page data
+
+    # Session management
+    SESSIONS_LIST = "chat.sessions_list"           # List of chat sessions
+    SESSION_SELECT = "chat.session_select"         # Select a session
+    SESSION_CREATE = "chat.session_create"         # Create new session
+    SESSION_DELETE = "chat.session_delete"         # Delete session
+    SESSION_RENAME = "chat.session_rename"         # Rename session
+
+    # Message history
+    HISTORY_LOAD = "chat.history_load"             # Load chat history
+    HISTORY_LOADED = "chat.history_loaded"         # History data received
+
+    # Chat mode
+    MODE_CHANGE = "chat.mode_change"               # Change chat mode
+    MODE_CHANGED = "chat.mode_changed"             # Mode change confirmed
+
+    # Error
+    ERROR = "chat.error"                           # Chat-specific error
+
+
+# ============================================
+# Pending Action Events (4 events) - NEW
+# ============================================
+class PendingActionEvents:
+    """
+    Evenements pour les actions en attente (OAuth, paiements).
+
+    Gere la preservation d'etat pendant les redirections externes
+    vers Google OAuth, Stripe, etc.
+    """
+    SAVE = "pending_action.save"         # Sauvegarder action avant redirect
+    SAVED = "pending_action.saved"       # Confirmation + URL de redirect
+    COMPLETE = "pending_action.complete" # Action completee (callback recu)
+    CANCEL = "pending_action.cancel"     # Annuler action en attente
+
+
+# ============================================
 # Consolidated WS_EVENTS Class
 # ============================================
 class WS_EVENTS:
@@ -225,6 +318,10 @@ class WS_EVENTS:
     WORKFLOW = WorkflowEvents
     SESSION = SessionEvents
     CONNECTION = ConnectionEvents
+    PAGE_STATE = PageStateEvents      # NEW: Page state management
+    PENDING_ACTION = PendingActionEvents  # NEW: OAuth/payment flows
+    BALANCE = BalanceEvents           # NEW: Account balance operations
+    CHAT = ChatEvents                 # NEW: Chat session management
 
 
 # ============================================
@@ -482,6 +579,10 @@ __all__ = [
     'WorkflowEvents',
     'SessionEvents',
     'ConnectionEvents',
+    'PageStateEvents',      # NEW
+    'PendingActionEvents',  # NEW
+    'BalanceEvents',        # NEW
+    'ChatEvents',           # NEW: Chat session management
     'LEGACY_EVENT_MAPPING',
     'EVENT_DESCRIPTIONS',
     'normalize_event_type',
