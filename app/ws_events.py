@@ -60,12 +60,19 @@ class AuthEvents:
 # ============================================
 class LLMEvents:
     """Evenements LLM/Chat streaming."""
+    # Streaming events (from microservice)
     STREAM_START = "llm.stream_start"
     STREAM_DELTA = "llm.stream_delta"
     STREAM_END = "llm.stream_end"
+    STREAM_INTERRUPTED = "llm.stream_interrupted"  # Streaming was interrupted by user action
+    STOP_STREAMING = "llm.stop_streaming"          # Request to stop streaming
+
+    # Tool use events
     TOOL_USE_START = "llm.tool_use_start"
     TOOL_USE_PROGRESS = "llm.tool_use_progress"
     TOOL_USE_END = "llm.tool_use_end"
+
+    # Other events
     APPROVAL_REQUEST = "llm.approval_request"
     ERROR = "llm.error"
     SESSION_READY = "llm.session_ready"
@@ -163,11 +170,52 @@ class ActivityEvents:
 
 
 # ============================================
-# Invoice Events (1 event)
+# Invoice Events (14 events)
+# APBookkeeper/Invoices page management
 # ============================================
 class InvoiceEvents:
-    """Evenements factures."""
+    """
+    Evenements factures (APBookkeeper).
+
+    Gere:
+    - Orchestration de page
+    - Liste des factures par categorie
+    - Traitement (processing) de factures
+    - Arret de traitement
+    - Suppression de factures traitees
+    - Redemarrage de jobs
+    - Instructions par document
+
+    NOTE Invoices Specificites:
+    - 4 onglets: to_do, in_process, pending, processed
+    - AAA/AW colonnes uniquement sur to_do
+    - Boutons conditionnels par onglet
+    """
+    # Orchestration events
+    ORCHESTRATE_INIT = "invoices.orchestrate_init"
+    FULL_DATA = "invoices.full_data"
+
+    # Document operations
+    LIST = "invoices.list"
+    PROCESS = "invoices.process"
+    PROCESSED = "invoices.processed"
+    STOP = "invoices.stop"
+    STOPPED = "invoices.stopped"
+    DELETE = "invoices.delete"
+    DELETED = "invoices.deleted"
+    RESTART = "invoices.restart"
+    RESTARTED = "invoices.restarted"
+    REFRESH = "invoices.refresh"
+
+    # Instructions
+    INSTRUCTIONS_SAVE = "invoices.instructions_save"
+    INSTRUCTIONS_SAVED = "invoices.instructions_saved"
+
+    # Legacy (backward compatibility)
     FIELD_UPDATE = "invoice.field_update"
+
+    # Error
+    ERROR = "invoices.error"
 
 
 # ============================================
@@ -249,6 +297,8 @@ class ChatEvents:
     - Sessions de chat (CRUD)
     - Historique des messages
     - Mode chat (general, onboarding, etc.)
+    - Auto-naming de sessions
+    - Workflow checklist (onboarding)
     """
     # Orchestration events
     ORCHESTRATE_INIT = "chat.orchestrate_init"     # Initialize chat page data
@@ -260,6 +310,11 @@ class ChatEvents:
     SESSION_CREATE = "chat.session_create"         # Create new session
     SESSION_DELETE = "chat.session_delete"         # Delete session
     SESSION_RENAME = "chat.session_rename"         # Rename session
+    SESSION_AUTO_NAME = "chat.session_auto_name"   # Auto-name virgin chat (LLM)
+
+    # Message sending
+    SEND_MESSAGE = "chat.send_message"             # Send a message
+    MESSAGE_SENT = "chat.message_sent"             # Message sent confirmation
 
     # Message history
     HISTORY_LOAD = "chat.history_load"             # Load chat history
@@ -269,8 +324,359 @@ class ChatEvents:
     MODE_CHANGE = "chat.mode_change"               # Change chat mode
     MODE_CHANGED = "chat.mode_changed"             # Mode change confirmed
 
+    # Workflow checklist (onboarding)
+    WORKFLOW_SET = "chat.workflow_set"             # Set workflow checklist
+    WORKFLOW_STEP_UPDATE = "chat.workflow_step_update"  # Update step status
+
+    # Interactive cards
+    CARD_RECEIVED = "chat.card_received"           # Interactive card received
+    CARD_CLICKED = "chat.card_clicked"             # User clicked on card
+
+    # Tool use indicators
+    TOOL_INDICATOR_START = "chat.tool_indicator_start"   # Tool use started
+    TOOL_INDICATOR_END = "chat.tool_indicator_end"       # Tool use ended
+
     # Error
     ERROR = "chat.error"                           # Chat-specific error
+
+
+# ============================================
+# Routing Events (10 events) - NEW
+# Document routing management
+# ============================================
+class RoutingEvents:
+    """
+    Evenements pour la page Routing (Document Matrix).
+
+    Gere le routage de documents depuis Google Drive
+    vers les differents departements de traitement.
+    """
+    # Orchestration events
+    ORCHESTRATE_INIT = "routing.orchestrate_init"   # Initialize page data
+    FULL_DATA = "routing.full_data"                 # Complete page data
+
+    # Document operations
+    LIST = "routing.list"                           # List documents by category
+    PROCESS = "routing.process"                     # Process selected documents
+    PROCESSED = "routing.processed"                 # Processing complete
+    RESTART = "routing.restart"                     # Restart a job
+    RESTARTED = "routing.restarted"                 # Job restarted
+    REFRESH = "routing.refresh"                     # Refresh current tab
+
+    # Instructions
+    INSTRUCTIONS_SAVE = "routing.instructions_save" # Save document instructions
+    INSTRUCTIONS_SAVED = "routing.instructions_saved"  # Instructions saved
+
+    # OAuth (Drive connection)
+    OAUTH_INIT = "routing.oauth_init"               # Initialize OAuth flow
+    OAUTH_CALLBACK = "routing.oauth_callback"       # OAuth callback received
+
+    # Error
+    ERROR = "routing.error"                         # Routing-specific error
+
+
+# ============================================
+# Notification Events (10 events) - NEW
+# Notifications from jobbeurs (Router, APbookeeper, Bankbookeeper)
+# ============================================
+class NotificationEvents:
+    """
+    Evenements pour les notifications Firebase (Firestore).
+
+    Les notifications proviennent des jobbeurs et sont affichees
+    dans le NotificationBell du header.
+
+    Source: clients/{uid}/notifications
+    Canal PubSub: notification:{uid}
+    """
+    # Initial load
+    FULL_DATA = "notification.full_data"               # Liste complete
+
+    # Real-time updates (via Redis PubSub)
+    DELTA = "notification.delta"                       # Delta (new/update/remove)
+    NEW = "notification.new"                           # Nouvelle notification
+    UPDATED = "notification.updated"                   # Notification mise a jour
+    REMOVED = "notification.removed"                   # Notification supprimee
+
+    # User actions
+    MARK_READ = "notification.mark_read"               # Marquer comme lu (request)
+    MARK_READ_RESULT = "notification.mark_read_result" # Resultat
+    CLICK = "notification.click"                       # Clic sur notification
+    CLICK_RESULT = "notification.click_result"         # Resultat avec redirect info
+
+    # Error
+    ERROR = "notification.error"                       # Erreur notification
+
+
+# ============================================
+# Messenger Events (9 events) - NEW
+# Direct messages from Firebase RTDB
+# ============================================
+class MessengerEvents:
+    """
+    Evenements pour les messages directs (Firebase RTDB).
+
+    Les messages sont affiches dans le MessengerBell du header.
+
+    Source: Firebase RTDB - direct_messages/{uid}
+    Canal PubSub: messenger:{uid}
+    """
+    # Initial load
+    FULL_DATA = "messenger.full_data"                  # Liste complete
+
+    # Real-time updates (via Redis PubSub)
+    DELTA = "messenger.delta"                          # Delta (new/update/remove)
+    NEW = "messenger.new"                              # Nouveau message
+    REMOVED = "messenger.removed"                      # Message supprime
+
+    # User actions
+    MARK_READ = "messenger.mark_read"                  # Marquer comme lu (request)
+    MARK_READ_RESULT = "messenger.mark_read_result"    # Resultat
+    CLICK = "messenger.click"                          # Clic sur message
+    CLICK_RESULT = "messenger.click_result"            # Resultat avec redirect info
+
+    # Error
+    ERROR = "messenger.error"                          # Erreur messenger
+
+
+# ============================================
+# Static Data Events (4 events) - NEW
+# Données statiques pour les dropdowns (chargées une seule fois)
+# ============================================
+class StaticDataEvents:
+    """
+    Evenements pour les donnees statiques de l'application.
+
+    Ces donnees sont chargees une seule fois pendant Phase 0 (user_setup)
+    et mises en cache dans le store frontend de maniere permanente.
+
+    Contenu:
+    - Languages: Liste des langues disponibles
+    - Countries: Liste des pays
+    - Legal forms: Formes juridiques par pays
+    - ERPs: Liste des systemes ERP (Odoo, Banana, etc.)
+    - DMS: Systemes de gestion documentaire (Drive, etc.)
+    - Currencies: Liste des devises
+    - Communication: Types de communication (Pinnokio, Telegram)
+    """
+    # Request/Response pattern
+    LOAD = "static_data.load"             # Frontend demande chargement
+    LOADED = "static_data.loaded"         # Backend retourne toutes les donnees
+    REFRESH = "static_data.refresh"       # Force rafraichissement du cache
+    ERROR = "static_data.error"           # Erreur de chargement
+
+
+# ============================================
+# Company Settings Events (15 events) - NEW
+# Page de configuration de l'entreprise
+# ============================================
+class CompanySettingsEvents:
+    """
+    Evenements pour la page Company Settings.
+
+    Gere:
+    - Orchestration de page
+    - Informations entreprise
+    - Parametres DMS/Communication/Accounting
+    - Workflow (APbookeeper, Banker, Router)
+    - Contextes
+    - Telegram room registration
+    - Asset management
+    - ERP connections
+    - User sharing
+    - Company deletion
+    """
+    # Orchestration events
+    ORCHESTRATE_INIT = "company_settings.orchestrate_init"
+    FULL_DATA = "company_settings.full_data"
+
+    # Additional data (optimized - Telegram/ERP only, uses COMPANY.DETAILS for rest)
+    FETCH_ADDITIONAL = "company_settings.fetch_additional"
+    ADDITIONAL_DATA = "company_settings.additional_data"
+
+    # Company Info
+    SAVE_COMPANY_INFO = "company_settings.save_company_info"
+    COMPANY_INFO_SAVED = "company_settings.company_info_saved"
+
+    # Settings (DMS, Communication, Accounting)
+    SAVE_SETTINGS = "company_settings.save_settings"
+    SETTINGS_SAVED = "company_settings.settings_saved"
+
+    # Workflow params
+    SAVE_WORKFLOW = "company_settings.save_workflow"
+    WORKFLOW_SAVED = "company_settings.workflow_saved"
+
+    # Context
+    SAVE_CONTEXT = "company_settings.save_context"
+    CONTEXT_SAVED = "company_settings.context_saved"
+
+    # Telegram room registration (CRITICAL)
+    TELEGRAM_START_REGISTRATION = "company_settings.telegram_start_registration"
+    TELEGRAM_REGISTRATION_SUCCESS = "company_settings.telegram_registration_success"
+    TELEGRAM_REGISTRATION_FAILED = "company_settings.telegram_registration_failed"
+    TELEGRAM_REMOVE_USER = "company_settings.telegram_remove_user"
+    TELEGRAM_USER_REMOVED = "company_settings.telegram_user_removed"
+
+    # Asset management
+    SAVE_ASSET_SETTINGS = "company_settings.save_asset_settings"
+    ASSET_SETTINGS_SAVED = "company_settings.asset_settings_saved"
+
+    # ERP connections
+    SAVE_ERP_CONNECTIONS = "company_settings.save_erp_connections"
+    ERP_CONNECTIONS_SAVED = "company_settings.erp_connections_saved"
+    TEST_ERP_CONNECTION = "company_settings.test_erp_connection"
+    ERP_CONNECTION_RESULT = "company_settings.erp_connection_result"
+
+    # User sharing
+    GET_SHARED_USERS = "company_settings.get_shared_users"
+    SHARED_USERS_DATA = "company_settings.shared_users_data"
+    UPDATE_SHARED_ACCESS = "company_settings.update_shared_access"
+    SHARED_ACCESS_UPDATED = "company_settings.shared_access_updated"
+
+    # Company deletion
+    DELETE_COMPANY = "company_settings.delete_company"
+    COMPANY_DELETED = "company_settings.company_deleted"
+
+    # Error
+    ERROR = "company_settings.error"
+
+
+# ============================================
+# COA Events (15 events) - NEW
+# Chart of Accounts page
+# ============================================
+class COAEvents:
+    """
+    Evenements pour la page COA (Chart of Accounts).
+
+    Gere:
+    - Orchestration de page
+    - Chargement comptes COA
+    - Chargement fonctions KLK
+    - Sauvegarde modifications vers ERP
+    - Synchronisation depuis ERP
+    - Gestion fonctions custom (CRUD)
+    """
+    # Orchestration events
+    ORCHESTRATE_INIT = "coa.orchestrate_init"
+    FULL_DATA = "coa.full_data"
+
+    # Accounts
+    LOAD_ACCOUNTS = "coa.load_accounts"
+    ACCOUNTS_LOADED = "coa.accounts_loaded"
+
+    # Functions
+    LOAD_FUNCTIONS = "coa.load_functions"
+    FUNCTIONS_LOADED = "coa.functions_loaded"
+
+    # Save/Sync
+    SAVE_CHANGES = "coa.save_changes"
+    CHANGES_SAVED = "coa.changes_saved"
+    SYNC_ERP = "coa.sync_erp"
+    SYNC_PROGRESS = "coa.sync_progress"
+    SYNC_COMPLETE = "coa.sync_complete"
+
+    # Function CRUD
+    TOGGLE_FUNCTION = "coa.toggle_function"
+    FUNCTION_TOGGLED = "coa.function_toggled"
+    CREATE_FUNCTION = "coa.create_function"
+    UPDATE_FUNCTION = "coa.update_function"
+    DELETE_FUNCTION = "coa.delete_function"
+    FUNCTION_SAVED = "coa.function_saved"
+    FUNCTION_DELETED = "coa.function_deleted"
+
+    # Error
+    ERROR = "coa.error"
+
+
+# ============================================
+# Banking Events (14 events) - NEW
+# Bank transaction management
+# ============================================
+class BankingEvents:
+    """
+    Evenements pour la page Banking (Transactions bancaires).
+
+    Gere:
+    - Orchestration de page
+    - Liste des comptes bancaires
+    - Liste des transactions par categorie
+    - Traitement (matching) de transactions
+    - Arret de traitement
+    - Suppression de transactions matchees
+    - Instructions par transaction
+
+    NOTE Banking Specificites:
+    - PAS d'onglet "completed" - utilise "matched"
+    - Selecteur de compte bancaire comme filtre principal
+    - Affichage balance avec couleur
+    - Gestion des batches dans in_process
+    """
+    # Orchestration events
+    ORCHESTRATE_INIT = "banking.orchestrate_init"
+    FULL_DATA = "banking.full_data"
+
+    # Account operations
+    ACCOUNTS_LIST = "banking.accounts_list"
+    ACCOUNTS_LOADED = "banking.accounts_loaded"
+
+    # Transaction operations
+    LIST = "banking.list"
+    PROCESS = "banking.process"
+    PROCESSED = "banking.processed"
+    STOP = "banking.stop"
+    STOPPED = "banking.stopped"
+    DELETE = "banking.delete"
+    DELETED = "banking.deleted"
+    REFRESH = "banking.refresh"
+
+    # Instructions
+    INSTRUCTIONS_SAVE = "banking.instructions_save"
+    INSTRUCTIONS_SAVED = "banking.instructions_saved"
+
+    # Error
+    ERROR = "banking.error"
+
+
+# ============================================
+# Metrics Events (9 events) - NEW
+# Shared metrics stores (dashboard + detail pages)
+# ============================================
+class MetricsEvents:
+    """
+    Evenements pour les stores de metriques partages.
+
+    Architecture:
+    - Les metriques sont chargees une fois au onboarding/changement de societe
+    - Partagees entre dashboard et pages de detail (routing, ap, bank, expenses)
+    - Pattern optimiste/pessimiste pour les actions utilisateur
+
+    Flow:
+    1. FULL_DATA: Charge toutes les metriques au login/company change
+    2. *_UPDATE: Mise a jour par module lors d'actions
+    3. REFRESH: Demande rafraichissement force depuis source (Drive, Firebase)
+
+    Optimistic Updates:
+    - Frontend applique delta immediatement
+    - Backend confirme/rejette via UPDATE_CONFIRMED/UPDATE_FAILED
+    - Rollback auto si timeout (10s)
+    """
+    # Full data load (at onboarding/company change)
+    FULL_DATA = "metrics.full_data"
+
+    # Module-specific updates
+    ROUTING_UPDATE = "metrics.routing_update"
+    AP_UPDATE = "metrics.ap_update"
+    BANK_UPDATE = "metrics.bank_update"
+    EXPENSES_UPDATE = "metrics.expenses_update"
+
+    # Optimistic update confirmation/rejection
+    UPDATE_CONFIRMED = "metrics.update_confirmed"
+    UPDATE_FAILED = "metrics.update_failed"
+
+    # Refresh requests
+    REFRESH = "metrics.refresh"              # Refresh all modules
+    REFRESH_MODULE = "metrics.refresh_module"  # Refresh specific module
 
 
 # ============================================
@@ -314,7 +720,8 @@ class WS_EVENTS:
     TASK = TaskEvents
     APPROVAL = ApprovalEvents
     ACTIVITY = ActivityEvents
-    INVOICE = InvoiceEvents
+    INVOICE = InvoiceEvents      # Legacy single event
+    INVOICES = InvoiceEvents      # Full APBookkeeper events
     WORKFLOW = WorkflowEvents
     SESSION = SessionEvents
     CONNECTION = ConnectionEvents
@@ -322,6 +729,14 @@ class WS_EVENTS:
     PENDING_ACTION = PendingActionEvents  # NEW: OAuth/payment flows
     BALANCE = BalanceEvents           # NEW: Account balance operations
     CHAT = ChatEvents                 # NEW: Chat session management
+    ROUTING = RoutingEvents           # NEW: Document routing management
+    NOTIFICATION = NotificationEvents # NEW: Notifications from jobbeurs
+    MESSENGER = MessengerEvents       # NEW: Direct messages (RTDB)
+    STATIC_DATA = StaticDataEvents    # NEW: Static dropdown data (loaded once)
+    COMPANY_SETTINGS = CompanySettingsEvents  # NEW: Company settings page
+    COA = COAEvents                   # NEW: Chart of Accounts page
+    BANKING = BankingEvents           # NEW: Banking transactions page
+    METRICS = MetricsEvents           # NEW: Shared metrics stores
 
 
 # ============================================
@@ -338,7 +753,7 @@ LEGACY_EVENT_MAPPING = {
     "llm_stream_complete": WS_EVENTS.LLM.STREAM_END,
     "llm_stream_end": WS_EVENTS.LLM.STREAM_END,  # Alias
     "llm_stream_error": WS_EVENTS.LLM.ERROR,
-    "llm_stream_interrupted": WS_EVENTS.LLM.ERROR,
+    "llm_stream_interrupted": WS_EVENTS.LLM.STREAM_INTERRUPTED,  # User stopped streaming
     "llm.error": WS_EVENTS.LLM.ERROR,
 
     # Anciens evenements Workflow (pinnokio_brain.py, listeners_manager.py)
@@ -455,6 +870,8 @@ EVENT_DESCRIPTIONS = {
     WS_EVENTS.LLM.STREAM_START: "LLM response streaming started",
     WS_EVENTS.LLM.STREAM_DELTA: "LLM response chunk received",
     WS_EVENTS.LLM.STREAM_END: "LLM response streaming ended",
+    WS_EVENTS.LLM.STREAM_INTERRUPTED: "LLM streaming interrupted by user",
+    WS_EVENTS.LLM.STOP_STREAMING: "Request to stop LLM streaming",
     WS_EVENTS.LLM.TOOL_USE_START: "LLM tool call started",
     WS_EVENTS.LLM.TOOL_USE_PROGRESS: "LLM tool call progress update",
     WS_EVENTS.LLM.TOOL_USE_END: "LLM tool call completed",
@@ -583,6 +1000,14 @@ __all__ = [
     'PendingActionEvents',  # NEW
     'BalanceEvents',        # NEW
     'ChatEvents',           # NEW: Chat session management
+    'RoutingEvents',        # NEW: Document routing management
+    'NotificationEvents',   # NEW: Notifications from jobbeurs
+    'MessengerEvents',      # NEW: Direct messages (RTDB)
+    'StaticDataEvents',     # NEW: Static dropdown data
+    'CompanySettingsEvents',  # NEW: Company settings page
+    'COAEvents',            # NEW: Chart of Accounts page
+    'BankingEvents',        # NEW: Banking transactions page
+    'MetricsEvents',        # NEW: Shared metrics stores
     'LEGACY_EVENT_MAPPING',
     'EVENT_DESCRIPTIONS',
     'normalize_event_type',

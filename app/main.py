@@ -1909,6 +1909,18 @@ async def websocket_endpoint(ws: WebSocket):
                         await ws.send_text(_json.dumps(response))
                         logger.info(f"[WS] Dashboard refresh response sent - uid={uid}")
 
+                    elif msg_type == "page.context_change":
+                        # Handler de changement de contexte de page
+                        from .realtime.contextual_publisher import update_page_context
+                        page = msg_payload.get("page")
+                        if page:
+                            update_page_context(uid, page)
+                            logger.info(f"[WS] Page context updated - uid={uid} page={page}")
+                        await ws.send_text(_json.dumps({
+                            "type": "page.context_updated",
+                            "payload": {"success": True, "page": page}
+                        }))
+
                     # ============================================
                     # TASK EVENTS
                     # ============================================
@@ -2077,6 +2089,319 @@ async def websocket_endpoint(ws: WebSocket):
                         await ws.send_text(_json.dumps(response))
                         logger.info(f"[WS] Chat send_message response sent - uid={uid}")
 
+                    elif msg_type == "chat.card_clicked":
+                        # Handle interactive card click (approve/reject)
+                        from .frontend.pages.chat import handle_card_clicked
+                        response = await handle_card_clicked(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Chat card_clicked response sent - uid={uid}")
+
+                    # ============================================
+                    # ROUTING EVENTS (document routing management)
+                    # ============================================
+                    elif msg_type == "routing.orchestrate_init":
+                        from .frontend.pages.routing import handle_routing_orchestrate_init
+                        await handle_routing_orchestrate_init(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Routing orchestrate_init handled - uid={uid}")
+
+                    elif msg_type == "routing.refresh":
+                        from .frontend.pages.routing.orchestration import handle_routing_refresh
+                        await handle_routing_refresh(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Routing refresh handled - uid={uid}")
+
+                    elif msg_type == "routing.process":
+                        from .frontend.pages.routing.orchestration import handle_routing_process
+                        await handle_routing_process(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Routing process handled - uid={uid}")
+
+                    elif msg_type == "routing.restart":
+                        from .frontend.pages.routing.orchestration import handle_routing_restart
+                        await handle_routing_restart(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Routing restart handled - uid={uid}")
+
+                    # ============================================
+                    # INVOICES EVENTS (APBookkeeper)
+                    # ============================================
+                    elif msg_type == "invoices.orchestrate_init":
+                        from .frontend.pages.invoices.orchestration import handle_invoices_orchestrate_init
+                        await handle_invoices_orchestrate_init(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Invoices orchestrate_init handled - uid={uid}")
+
+                    elif msg_type == "invoices.refresh":
+                        from .frontend.pages.invoices.orchestration import handle_invoices_refresh
+                        await handle_invoices_refresh(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Invoices refresh handled - uid={uid}")
+
+                    elif msg_type == "invoices.process":
+                        from .frontend.pages.invoices.orchestration import handle_invoices_process
+                        await handle_invoices_process(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Invoices process handled - uid={uid}")
+
+                    elif msg_type == "invoices.stop":
+                        from .frontend.pages.invoices.orchestration import handle_invoices_stop
+                        await handle_invoices_stop(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Invoices stop handled - uid={uid}")
+
+                    elif msg_type == "invoices.delete":
+                        from .frontend.pages.invoices.orchestration import handle_invoices_delete
+                        await handle_invoices_delete(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Invoices delete handled - uid={uid}")
+
+                    elif msg_type == "invoices.restart":
+                        from .frontend.pages.invoices.orchestration import handle_invoices_restart
+                        await handle_invoices_restart(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Invoices restart handled - uid={uid}")
+
+                    elif msg_type == "invoices.instructions_save":
+                        from .frontend.pages.invoices.orchestration import handle_invoices_instructions_save
+                        await handle_invoices_instructions_save(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Invoices instructions_save handled - uid={uid}")
+
+                    # ============================================
+                    # COMPANY SETTINGS EVENTS
+                    # ============================================
+                    elif msg_type == "company_settings.orchestrate_init":
+                        from .frontend.pages.company_settings import handle_orchestrate_init
+                        await handle_orchestrate_init(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings orchestrate_init handled - uid={uid}")
+
+                    elif msg_type == "company_settings.fetch_additional":
+                        # NEW: Optimized handler - only fetches telegram/erp data
+                        from .frontend.pages.company_settings import handle_fetch_additional
+                        await handle_fetch_additional(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings fetch_additional handled - uid={uid}")
+
+                    # ============================================
+                    # COA EVENTS (Chart of Accounts)
+                    # ============================================
+                    elif msg_type == "coa.orchestrate_init":
+                        from .frontend.pages.coa import handle_orchestrate_init as handle_coa_orchestrate_init
+                        await handle_coa_orchestrate_init(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] COA orchestrate_init handled - uid={uid}")
+
+                    elif msg_type == "coa.load_accounts":
+                        from .frontend.pages.coa import handle_load_accounts
+                        await handle_load_accounts(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] COA load_accounts handled - uid={uid}")
+
+                    elif msg_type == "coa.load_functions":
+                        from .frontend.pages.coa import handle_load_functions
+                        await handle_load_functions(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] COA load_functions handled - uid={uid}")
+
+                    elif msg_type == "coa.save_changes":
+                        from .frontend.pages.coa import handle_save_changes
+                        await handle_save_changes(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] COA save_changes handled - uid={uid}")
+
+                    elif msg_type == "coa.sync_erp":
+                        from .frontend.pages.coa import handle_sync_erp
+                        await handle_sync_erp(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] COA sync_erp handled - uid={uid}")
+
+                    elif msg_type == "coa.toggle_function":
+                        from .frontend.pages.coa import handle_toggle_function
+                        await handle_toggle_function(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] COA toggle_function handled - uid={uid}")
+
+                    elif msg_type == "coa.create_function":
+                        from .frontend.pages.coa import handle_create_function
+                        await handle_create_function(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] COA create_function handled - uid={uid}")
+
+                    elif msg_type == "coa.update_function":
+                        from .frontend.pages.coa import handle_update_function
+                        await handle_update_function(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] COA update_function handled - uid={uid}")
+
+                    elif msg_type == "coa.delete_function":
+                        from .frontend.pages.coa import handle_delete_function
+                        await handle_delete_function(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] COA delete_function handled - uid={uid}")
+
+                    # ============================================
+                    # BANKING EVENTS (Bank transactions management)
+                    # ============================================
+                    elif msg_type == "banking.orchestrate_init":
+                        from .frontend.pages.banking import handle_banking_orchestrate_init
+                        await handle_banking_orchestrate_init(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Banking orchestrate_init handled - uid={uid}")
+
+                    elif msg_type == "banking.refresh":
+                        from .frontend.pages.banking import handle_banking_refresh
+                        await handle_banking_refresh(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Banking refresh handled - uid={uid}")
+
+                    elif msg_type == "banking.process":
+                        from .frontend.pages.banking import handle_banking_process
+                        await handle_banking_process(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Banking process handled - uid={uid}")
+
+                    elif msg_type == "banking.stop":
+                        from .frontend.pages.banking import handle_banking_stop
+                        await handle_banking_stop(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Banking stop handled - uid={uid}")
+
+                    elif msg_type == "banking.delete":
+                        from .frontend.pages.banking import handle_banking_delete
+                        await handle_banking_delete(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Banking delete handled - uid={uid}")
+
+                    # ============================================
+                    # LLM STREAMING EVENTS
+                    # ============================================
+                    elif msg_type == "llm.stop_streaming":
+                        # Stop the current LLM streaming response
+                        from .llm_service import get_llm_manager
+
+                        session_id = msg_payload.get("session_id")  # thread_key from frontend
+                        company_id = msg_payload.get("company_id")
+
+                        logger.info(f"[WS] LLM stop_streaming request - uid={uid} company={company_id} thread={session_id}")
+
+                        try:
+                            result = await get_llm_manager().stop_streaming(
+                                user_id=uid,
+                                collection_name=company_id,
+                                thread_key=session_id,  # session_id from frontend is the thread_key
+                            )
+                            response = {
+                                "type": "llm.stream_interrupted",
+                                "payload": {
+                                    "success": result.get("success", True) if isinstance(result, dict) else True,
+                                    "session_id": session_id,
+                                    "message_id": result.get("message_id") if isinstance(result, dict) else None,
+                                    "accumulated_content": result.get("accumulated_content", "") if isinstance(result, dict) else "",
+                                    "reason": "user_stopped",
+                                }
+                            }
+                        except Exception as e:
+                            logger.error(f"[WS] LLM stop_streaming error: {e}")
+                            response = {
+                                "type": "llm.stream_interrupted",
+                                "payload": {
+                                    "success": False,
+                                    "session_id": session_id,
+                                    "accumulated_content": "",
+                                    "reason": "error",
+                                    "error": str(e),
+                                }
+                            }
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] LLM stop_streaming response sent - uid={uid}")
+
                     # ============================================
                     # PAGE STATE EVENTS (for fast page recovery)
                     # ============================================
@@ -2240,6 +2565,69 @@ async def websocket_endpoint(ws: WebSocket):
                         await ws.send_text(_json.dumps(response))
                         logger.info(f"[WS] Pending action cancelled - uid={uid} success={cancelled}")
 
+                    # ============================================
+                    # NOTIFICATION EVENTS (realtime notifications)
+                    # ============================================
+                    elif msg_type == "notification.mark_read":
+                        from .frontend.pages.notifications import handle_notification_mark_read
+                        await handle_notification_mark_read(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Notification mark_read handled - uid={uid}")
+
+                    elif msg_type == "notification.click":
+                        from .frontend.pages.notifications import handle_notification_click
+                        await handle_notification_click(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Notification click handled - uid={uid}")
+
+                    # ============================================
+                    # MESSENGER EVENTS (direct messages)
+                    # ============================================
+                    elif msg_type == "messenger.mark_read":
+                        from .frontend.pages.messenger import handle_messenger_mark_read
+                        await handle_messenger_mark_read(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Messenger mark_read handled - uid={uid}")
+
+                    elif msg_type == "messenger.click":
+                        from .frontend.pages.messenger import handle_messenger_click
+                        await handle_messenger_click(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Messenger click handled - uid={uid}")
+
+                    # ============================================
+                    # METRICS EVENTS (shared metrics stores)
+                    # ============================================
+                    elif msg_type == "metrics.refresh":
+                        from .frontend.pages.metrics import handle_metrics_refresh
+                        await handle_metrics_refresh(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Metrics refresh handled - uid={uid}")
+
+                    elif msg_type == "metrics.refresh_module":
+                        from .frontend.pages.metrics import handle_metrics_refresh_module
+                        await handle_metrics_refresh_module(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Metrics refresh_module handled - uid={uid}")
+
                     else:
                         # Messages non gérés (pour future extension)
                         logger.debug(
@@ -2311,6 +2699,29 @@ async def websocket_endpoint(ws: WebSocket):
                     pass
                 
                 await hub.unregister(uid, ws)
+                
+                # ⭐ MULTI-ONGLET: Nettoyer la présence de cet onglet dans SessionStateManager
+                # Permet aux autres onglets de continuer à fonctionner correctement
+                try:
+                    ws_session_id = ws.query_params.get("session_id", "")
+                    ws_space_code = ws.query_params.get("space_code", "")
+                    
+                    if ws_session_id and ws_space_code:
+                        from .llm_service.session_state_manager import get_session_state_manager
+                        state_manager = get_session_state_manager()
+                        state_manager.remove_tab_presence(
+                            user_id=uid,
+                            company_id=ws_space_code,
+                            session_id=ws_session_id
+                        )
+                        logger.info(
+                            f"[WS_CLEANUP] 🧹 Tab presence removed - "
+                            f"uid={uid}, session={ws_session_id[:8]}..., company={ws_space_code}"
+                        )
+                except Exception as cleanup_err:
+                    # Non-critical: log et continue
+                    logger.debug(f"[WS_CLEANUP] Tab presence cleanup skipped: {cleanup_err}")
+                
                 # Arrête le heartbeat et le keepalive, puis marque l'utilisateur offline
                 try:
                     heartbeat_task.cancel()
