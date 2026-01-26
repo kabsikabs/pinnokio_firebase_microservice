@@ -84,6 +84,15 @@ async def on_startup():
     except Exception as e:
         logger.error("cron_scheduler status=error error=%s", repr(e))
 
+    # ⭐ NOUVEAU: Démarrer le RedisSubscriber pour les messages des jobbeurs
+    try:
+        from .realtime.redis_subscriber import get_redis_subscriber
+        redis_subscriber = get_redis_subscriber()
+        await redis_subscriber.start()
+        logger.info("redis_subscriber status=started")
+    except Exception as e:
+        logger.error("redis_subscriber status=error error=%s", repr(e))
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
@@ -104,6 +113,15 @@ async def on_shutdown():
         logger.info("cron_scheduler status=stopped")
     except Exception as e:
         logger.error("cron_scheduler_stop status=error error=%s", repr(e))
+
+    # ⭐ NOUVEAU: Arrêter le RedisSubscriber
+    try:
+        from .realtime.redis_subscriber import get_redis_subscriber
+        redis_subscriber = get_redis_subscriber()
+        await redis_subscriber.stop()
+        logger.info("redis_subscriber status=stopped")
+    except Exception as e:
+        logger.error("redis_subscriber_stop status=error error=%s", repr(e))
 
 
 @app.get("/healthz")
@@ -2139,6 +2157,24 @@ async def websocket_endpoint(ws: WebSocket):
                         )
                         logger.info(f"[WS] Routing restart handled - uid={uid}")
 
+                    elif msg_type == "routing.stop":
+                        from .frontend.pages.routing.orchestration import handle_routing_stop
+                        await handle_routing_stop(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Routing stop handled - uid={uid}")
+
+                    elif msg_type == "routing.delete":
+                        from .frontend.pages.routing.orchestration import handle_routing_delete
+                        await handle_routing_delete(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Routing delete handled - uid={uid}")
+
                     # ============================================
                     # INVOICES EVENTS (APBookkeeper)
                     # ============================================
@@ -2227,6 +2263,60 @@ async def websocket_endpoint(ws: WebSocket):
                         )
                         logger.info(f"[WS] Company settings fetch_additional handled - uid={uid}")
 
+                    elif msg_type == "company_settings.save_asset_config":
+                        from .frontend.pages.company_settings import handle_save_asset_config
+                        await handle_save_asset_config(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings save_asset_config handled - uid={uid}")
+
+                    elif msg_type == "company_settings.list_asset_models":
+                        from .frontend.pages.company_settings import handle_list_asset_models
+                        await handle_list_asset_models(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings list_asset_models handled - uid={uid}")
+
+                    elif msg_type == "company_settings.create_asset_model":
+                        from .frontend.pages.company_settings import handle_create_asset_model
+                        await handle_create_asset_model(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings create_asset_model handled - uid={uid}")
+
+                    elif msg_type == "company_settings.update_asset_model":
+                        from .frontend.pages.company_settings import handle_update_asset_model
+                        await handle_update_asset_model(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings update_asset_model handled - uid={uid}")
+
+                    elif msg_type == "company_settings.delete_asset_model":
+                        from .frontend.pages.company_settings import handle_delete_asset_model
+                        await handle_delete_asset_model(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings delete_asset_model handled - uid={uid}")
+
+                    elif msg_type == "company_settings.load_asset_accounts":
+                        from .frontend.pages.company_settings import handle_load_asset_accounts
+                        await handle_load_asset_accounts(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings load_asset_accounts handled - uid={uid}")
+
                     # ============================================
                     # COA EVENTS (Chart of Accounts)
                     # ============================================
@@ -2310,6 +2400,63 @@ async def websocket_endpoint(ws: WebSocket):
                             payload=msg_payload
                         )
                         logger.info(f"[WS] COA delete_function handled - uid={uid}")
+
+                    # ============================================
+                    # EXPENSES EVENTS (Notes de Frais)
+                    # ============================================
+                    elif msg_type == "expenses.orchestrate_init":
+                        from .frontend.pages.expenses import handle_expenses_orchestrate_init
+                        await handle_expenses_orchestrate_init(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Expenses orchestrate_init handled - uid={uid}")
+
+                    elif msg_type == "expenses.refresh":
+                        from .frontend.pages.expenses import handle_expenses_refresh
+                        await handle_expenses_refresh(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Expenses refresh handled - uid={uid}")
+
+                    elif msg_type == "expenses.close":
+                        from .frontend.pages.expenses import handle_expenses_close
+                        await handle_expenses_close(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Expenses close handled - uid={uid}")
+
+                    elif msg_type == "expenses.reopen":
+                        from .frontend.pages.expenses import handle_expenses_reopen
+                        await handle_expenses_reopen(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Expenses reopen handled - uid={uid}")
+
+                    elif msg_type == "expenses.update":
+                        from .frontend.pages.expenses import handle_expenses_update
+                        await handle_expenses_update(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Expenses update handled - uid={uid}")
+
+                    elif msg_type == "expenses.delete":
+                        from .frontend.pages.expenses import handle_expenses_delete
+                        await handle_expenses_delete(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Expenses delete handled - uid={uid}")
 
                     # ============================================
                     # BANKING EVENTS (Bank transactions management)

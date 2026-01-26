@@ -211,6 +211,9 @@ class InvoiceEvents:
     INSTRUCTIONS_SAVE = "invoices.instructions_save"
     INSTRUCTIONS_SAVED = "invoices.instructions_saved"
 
+    # Incremental updates (optimistic/pessimistic status changes)
+    ITEM_UPDATE = "invoices.item_update"             # Items moved between lists based on status
+
     # Legacy (backward compatibility)
     FIELD_UPDATE = "invoice.field_update"
 
@@ -359,13 +362,25 @@ class RoutingEvents:
     LIST = "routing.list"                           # List documents by category
     PROCESS = "routing.process"                     # Process selected documents
     PROCESSED = "routing.processed"                 # Processing complete
+    PROCESSING_STARTED = "routing.processing_started"  # Processing started (optimistic)
+    STOP = "routing.stop"                           # Stop a running job
+    STOPPED = "routing.stopped"                     # Job stopped
     RESTART = "routing.restart"                     # Restart a job
     RESTARTED = "routing.restarted"                 # Job restarted
+    DELETE = "routing.delete"                       # Delete documents
+    DELETED = "routing.deleted"                     # Documents deleted
     REFRESH = "routing.refresh"                     # Refresh current tab
 
     # Instructions
     INSTRUCTIONS_SAVE = "routing.instructions_save" # Save document instructions
     INSTRUCTIONS_SAVED = "routing.instructions_saved"  # Instructions saved
+
+    # Upload
+    UPLOAD = "routing.upload"                       # Upload files for processing
+    UPLOADED = "routing.uploaded"                   # Files uploaded
+
+    # Incremental updates (optimistic/pessimistic status changes)
+    ITEM_UPDATE = "routing.item_update"             # Items moved between lists based on status
 
     # OAuth (Drive connection)
     OAUTH_INIT = "routing.oauth_init"               # Initialize OAuth flow
@@ -518,8 +533,19 @@ class CompanySettingsEvents:
     TELEGRAM_USER_REMOVED = "company_settings.telegram_user_removed"
 
     # Asset management
-    SAVE_ASSET_SETTINGS = "company_settings.save_asset_settings"
-    ASSET_SETTINGS_SAVED = "company_settings.asset_settings_saved"
+    SAVE_ASSET_CONFIG = "company_settings.save_asset_config"
+    ASSET_CONFIG_SAVED = "company_settings.asset_config_saved"
+    LIST_ASSET_MODELS = "company_settings.list_asset_models"
+    ASSET_MODELS_DATA = "company_settings.asset_models_data"
+    # Asset model CRUD
+    CREATE_ASSET_MODEL = "company_settings.create_asset_model"
+    ASSET_MODEL_CREATED = "company_settings.asset_model_created"
+    UPDATE_ASSET_MODEL = "company_settings.update_asset_model"
+    ASSET_MODEL_UPDATED = "company_settings.asset_model_updated"
+    DELETE_ASSET_MODEL = "company_settings.delete_asset_model"
+    ASSET_MODEL_DELETED = "company_settings.asset_model_deleted"
+    LOAD_ASSET_ACCOUNTS = "company_settings.load_asset_accounts"
+    ASSET_ACCOUNTS_DATA = "company_settings.asset_accounts_data"
 
     # ERP connections
     SAVE_ERP_CONNECTIONS = "company_settings.save_erp_connections"
@@ -590,6 +616,46 @@ class COAEvents:
 
 
 # ============================================
+# Expenses Events (14 events) - NEW
+# Expense notes management (Notes de Frais)
+# ============================================
+class ExpensesEvents:
+    """
+    Evenements pour la page Expenses (Notes de Frais).
+
+    Gere:
+    - Orchestration de page
+    - Liste des expenses par categorie (open, running, closed)
+    - Operations CRUD (close, reopen, update, delete)
+    - Refresh des donnees
+
+    NOTE Expenses Specificites:
+    - 3 onglets: open (to_process), running, closed
+    - Status normalization: to_process -> open, running -> running, close -> closed
+    - Integration avec dashboard widget (SmartExpensesWidget)
+    """
+    # Orchestration events
+    ORCHESTRATE_INIT = "expenses.orchestrate_init"
+    FULL_DATA = "expenses.full_data"
+
+    # Document operations
+    LIST = "expenses.list"
+    CLOSE = "expenses.close"
+    CLOSED = "expenses.closed"
+    REOPEN = "expenses.reopen"
+    REOPENED = "expenses.reopened"
+    UPDATE = "expenses.update"
+    UPDATED = "expenses.updated"
+    DELETE = "expenses.delete"
+    DELETED = "expenses.deleted"
+    REFRESH = "expenses.refresh"
+    REFRESHED = "expenses.refreshed"
+
+    # Error
+    ERROR = "expenses.error"
+
+
+# ============================================
 # Banking Events (14 events) - NEW
 # Bank transaction management
 # ============================================
@@ -633,6 +699,9 @@ class BankingEvents:
     # Instructions
     INSTRUCTIONS_SAVE = "banking.instructions_save"
     INSTRUCTIONS_SAVED = "banking.instructions_saved"
+
+    # Incremental updates (optimistic/pessimistic status changes)
+    ITEM_UPDATE = "banking.item_update"             # Items moved between lists based on status
 
     # Error
     ERROR = "banking.error"
@@ -735,6 +804,7 @@ class WS_EVENTS:
     STATIC_DATA = StaticDataEvents    # NEW: Static dropdown data (loaded once)
     COMPANY_SETTINGS = CompanySettingsEvents  # NEW: Company settings page
     COA = COAEvents                   # NEW: Chart of Accounts page
+    EXPENSES = ExpensesEvents         # NEW: Expenses (Notes de Frais) page
     BANKING = BankingEvents           # NEW: Banking transactions page
     METRICS = MetricsEvents           # NEW: Shared metrics stores
 
@@ -1006,6 +1076,7 @@ __all__ = [
     'StaticDataEvents',     # NEW: Static dropdown data
     'CompanySettingsEvents',  # NEW: Company settings page
     'COAEvents',            # NEW: Chart of Accounts page
+    'ExpensesEvents',       # NEW: Expenses (Notes de Frais) page
     'BankingEvents',        # NEW: Banking transactions page
     'MetricsEvents',        # NEW: Shared metrics stores
     'LEGACY_EVENT_MAPPING',
