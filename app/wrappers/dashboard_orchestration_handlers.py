@@ -53,6 +53,12 @@ from ..firebase_providers import FirebaseManagement
 from ..dashboard_handlers import get_dashboard_handlers
 from ..firebase_client import get_firestore
 from ..llm_service.session_state_manager import SessionStateManager
+from ..llm_service.redis_namespaces import (
+    build_user_selected_company_key,
+    build_company_context_key,
+    build_company_coa_key,
+    RedisTTL
+)
 from ..redis_client import get_redis
 from ..ws_events import WS_EVENTS
 from ..ws_hub import hub
@@ -72,112 +78,90 @@ FIRST_CONNECT_CREDIT = 50  # $50 credit for new users
 
 
 # ============================================
-# USER SESSION STATE MANAGER
+# HELPERS: Company Selection (Niveau 1 + Niveau 2)
 # ============================================
 
-class UserSessionStateManager:
-    """Manages user session state in Redis (critical variables)."""
+def get_selected_company_id(uid: str) -> Optional[str]:
+    """
+    Récupère le company_id sélectionné depuis le cache Niveau 1 (USER).
+    
+    Returns:
+        company_id ou None si aucune société sélectionnée
+    """
+    try:
+        redis_client = get_redis()
+        selected_key = build_user_selected_company_key(uid)
+        cached = redis_client.get(selected_key)
+        if cached:
+            company_id = cached.decode() if isinstance(cached, bytes) else cached
+            return company_id if company_id else None
+    except Exception as e:
+        logger.debug(f"[ORCHESTRATION] Failed to get selected company_id: {e}")
+    return None
 
-    KEY_PREFIX = "user_session"
 
-    def __init__(self, redis_client=None):
-        self._redis = redis_client
+def get_company_context(uid: str, company_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Récupère le contexte complet d'une société depuis le cache Niveau 2 (COMPANY).
+    
+    Si company_id n'est pas fourni, récupère d'abord depuis Niveau 1.
+    
+    Returns:
+        Dict avec company_data complet ou None
+    """
+    try:
+        # Si company_id non fourni, le récupérer depuis Niveau 1
+        if not company_id:
+            company_id = get_selected_company_id(uid)
+            if not company_id:
+                return None
+        
+        # Récupérer le contexte depuis Niveau 2
+        redis_client = get_redis()
+        context_key = build_company_context_key(uid, company_id)
+        cached = redis_client.get(context_key)
+        if cached:
+            context_data = json.loads(cached if isinstance(cached, str) else cached.decode())
+            return context_data
+    except Exception as e:
+        logger.debug(f"[ORCHESTRATION] Failed to get company context: {e}")
+    return None
 
-    @property
-    def redis(self):
-        if self._redis is None:
-            self._redis = get_redis()
-        return self._redis
 
-    def _build_key(self, uid: str, session_id: str) -> str:
-        return f"{self.KEY_PREFIX}:{uid}:{session_id}"
-
-    def save_user_session(
-        self,
-        uid: str,
-        session_id: str,
-        user_data: Dict[str, Any],
-        share_settings: Optional[Dict] = None,
-        is_invited_user: bool = False,
-        user_profile: str = "admin",
-        authorized_companies_ids: Optional[List[str]] = None
-    ) -> bool:
-        """Save user session state to Redis."""
-        key = self._build_key(uid, session_id)
-
-        state = {
-            "uid": uid,
-            "session_id": session_id,
-            "email": user_data.get("email", ""),
-            "display_name": user_data.get("displayName", ""),
-            "photo_url": user_data.get("photoURL", ""),
-            "is_invited_user": is_invited_user,
-            "user_profile": user_profile,
-            "authorized_companies_ids": authorized_companies_ids or [],
-            "share_settings": share_settings or {},
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "updated_at": datetime.now(timezone.utc).isoformat()
+def set_selected_company(uid: str, company_id: str, company_data: Dict[str, Any]) -> None:
+    """
+    Met à jour le cache Niveau 1 (selected_company_id) et Niveau 2 (context).
+    
+    Args:
+        uid: User ID
+        company_id: Company ID
+        company_data: Données complètes de la société
+    """
+    try:
+        redis_client = get_redis()
+        
+        # Niveau 1: Stocker le company_id sélectionné
+        selected_key = build_user_selected_company_key(uid)
+        redis_client.setex(selected_key, COMPANY_SELECTION_TTL, company_id)
+        
+        # Niveau 2: Stocker le contexte complet
+        context_key = build_company_context_key(uid, company_id)
+        context_payload = {
+            **company_data,
+            "company_id": company_id,
+            "selected_at": datetime.now(timezone.utc).isoformat()
         }
-
-        self.redis.setex(key, USER_SESSION_TTL, json.dumps(state))
-        logger.info(f"[USER_SESSION] Saved: uid={uid}")
-        return True
-
-    def get_user_session(self, uid: str, session_id: str) -> Optional[Dict]:
-        """Get user session state from Redis."""
-        key = self._build_key(uid, session_id)
-        data = self.redis.get(key)
-
-        if data:
-            return json.loads(data if isinstance(data, str) else data.decode())
-        return None
-
-    def update_user_session(
-        self,
-        uid: str,
-        session_id: str,
-        updates: Dict[str, Any]
-    ) -> bool:
-        """Update user session state."""
-        key = self._build_key(uid, session_id)
-        state = self.get_user_session(uid, session_id)
-
-        if not state:
-            return False
-
-        state.update(updates)
-        state["updated_at"] = datetime.now(timezone.utc).isoformat()
-
-        self.redis.setex(key, USER_SESSION_TTL, json.dumps(state))
-        return True
-
-    def save_selected_company(
-        self,
-        uid: str,
-        session_id: str,
-        company_data: Dict[str, Any]
-    ) -> bool:
-        """Save selected company details to session."""
-        key = f"{self._build_key(uid, session_id)}:company"
-
-        self.redis.setex(key, COMPANY_SELECTION_TTL, json.dumps({
-            "company_id": company_data.get("contact_space_id", ""),
-            "company_name": company_data.get("legal_name", company_data.get("name", "")),
-            "mandate_path": company_data.get("mandate_path", ""),
-            "client_uuid": company_data.get("client_uuid", ""),
-            "selected_at": datetime.now(timezone.utc).isoformat(),
-            **company_data
-        }))
-        return True
-
-    def get_selected_company(self, uid: str, session_id: str) -> Optional[Dict]:
-        """Get selected company from session."""
-        key = f"{self._build_key(uid, session_id)}:company"
-        data = self.redis.get(key)
-
-        if data:
-            return json.loads(data if isinstance(data, str) else data.decode())
-        return None
+        redis_client.setex(
+            context_key,
+            COMPANY_SELECTION_TTL,
+            json.dumps(context_payload)
+        )
+        logger.info(
+            f"[ORCHESTRATION] Company selection cached: "
+            f"selected={company_id} context_keys={list(context_payload.keys())}"
+        )
+    except Exception as e:
+        logger.warning(f"[ORCHESTRATION] Failed to cache company selection: {e}")
 
 
 # ============================================
@@ -220,6 +204,7 @@ class OrchestrationStateManager:
             "selected_company_id": company_id,
             "is_first_connect": False,
             "is_invited_user": False,
+            "authorized_companies_ids": [],  # Will be populated during user_setup phase
             "widgets_status": {
                 "balance": "pending",
                 "metrics": "pending",
@@ -291,7 +276,6 @@ class OrchestrationStateManager:
 # ============================================
 
 _state_manager: Optional[OrchestrationStateManager] = None
-_user_session_manager: Optional[UserSessionStateManager] = None
 
 
 def get_state_manager() -> OrchestrationStateManager:
@@ -299,13 +283,6 @@ def get_state_manager() -> OrchestrationStateManager:
     if _state_manager is None:
         _state_manager = OrchestrationStateManager()
     return _state_manager
-
-
-def get_user_session_manager() -> UserSessionStateManager:
-    global _user_session_manager
-    if _user_session_manager is None:
-        _user_session_manager = UserSessionStateManager()
-    return _user_session_manager
 
 
 # ============================================
@@ -353,9 +330,17 @@ async def handle_orchestrate_init(
         # Fallback: construct minimal user_data
         user_data = {"uid": uid}
 
+    # Extract target_company_id if provided (preserves selected company after cache miss)
+    target_company_id = payload.get("target_company_id")
+    if target_company_id:
+        logger.info(f"[ORCHESTRATION] Init with target_company_id={target_company_id}")
+
     # Start orchestration in background
     asyncio.create_task(
-        _run_orchestration(uid, session_id, orchestration_id, user_data)
+        _run_orchestration(
+            uid, session_id, orchestration_id, user_data,
+            target_company_id=target_company_id
+        )
     )
 
     return {
@@ -409,16 +394,15 @@ async def handle_company_change(
     )
 
     state_manager = get_state_manager()
-    user_session_manager = get_user_session_manager()
 
-    # 1. Get old company to invalidate LLM session
-    old_company = user_session_manager.get_selected_company(uid, session_id)
-    old_company_id = old_company.get("company_id") if old_company else None
+    # 1. Get old company to invalidate LLM session (from Niveau 1 + Niveau 2)
+    old_company_id = get_selected_company_id(uid)
+    old_company_data = get_company_context(uid, old_company_id) if old_company_id else None
 
     # 2. Validate company_id is authorized (optional but recommended)
-    user_session = user_session_manager.get_user_session(uid, session_id)
-    if user_session:
-        authorized_ids = user_session.get("authorized_companies_ids", [])
+    orchestration_state = state_manager.get_orchestration(uid, session_id)
+    if orchestration_state:
+        authorized_ids = orchestration_state.get("authorized_companies_ids", [])
         # If authorized list exists and company not in it, reject
         if authorized_ids and company_id not in authorized_ids:
             logger.warning(
@@ -472,16 +456,21 @@ async def handle_company_change(
         uid, session_id, company_id
     )
 
-    # 6. Start orchestration
-    # Skip user_setup (already authenticated) but run company_phase
-    # to fetch fresh mandate_path and client_uuid
+    # 6. Start orchestration with company phase to load FULL mandate data
+    # IMPORTANT: Always run company phase to ensure complete company_data
+    # (input_drive_doc_id, bank_erp, etc.) needed for widget caches.
+    # The target_company_id ensures the correct company is selected.
+    logger.info(
+        f"[ORCHESTRATION] Company change: loading full mandate data for "
+        f"company_id={company_id}"
+    )
     asyncio.create_task(
         _run_orchestration(
             uid, session_id, orchestration_id,
             user_data={},
             skip_user_setup=True,
-            skip_company_phase=False,  # IMPORTANT: Don't skip to get fresh company data
-            target_company_id=company_id  # Pre-select this company
+            skip_company_phase=False,  # Always load full company data
+            target_company_id=company_id
         )
     )
 
@@ -508,21 +497,9 @@ async def handle_refresh(
     """
     logger.info(f"[ORCHESTRATION] Refresh requested: uid={uid}")
 
-    # Get current company from user session
-    user_session_manager = get_user_session_manager()
-    company_data = user_session_manager.get_selected_company(uid, session_id)
-
-    company_id = None
-    if company_data:
-        company_id = company_data.get("company_id")
-
-    if not company_id:
-        # Try to get from Redis legacy key
-        redis_client = get_redis()
-        cached = redis_client.get(f"company:{uid}:selected")
-        if cached:
-            data = json.loads(cached if isinstance(cached, str) else cached.decode())
-            company_id = data.get("company_id")
+    # Get current company from Niveau 1 + Niveau 2
+    company_id = get_selected_company_id(uid)
+    company_data = get_company_context(uid, company_id) if company_id else None
 
     if not company_id:
         return {
@@ -600,7 +577,6 @@ async def _run_orchestration(
     Mirrors AuthState.process_post_authentication() flow.
     """
     state_manager = get_state_manager()
-    user_session_manager = get_user_session_manager()
 
     try:
         # ========================================
@@ -625,10 +601,11 @@ async def _run_orchestration(
                 )
                 return
 
-            # Update orchestration with user setup results
+            # Update orchestration with user setup results including authorized_companies_ids
             state_manager.update_orchestration(uid, session_id, {
                 "is_first_connect": user_setup_result.get("is_first_connect", False),
                 "is_invited_user": user_setup_result.get("is_invited_user", False),
+                "authorized_companies_ids": user_setup_result.get("authorized_companies_ids", []),
                 "phase": "company"
             })
 
@@ -640,9 +617,9 @@ async def _run_orchestration(
         if not skip_company_phase:
             await _notify_phase_start(uid, "company")
 
-            # Get share settings from user session
-            user_session = user_session_manager.get_user_session(uid, session_id)
-            authorized_companies = user_session.get("authorized_companies_ids", []) if user_session else []
+            # Get authorized companies from orchestration state
+            orchestration_state = state_manager.get_orchestration(uid, session_id)
+            authorized_companies = orchestration_state.get("authorized_companies_ids", []) if orchestration_state else []
 
             company_id, company_data = await _run_company_phase(
                 uid, session_id, orchestration_id, authorized_companies,
@@ -657,9 +634,7 @@ async def _run_orchestration(
                 await _notify_phase_complete(uid, "company", success=False, error="No companies found")
                 return
 
-            # Save selected company to session
-            if company_data:
-                user_session_manager.save_selected_company(uid, session_id, company_data)
+            # Company data is already saved to Redis legacy key in _run_company_phase()
 
             # Save selected company
             state_manager.update_orchestration(uid, session_id, {
@@ -669,16 +644,23 @@ async def _run_orchestration(
 
             await _notify_phase_complete(uid, "company", success=True)
         else:
-            # Get company_id from state
+            # Get company_id from target_company_id (passed from handle_company_change)
+            # or fallback to state or Niveau 1 cache
             state = state_manager.get_orchestration(uid, session_id)
-            company_id = state.get("selected_company_id") if state else None
+            company_id = target_company_id or (state.get("selected_company_id") if state else None) or get_selected_company_id(uid)
 
-            # Try to get company_data from session
-            company_data = user_session_manager.get_selected_company(uid, session_id)
+            # Get company_data from Niveau 2 cache
+            company_data = get_company_context(uid, company_id) if company_id else None
 
             if not company_id:
                 logger.error("[ORCHESTRATION] No company_id for skip_company_phase")
                 return
+
+            # Update state with selected_company_id
+            state_manager.update_orchestration(uid, session_id, {
+                "selected_company_id": company_id,
+                "phase": "data"
+            })
 
         # ========================================
         # PHASE 2: DATA LOADING (Background)
@@ -708,8 +690,8 @@ async def _run_orchestration(
         # ========================================
         await _notify_phase_start(uid, "llm")
 
-        # Get company metadata for LLM
-        company_data = user_session_manager.get_selected_company(uid, session_id) or {}
+        # Get company metadata for LLM from Niveau 2 cache
+        company_data = get_company_context(uid, company_id) or {}
 
         await _run_llm_phase(
             uid,
@@ -757,7 +739,6 @@ async def _run_user_setup_phase(
     Returns: Dict with success status and user flags
     """
     state_manager = get_state_manager()
-    user_session_manager = get_user_session_manager()
 
     try:
         # Use FirebaseManagement singleton
@@ -880,17 +861,6 @@ async def _run_user_setup_phase(
                     f"authorized shared companies"
                 )
 
-        # Save user session state to Redis
-        user_session_manager.save_user_session(
-            uid=uid,
-            session_id=session_id,
-            user_data=user_data,
-            share_settings=share_settings,
-            is_invited_user=is_invited_user,
-            user_profile=user_profile,
-            authorized_companies_ids=authorized_companies_ids
-        )
-
         # Broadcast user profile to frontend
         # is_invited_user flag tells UI to show account switcher if shared accounts exist
         await hub.broadcast(uid, {
@@ -908,6 +878,34 @@ async def _run_user_setup_phase(
             }
         })
 
+        # ─────────────────────────────────────────────────
+        # Step 4: Load and broadcast static data for dropdowns
+        # ─────────────────────────────────────────────────
+        logger.info(f"[ORCHESTRATION] Step 4: Load static data for dropdowns")
+
+        try:
+            from app.wrappers.static_data_handlers import get_static_data_handlers
+
+            static_handlers = get_static_data_handlers()
+            static_result = await static_handlers.load_all_static_data()
+
+            if static_result.get("success"):
+                # Broadcast static data to frontend
+                await hub.broadcast(uid, {
+                    "type": WS_EVENTS.STATIC_DATA.LOADED,
+                    "payload": static_result.get("data", {})
+                })
+                logger.info(
+                    f"[ORCHESTRATION] Static data broadcasted: "
+                    f"countries={len(static_result.get('data', {}).get('countries', []))}, "
+                    f"currencies={len(static_result.get('data', {}).get('currencies', []))}"
+                )
+            else:
+                logger.warning(f"[ORCHESTRATION] Failed to load static data: {static_result.get('error')}")
+        except Exception as static_err:
+            # Non-blocking - static data is optional
+            logger.warning(f"[ORCHESTRATION] Static data load error (non-blocking): {static_err}")
+
         return {
             "success": True,
             "is_first_connect": is_first_connect,
@@ -919,6 +917,83 @@ async def _run_user_setup_phase(
     except Exception as e:
         logger.error(f"[ORCHESTRATION] User setup phase error: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
+
+
+# ============================================
+# HELPER: BUILD WORKFLOW PARAMS FOR FRONTEND
+# ============================================
+
+def _build_workflow_params(selected_mandate: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Build workflow_params dict for frontend from fetch_single_mandate data.
+
+    The data is in nested structure from workflow_params document:
+    - workflow_params.Router_param
+    - workflow_params.Banker_param
+    - workflow_params.Apbookeeper_param
+    - workflow_params.Accounting_param
+    - workflow_params.Asset_param
+
+    Returns flat structure with camelCase keys for frontend TypeScript types.
+    """
+    wp = selected_mandate.get("workflow_params", {})
+
+    # DEBUG: Log the raw workflow_params structure
+    logger.info(f"[WORKFLOW_PARAMS] Raw wp keys: {list(wp.keys())}")
+    logger.info(f"[WORKFLOW_PARAMS] Accounting_param: {wp.get('Accounting_param', 'NOT FOUND')}")
+    logger.info(f"[WORKFLOW_PARAMS] Asset_param: {wp.get('Asset_param', 'NOT FOUND')}")
+
+    # Extract nested params with fallback to empty dict
+    router_p = wp.get("Router_param", {})
+    banker_p = wp.get("Banker_param", {})
+    apbookeeper_p = wp.get("Apbookeeper_param", {})
+    accounting_p = wp.get("Accounting_param", {})
+    asset_p = wp.get("Asset_param", {})
+
+    return {
+        # ─────────────────────────────────────
+        # Router params
+        # ─────────────────────────────────────
+        "router_approval_required": router_p.get("router_approval_required", False),
+        "router_automated_workflow": router_p.get("router_automated_workflow", True),
+        "router_communication_method": router_p.get("router_communication_method", ""),
+        "router_approval_pendinglist_enabled": router_p.get("router_approval_pendinglist_enabled", False),
+        "router_departments": router_p.get("departments", []),
+        # ─────────────────────────────────────
+        # APbookeeper params
+        # ─────────────────────────────────────
+        "apbookeeper_approval_required": apbookeeper_p.get("apbookeeper_approval_required", False),
+        "apbookeeper_approval_contact_creation": apbookeeper_p.get("apbookeeper_approval_contact_creation", False),
+        "apbookeeper_communication_method": apbookeeper_p.get("apbookeeper_communication_method", ""),
+        "apbookeeper_approval_pendinglist_enabled": apbookeeper_p.get("apbookeeper_approval_pendinglist_enabled", False),
+        "apbookeeper_trust_threshold_required": apbookeeper_p.get("trust_threshold_required", False),
+        "apbookeeper_trust_threshold_percent": apbookeeper_p.get("trust_threshold_percent", 95),
+        "apbookeeper_automated_workflow": apbookeeper_p.get("apbookeeper_automated_workflow", False),
+        # ─────────────────────────────────────
+        # Banker params
+        # ─────────────────────────────────────
+        "banker_approval_required": banker_p.get("banker_approval_required", False),
+        "banker_approval_threshold_workflow": banker_p.get("banker_approval_thresholdworkflow", 0),
+        "banker_communication_method": banker_p.get("banker_communication_method", ""),
+        "banker_approval_pendinglist_enabled": banker_p.get("banker_approval_pendinglist_enabled", False),
+        "banker_gl_approval": banker_p.get("banker_gl_approval", False),
+        "banker_voucher_approval": banker_p.get("banker_voucher_approval", False),
+        # ─────────────────────────────────────
+        # Accounting Date Rules
+        # Firestore fields: accounting_date_definition, accounting_date, custom_mode, date_prompt
+        # ─────────────────────────────────────
+        "accounting_date_automated_definition": accounting_p.get("accounting_date_definition", True),
+        "accounting_date_default_date": accounting_p.get("accounting_date", ""),
+        "accounting_date_custom_mode": accounting_p.get("custom_mode", False),
+        "accounting_date_custom_prompt": accounting_p.get("date_prompt", ""),
+        # ─────────────────────────────────────
+        # Asset Management
+        # ─────────────────────────────────────
+        "asset_management_activated": asset_p.get("asset_management_activated", False),
+        "asset_automated_creation": asset_p.get("asset_automated_creation", True),
+        "asset_default_method": asset_p.get("asset_default_method", "linear"),
+        "asset_default_method_period": asset_p.get("asset_default_method_period", "12"),
+    }
 
 
 # ============================================
@@ -947,7 +1022,6 @@ async def _run_company_phase(
     Returns: Tuple of (company_id, company_data) or (None, None)
     """
     state_manager = get_state_manager()
-    user_session_manager = get_user_session_manager()
 
     try:
         firebase_mgmt = FirebaseManagement()
@@ -1037,6 +1111,26 @@ async def _run_company_phase(
         logger.info(f"[ORCHESTRATION] Selected company: {company_id}")
 
         # ─────────────────────────────────────────────────
+        # Step 4.5: Load FULL mandate data (not just light version)
+        # fetch_all_mandates_light() only loads basic fields
+        # fetch_single_mandate() loads ALL fields including company info
+        # ─────────────────────────────────────────────────
+        mandate_path = selected_mandate.get("mandate_path", "")
+        if mandate_path:
+            try:
+                full_mandate = await asyncio.to_thread(
+                    firebase_mgmt.fetch_single_mandate,
+                    mandate_path
+                )
+                if full_mandate:
+                    # Merge full data into selected_mandate
+                    selected_mandate.update(full_mandate)
+                    logger.info(f"[ORCHESTRATION] Full mandate loaded: keys={list(full_mandate.keys())[:10]}...")
+            except Exception as e:
+                logger.warning(f"[ORCHESTRATION] Failed to load full mandate: {e}")
+                # Continue with light data
+
+        # ─────────────────────────────────────────────────
         # Step 5: Build full company data from mandate
         # ─────────────────────────────────────────────────
         # Extract parent_details which may contain nested fields
@@ -1071,7 +1165,34 @@ async def _run_company_phase(
             ),
             # Parent details (also keep nested for compatibility)
             "parent_details": parent_details,
+            # ─────────────────────────────────────────────────
+            # Company Info Fields (pour Settings page)
+            # Priority: fetch_single_mandate fields > client_* fields > parent_details
+            # ─────────────────────────────────────────────────
+            "address": (
+                selected_mandate.get("address") or
+                selected_mandate.get("client_address") or
+                parent_details.get("client_address", "")
+            ),
+            "phone_number": (
+                selected_mandate.get("phone_number") or
+                selected_mandate.get("client_phone") or
+                parent_details.get("client_phone", "")
+            ),
+            "email": (
+                selected_mandate.get("email") or
+                selected_mandate.get("client_mail") or
+                parent_details.get("client_mail", "")
+            ),
+            "country": selected_mandate.get("country", ""),
+            "language": selected_mandate.get("language", ""),
+            "legal_status": selected_mandate.get("legal_status", ""),
+            "has_vat": selected_mandate.get("has_vat", False),
+            "website": selected_mandate.get("website", ""),
+            "vat_number": selected_mandate.get("vat_number", ""),
+            # Legacy fields (for backward compatibility)
             "client_mail": (
+                selected_mandate.get("email") or
                 selected_mandate.get("client_mail") or
                 parent_details.get("client_mail", "")
             ),
@@ -1080,17 +1201,52 @@ async def _run_company_phase(
                 parent_details.get("client_name", "")
             ),
             "client_address": (
+                selected_mandate.get("address") or
                 selected_mandate.get("client_address") or
                 parent_details.get("client_address", "")
             ),
             "client_phone": (
+                selected_mandate.get("phone_number") or
                 selected_mandate.get("client_phone") or
                 parent_details.get("client_phone", "")
             ),
-            # Workflow params
+            # ─────────────────────────────────────────────────
+            # Workflow Params (structure complète pour frontend)
+            # Loaded from subcollection setup/workflow_params by fetch_single_mandate()
+            # ─────────────────────────────────────────────────
+            "workflow_params": _build_workflow_params(selected_mandate),
+            # ─────────────────────────────────────────────────
+            # Communication Settings (pour frontend et jobbeur)
+            # ─────────────────────────────────────────────────
+            "communication_settings": {
+                "dms_type": selected_mandate.get("dms_type", "odoo"),
+                "chat_type": selected_mandate.get("chat_type", "rag"),
+                "communication_log_type": selected_mandate.get("communication_log_type", "rag"),
+            },
+            # Champs plats conservés pour compatibilité backend
             "apbookeeper_approval_required": selected_mandate.get("apbookeeper_approval_required", False),
             "router_approval_required": selected_mandate.get("router_approval_required", False),
-            "banker_approval_required": selected_mandate.get("banker_approval_required", False)
+            "banker_approval_required": selected_mandate.get("banker_approval_required", False),
+            "chat_type": selected_mandate.get("chat_type", "rag"),
+            "communication_log_type": selected_mandate.get("communication_log_type", "rag"),
+            "router_automated_workflow": selected_mandate.get("router_automated_workflow", True),
+            # ─────────────────────────────────────────────────
+            # Context Details (pour LLM et Settings page)
+            # Loaded from subcollection {mandate_path}/context/ by fetch_single_mandate()
+            # ─────────────────────────────────────────────────
+            "context_details": selected_mandate.get("context_details", {
+                "general_context": "",
+                "accounting_context": "",
+                "bank_context": "",
+                "invoices_context": "",
+                "expenses_context": "",
+                "banks_cash_context": "",
+                "hr_context": "",
+                "taxes_context": "",
+                "letters_context": "",
+                "contrats_context": "",
+                "financial_statement_context": "",
+            }),
         }
 
         # Broadcast company details
@@ -1099,19 +1255,11 @@ async def _run_company_phase(
             "payload": company_data
         })
 
-        # Cache selected company (legacy key for compatibility)
-        redis_client = get_redis()
-        redis_client.setex(
-            f"company:{uid}:selected",
-            COMPANY_SELECTION_TTL,
-            json.dumps({
-                "company_id": company_id,
-                "company_name": company_data["name"],
-                "mandate_path": company_data["mandate_path"],
-                "client_uuid": company_data["client_uuid"],
-                "selected_at": datetime.now(timezone.utc).isoformat()
-            })
-        )
+        # ─────────────────────────────────────────────────
+        # Step 6: Cache company selection (Niveau 1 + Niveau 2)
+        # Store selected_company_id (Niveau 1) and full context (Niveau 2)
+        # ─────────────────────────────────────────────────
+        set_selected_company(uid, company_id, company_data)
 
         return company_id, company_data
 
@@ -1346,6 +1494,19 @@ async def _populate_widget_caches(
             f"client_uuid={bool(client_uuid)} bank_erp={bank_erp}"
         )
 
+    # 4. COA (accounts + functions) - Cache Niveau 2
+    # Le COA est traité comme donnée critique de niveau entreprise
+    # Il est pré-chargé pour que la page COA s'affiche immédiatement
+    if mandate_path:
+        tasks.append(
+            _safe_cache_fetch(
+                "COA",
+                _populate_coa_cache(uid, company_id, mandate_path)
+            )
+        )
+    else:
+        logger.warning(f"[ORCHESTRATION] No mandate_path for COA cache")
+
     # Execute all cache fetches in parallel
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -1379,6 +1540,66 @@ async def _safe_cache_fetch(name: str, coro):
                 logger.warning(f"[CACHE] {name}: OAuth re-authentication required")
     except Exception as e:
         logger.error(f"[CACHE] {name} fetch error: {e}")
+
+
+async def _populate_coa_cache(
+    uid: str,
+    company_id: str,
+    mandate_path: str
+) -> Dict[str, Any]:
+    """
+    Charge et cache les données COA en niveau 2.
+
+    Le COA est traité comme donnée critique de niveau entreprise.
+    Il est pré-chargé pendant l'orchestration dashboard pour que
+    la page COA puisse l'afficher immédiatement depuis le cache.
+
+    Args:
+        uid: Firebase user ID
+        company_id: Company ID
+        mandate_path: Chemin mandat Firebase
+
+    Returns:
+        Dict avec success et data
+    """
+    try:
+        from ..frontend.pages.coa.handlers import get_coa_handlers
+
+        handlers = get_coa_handlers()
+
+        # Charger les données COA (accounts + functions)
+        result = await handlers.full_data(
+            uid=uid,
+            company_id=company_id,
+            mandate_path=mandate_path,
+            force_refresh=False  # Utilise cache existant si disponible
+        )
+
+        if result.get("success") and result.get("data"):
+            # Sauvegarder en cache niveau 2 (company:{uid}:{cid}:coa)
+            redis_client = get_redis()
+            cache_key = build_company_coa_key(uid, company_id)
+            cache_data = {
+                **result["data"],
+                "cached_at": datetime.now(timezone.utc).isoformat(),
+                "source": "dashboard_orchestration"
+            }
+            redis_client.setex(
+                cache_key,
+                RedisTTL.COMPANY_CONTEXT,  # 1 heure (comme company:context)
+                json.dumps(cache_data)
+            )
+            logger.info(
+                f"[ORCHESTRATION] COA cached niveau 2: "
+                f"{len(result['data'].get('accounts', []))} accounts, "
+                f"{len(result['data'].get('functions', []))} functions"
+            )
+
+        return result
+
+    except Exception as e:
+        logger.error(f"[ORCHESTRATION] COA cache population error: {e}")
+        return {"success": False, "error": str(e)}
 
 
 # ============================================
@@ -1530,11 +1751,18 @@ async def _run_data_phase(
 
         # ════════════════════════════════════════════════════════════
         # STEP 4: Save page_state for fast recovery on page refresh
+        # NOTE: Only save dashboard page_state here.
+        # Other pages (expenses/notes de frais, invoices, etc.) save their
+        # own page_state via their dedicated orchestration handlers.
+        # The "expenses" data in dashboard is billing/usage history (task_manager),
+        # NOT the Notes de Frais module (expenses_details) - different data sources!
         # ════════════════════════════════════════════════════════════
         if result.get("success") and result.get("data"):
             try:
                 from .page_state_manager import get_page_state_manager
                 page_state_manager = get_page_state_manager()
+
+                # Save dashboard page_state only
                 page_state_manager.save_page_state(
                     uid=uid,
                     company_id=company_id,
@@ -1543,6 +1771,7 @@ async def _run_data_phase(
                     data=result["data"]
                 )
                 logger.info(f"[ORCHESTRATION] Page state saved for dashboard - uid={uid} company={company_id}")
+
             except Exception as ps_error:
                 # Non-critical - log but don't fail orchestration
                 logger.warning(f"[ORCHESTRATION] Failed to save page_state: {ps_error}")
@@ -1699,23 +1928,34 @@ async def handle_switch_account(
     )
 
     state_manager = get_state_manager()
-    user_session_manager = get_user_session_manager()
 
-    # 1. Get current user session with share_settings
-    user_session = user_session_manager.get_user_session(uid, session_id)
-    if not user_session:
+    # 1. Get orchestration state for authorized_companies_ids
+    orchestration_state = state_manager.get_orchestration(uid, session_id)
+    if not orchestration_state:
         return {
             "type": "error",
             "payload": {
                 "success": False,
-                "error": "User session not found",
+                "error": "Orchestration state not found",
                 "code": "SESSION_NOT_FOUND"
             }
         }
 
-    share_settings = user_session.get("share_settings", {})
-    old_authorized_companies = user_session.get("authorized_companies_ids", [])
-    current_account_id = user_session.get("current_account_id", "own")
+    old_authorized_companies = orchestration_state.get("authorized_companies_ids", [])
+    current_account_id = orchestration_state.get("current_account_id", "own")
+
+    # Get share_settings from Firebase (needed for account switching)
+    share_settings = {}
+    try:
+        firebase_mgmt = FirebaseManagement()
+        user_doc = await asyncio.to_thread(
+            firebase_mgmt.get_document,
+            f"users/{uid}"
+        )
+        if user_doc and 'share_settings' in user_doc:
+            share_settings = user_doc.get('share_settings', {})
+    except Exception as e:
+        logger.warning(f"[ORCHESTRATION] Failed to fetch share_settings: {e}")
 
     # Check if already on this account
     if target_account_id == current_account_id:
@@ -1780,10 +2020,9 @@ async def handle_switch_account(
         )
 
     # 3. Invalidate old LLM session (context is changing)
-    old_company = user_session_manager.get_selected_company(uid, session_id)
-    if old_company:
-        old_company_id = old_company.get("company_id") or old_company.get("contact_space_id")
-        if old_company_id:
+    # Get old company from Niveau 1 + Niveau 2
+    old_company_id = get_selected_company_id(uid)
+    if old_company_id:
             try:
                 from ..llm_service.session_state_manager import SessionStateManager
                 llm_session_manager = SessionStateManager()
@@ -1795,8 +2034,8 @@ async def handle_switch_account(
             except Exception as e:
                 logger.warning(f"[ORCHESTRATION] Failed to invalidate LLM session: {e}")
 
-    # 4. Update user session with new authorized_companies
-    user_session_manager.update_user_session(
+    # 4. Update orchestration state with new authorized_companies
+    state_manager.update_orchestration(
         uid, session_id,
         {
             "authorized_companies_ids": new_authorized_companies,
@@ -1907,9 +2146,7 @@ __all__ = [
     "handle_refresh",
     "handle_switch_account",
     "get_state_manager",
-    "get_user_session_manager",
     "OrchestrationStateManager",
-    "UserSessionStateManager",
     # Helper functions (reusable)
     "transform_company_data_to_info",
 ]
