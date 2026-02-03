@@ -19,9 +19,11 @@ Cache Strategy:
     - TTL: 1h (employees/contracts), 24h (references/clusters)
 
 Endpoints disponibles:
-    - HR.check_connection     → Vérifier la connexion Neon
-    - HR.get_company_id       → mandate_path → company_id
-    - HR.ensure_company       → Créer company si inexistante
+    - HR.check_connection     -> Verifier la connexion Neon
+    - HR.get_company_id       -> mandate_path -> company_id
+    - HR.ensure_company       -> Creer contexte complet (users, accounts, access, company)
+    - HR.get_account_context  -> Recuperer le contexte d'acces
+    - HR.list_accessible_companies -> Lister les societes accessibles
     - HR.list_employees       → Liste employés (avec cache)
     - HR.get_employee         → Détail employé (avec cache)
     - HR.create_employee      → Créer employé (invalidation cache)
@@ -43,6 +45,14 @@ from datetime import date, datetime
 
 from .tools.neon_hr_manager import get_neon_hr_manager
 from .tools.hr_cache_manager import get_hr_cache_manager
+from .tools.account_context import (
+    ensure_account_context,
+    get_account_context,
+    list_accessible_companies,
+    AccountContext,
+    AccessType,
+    UserProfile,
+)
 from .llm_service.redis_namespaces import RedisTTL
 
 logger = logging.getLogger("hr.rpc_handlers")
@@ -163,30 +173,106 @@ class HRRPCHandlers:
         country_code: str = None,
         region: str = None,
         region_code: str = None,
+        email: str = None,
+        display_name: str = None,
     ) -> Dict[str, Any]:
         """
         S'assure qu'une entreprise existe dans PostgreSQL.
-        Crée l'entreprise si elle n'existe pas.
-        
+        Cree l'entreprise si elle n'existe pas.
+
+        NOUVEAU FLUX: Utilise ensure_account_context() qui cree/recupere:
+        - core.users (utilisateur Firebase)
+        - core.accounts (compte proprietaire)
+        - core.account_access (relation user <-> account)
+        - core.companies (societe)
+
         RPC: HR.ensure_company
-        Returns: { "company_id": "uuid" }
+        Returns: {
+            "company_id": "uuid",
+            "user_id": "uuid",
+            "account_id": "uuid",
+            "access_type": "owner"|"shared",
+            "profile": "admin"|"manager"|"user"|"viewer",
+            "cluster_code": "CH-GE"|null
+        }
         """
         try:
-            manager = get_neon_hr_manager()
-            company_id = await manager.get_or_create_company(
-                account_firebase_uid=account_firebase_uid,
+            context = await ensure_account_context(
+                firebase_uid=account_firebase_uid,
                 mandate_path=mandate_path,
                 company_name=company_name,
                 country=country,
                 country_code=country_code,
-                region=region,
                 region_code=region_code,
+                email=email,
+                display_name=display_name,
             )
-            logger.info(f"HR.ensure_company mandate_path={mandate_path} → {company_id}")
-            return {"company_id": str(company_id)}
+
+            logger.info(
+                f"HR.ensure_company mandate_path={mandate_path} -> "
+                f"company_id={context.company_id}, user_id={context.user_id}, "
+                f"access={context.access_type.value}/{context.profile.value}"
+            )
+
+            return {
+                "company_id": str(context.company_id),
+                "user_id": str(context.user_id),
+                "account_id": str(context.account_id),
+                "access_type": context.access_type.value,
+                "profile": context.profile.value,
+                "cluster_code": context.cluster_code,
+                "country_code": context.country_code,
+            }
         except Exception as e:
             logger.error(f"HR.ensure_company error={e}")
             return {"company_id": None, "error": str(e)}
+
+    async def get_account_context(
+        self,
+        firebase_uid: str,
+        company_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Recupere le contexte d'acces pour un utilisateur et une societe.
+
+        Ne cree rien - retourne None si pas d'acces.
+
+        RPC: HR.get_account_context
+        Returns: { contexte complet } ou { "error": "Access denied" }
+        """
+        try:
+            context = await get_account_context(
+                firebase_uid=firebase_uid,
+                company_id=UUID(company_id),
+            )
+
+            if not context:
+                return {"error": "Access denied", "has_access": False}
+
+            return {
+                "has_access": True,
+                **context.to_dict()
+            }
+        except Exception as e:
+            logger.error(f"HR.get_account_context error={e}")
+            return {"error": str(e), "has_access": False}
+
+    async def list_accessible_companies(
+        self,
+        firebase_uid: str,
+    ) -> Dict[str, Any]:
+        """
+        Liste toutes les societes accessibles par un utilisateur.
+
+        RPC: HR.list_accessible_companies
+        Returns: { "companies": [...] }
+        """
+        try:
+            companies = await list_accessible_companies(firebase_uid)
+            return {"companies": companies, "count": len(companies)}
+        except Exception as e:
+            logger.error(f"HR.list_accessible_companies error={e}")
+            return {"companies": [], "error": str(e)}
     
     # ═══════════════════════════════════════════════════════════════
     # EMPLOYEES

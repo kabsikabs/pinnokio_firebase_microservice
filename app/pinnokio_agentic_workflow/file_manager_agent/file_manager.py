@@ -8,7 +8,7 @@ Auteur: Assistant IA
 Date: 2025
 """
 
-from tools.agents import BaseAIAgent, ModelSize, ModelProvider, NEW_OpenAiAgent
+from ...llm.klk_agents import BaseAIAgent, ModelSize, ModelProvider, NEW_MOONSHOT_AIAgent
 from tools.g_cred import DriveClientService, FireBaseManagement
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
@@ -975,7 +975,7 @@ class FileManagerPinnokio(BaseAIAgent):
                     else:
                         # Utiliser le provider par défaut si non spécifié
                         tokens_before = manager_instance.get_total_context_tokens(
-                            manager_instance.default_provider if hasattr(manager_instance, 'default_provider') else ModelProvider.ANTHROPIC
+                            manager_instance.default_provider if hasattr(manager_instance, 'default_provider') else ModelProvider.MOONSHOT_AI
                         )
 
                     print(f"💰 [TOKENS] Tour {turn_count} - Tokens: {tokens_before:,}/{max_tokens_budget:,}")
@@ -1614,7 +1614,7 @@ class FileManagerPinnokio(BaseAIAgent):
             if provider:
                 provider_instance = manager_instance.get_provider_instance(provider)
             else:
-                default_prov = manager_instance.default_provider if hasattr(manager_instance, 'default_provider') else ModelProvider.ANTHROPIC
+                default_prov = manager_instance.default_provider if hasattr(manager_instance, 'default_provider') else ModelProvider.MOONSHOT_AI
                 provider_instance = manager_instance.get_provider_instance(default_prov)
 
             # Sauvegarder le system prompt de base (si pas déjà sauvegardé)
@@ -1651,7 +1651,7 @@ class FileManagerPinnokio(BaseAIAgent):
                     tokens_after_reset = manager_instance.get_total_context_tokens(provider)
                 else:
                     tokens_after_reset = manager_instance.get_total_context_tokens(
-                        manager_instance.default_provider if hasattr(manager_instance, 'default_provider') else ModelProvider.ANTHROPIC
+                        manager_instance.default_provider if hasattr(manager_instance, 'default_provider') else ModelProvider.MOONSHOT_AI
                     )
             except:
                 # Estimation approximative si get_total_context_tokens échoue
@@ -1744,9 +1744,9 @@ class GoogleAppsAgent(BaseAIAgent):
         
         self.parent_agent = parent_agent
         
-        # Enregistrer le provider LLM pour GoogleAppsAgent (comme dans new_router.py)
-        openai_provider = NEW_OpenAiAgent()
-        self.register_provider(ModelProvider.OPENAI, openai_provider)
+        # Enregistrer le provider LLM pour GoogleAppsAgent (Kimi K2.5)
+        moonshot_provider = NEW_MOONSHOT_AIAgent()
+        self.register_provider(ModelProvider.MOONSHOT_AI, moonshot_provider)
         
         # Initialiser le system prompt
         self._initialize_gapp_prompt()
@@ -1841,13 +1841,13 @@ class GoogleAppsAgent(BaseAIAgent):
             if self.parent_agent and hasattr(self.parent_agent, 'vision_document'):
                 return self.parent_agent.vision_document(file_id, question)
             else:
-                # Fallback: créer notre propre agent vision
-                from tools.agents import NEW_Anthropic_Agent, ModelSize
-                vision_agent = NEW_Anthropic_Agent(
+                # Fallback: créer notre propre agent vision (Kimi K2.5)
+                from ...llm.klk_agents import NEW_MOONSHOT_AIAgent, ModelSize
+                vision_agent = NEW_MOONSHOT_AIAgent(
                     collection_name=self.collection_name,
                     job_id=self.job_id
                 )
-                
+
                 print(f"👁️ [GoogleAppsAgent] Analyse visuelle du document {file_id}...")
                 
                 vision_prompt = f"""
@@ -2311,9 +2311,9 @@ class DriveAgent(BaseAIAgent):
         self.drive_service = drive_service
         self.root_folder_id = root_folder_id
         
-        # Enregistrer le provider LLM pour DriveAgent (comme dans GoogleAppsAgent)
-        openai_provider = NEW_OpenAiAgent()
-        self.register_provider(ModelProvider.OPENAI, openai_provider)
+        # Enregistrer le provider LLM pour DriveAgent (Kimi K2.5)
+        moonshot_provider = NEW_MOONSHOT_AIAgent()
+        self.register_provider(ModelProvider.MOONSHOT_AI, moonshot_provider)
         
         # Initialiser le system prompt
         self._initialize_drive_agent_prompt()
@@ -2422,13 +2422,13 @@ class DriveAgent(BaseAIAgent):
             if self.parent_agent and hasattr(self.parent_agent, 'vision_document'):
                 return self.parent_agent.vision_document(file_id, question)
             else:
-                # Fallback: créer notre propre agent vision
-                from tools.agents import NEW_Anthropic_Agent, ModelSize
-                vision_agent = NEW_Anthropic_Agent(
+                # Fallback: créer notre propre agent vision (Kimi K2.5)
+                from ...llm.klk_agents import NEW_MOONSHOT_AIAgent, ModelSize
+                vision_agent = NEW_MOONSHOT_AIAgent(
                     collection_name=self.collection_name,
                     job_id=self.job_id
                 )
-                
+
                 print(f"👁️ [DriveAgent] Analyse visuelle du document {file_id}...")
                 
                 vision_prompt = f"""

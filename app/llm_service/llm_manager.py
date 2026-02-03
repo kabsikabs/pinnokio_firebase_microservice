@@ -952,84 +952,124 @@ class LLMSession:
     # TRACKING PRÉSENCE UTILISATEUR (Mode UI vs BACKEND)
     # ═══════════════════════════════════════════════════════════════
     
-    def enter_chat(self, thread_key: str):
+    def enter_chat(self, thread_key: str, session_id: Optional[str] = None):
         """
         Marque que l'utilisateur vient d'envoyer un message sur ce thread.
         Appelé automatiquement par send_message().
         
         ⭐ Multi-Instance: Synchronise l'état avec Redis.
+        ⭐ Multi-Onglet: Si session_id fourni, utilise update_presence_multi_tab()
+           permettant à plusieurs onglets d'avoir différents threads ouverts.
         
         Args:
             thread_key: Thread sur lequel l'utilisateur est actif
+            session_id: ID unique de l'onglet (optionnel, pour support multi-onglet)
         """
         self.is_on_chat_page = True
         self.current_active_thread = thread_key
         self.last_activity[thread_key] = datetime.now(timezone.utc)
         
-        # ⭐ Sync Redis (multi-instance)
-        self._state_manager.update_presence(
-            self.context.user_id,
-            self.context.collection_name,
-            is_on_chat_page=True,
-            current_active_thread=thread_key
-        )
+        # ⭐ Sync Redis (multi-instance + multi-onglet)
+        if session_id:
+            # Mode multi-onglet: chaque onglet a son propre thread actif
+            self._state_manager.update_presence_multi_tab(
+                self.context.user_id,
+                self.context.collection_name,
+                session_id=session_id,
+                thread_key=thread_key,
+                is_on_chat_page=True
+            )
+        else:
+            # Mode legacy: écrase le thread pour tous les onglets
+            self._state_manager.update_presence(
+                self.context.user_id,
+                self.context.collection_name,
+                is_on_chat_page=True,
+                current_active_thread=thread_key
+            )
         
         logger.info(
             f"[SESSION_TRACKING] 👤 User ENTRÉ sur chat - "
-            f"session={self.session_key}, thread={thread_key}"
+            f"session={self.session_key}, thread={thread_key}, tab_session={session_id or 'legacy'}"
         )
     
-    def switch_thread(self, new_thread_key: str):
+    def switch_thread(self, new_thread_key: str, session_id: Optional[str] = None):
         """
         Marque que l'utilisateur change de thread (toujours sur la page chat).
         Appelé par load_chat_history() quand user change de conversation.
         
         ⭐ Multi-Instance: Synchronise l'état avec Redis.
+        ⭐ Multi-Onglet: Si session_id fourni, ne modifie que cet onglet.
         
         Args:
             new_thread_key: Nouveau thread actif
+            session_id: ID unique de l'onglet (optionnel, pour support multi-onglet)
         """
         old_thread = self.current_active_thread
         self.current_active_thread = new_thread_key
         self.last_activity[new_thread_key] = datetime.now(timezone.utc)
         
-        # ⭐ Sync Redis (multi-instance)
-        self._state_manager.update_presence(
-            self.context.user_id,
-            self.context.collection_name,
-            is_on_chat_page=True,
-            current_active_thread=new_thread_key
-        )
+        # ⭐ Sync Redis (multi-instance + multi-onglet)
+        if session_id:
+            # Mode multi-onglet: chaque onglet a son propre thread actif
+            self._state_manager.update_presence_multi_tab(
+                self.context.user_id,
+                self.context.collection_name,
+                session_id=session_id,
+                thread_key=new_thread_key,
+                is_on_chat_page=True
+            )
+        else:
+            # Mode legacy: écrase le thread pour tous les onglets
+            self._state_manager.update_presence(
+                self.context.user_id,
+                self.context.collection_name,
+                is_on_chat_page=True,
+                current_active_thread=new_thread_key
+            )
         
         logger.info(
             f"[SESSION_TRACKING] 🔄 User SWITCH thread - "
-            f"session={self.session_key}, {old_thread} → {new_thread_key}"
+            f"session={self.session_key}, {old_thread} → {new_thread_key}, tab_session={session_id or 'legacy'}"
         )
     
-    def leave_chat(self):
+    def leave_chat(self, session_id: Optional[str] = None):
         """
         Marque que l'utilisateur quitte la page chat.
         Appelé par signal RPC depuis Reflex (unmount, navigation).
         
         ⭐ Multi-Instance: Synchronise l'état avec Redis.
+        ⭐ Multi-Onglet: Si session_id fourni, ne supprime que cet onglet de la présence.
         
         Note: On conserve current_active_thread pour historique.
+        
+        Args:
+            session_id: ID unique de l'onglet (optionnel, pour support multi-onglet)
         """
         old_thread = self.current_active_thread
         self.is_on_chat_page = False
         # ⚠️ NE PAS effacer current_active_thread (utile pour logs/debug)
         
-        # ⭐ Sync Redis (multi-instance)
-        self._state_manager.update_presence(
-            self.context.user_id,
-            self.context.collection_name,
-            is_on_chat_page=False,
-            current_active_thread=old_thread
-        )
+        # ⭐ Sync Redis (multi-instance + multi-onglet)
+        if session_id:
+            # Mode multi-onglet: supprime uniquement cette session
+            self._state_manager.remove_tab_presence(
+                self.context.user_id,
+                self.context.collection_name,
+                session_id=session_id
+            )
+        else:
+            # Mode legacy: marque tout comme quitté
+            self._state_manager.update_presence(
+                self.context.user_id,
+                self.context.collection_name,
+                is_on_chat_page=False,
+                current_active_thread=old_thread
+            )
         
         logger.info(
             f"[SESSION_TRACKING] 👋 User QUITTÉ chat - "
-            f"session={self.session_key}, était sur thread={old_thread}"
+            f"session={self.session_key}, était sur thread={old_thread}, tab_session={session_id or 'legacy'}"
         )
     
     def is_user_on_specific_thread(self, thread_key: str, check_redis: bool = False) -> bool:
@@ -1037,6 +1077,8 @@ class LLMSession:
         Vérifie si l'utilisateur est ACTUELLEMENT actif sur ce thread précis.
         
         ⭐ Multi-Instance: Peut vérifier dans Redis pour cross-instance.
+        ⭐ Multi-Onglet: Utilise is_user_on_thread_multi_tab() qui vérifie
+           si AU MOINS UN onglet a ce thread ouvert.
         
         Logique:
         - is_on_chat_page = False → False (pas sur la page)
@@ -1050,15 +1092,16 @@ class LLMSession:
         Returns:
             True si user est sur la page chat ET sur ce thread précis
         """
-        # ⭐ Mode cross-instance: Lire directement depuis Redis
+        # ⭐ Mode cross-instance: Lire directement depuis Redis (supporte multi-onglet)
         if check_redis:
-            is_on = self._state_manager.is_user_on_thread(
+            # Utilise la nouvelle méthode qui supporte multi-onglet
+            is_on = self._state_manager.is_user_on_thread_multi_tab(
                 self.context.user_id,
                 self.context.collection_name,
                 thread_key
             )
             logger.debug(
-                f"[SESSION_TRACKING] Check user on thread={thread_key} (REDIS): {is_on}"
+                f"[SESSION_TRACKING] Check user on thread={thread_key} (REDIS/multi-tab): {is_on}"
             )
             return is_on
         
@@ -1110,10 +1153,23 @@ class LLMManager:
     ACTIVE_CHAT_MODES = {"apbookeeper_chat", "router_chat", "banker_chat"}
     
     def __init__(self):
-        self.sessions: Dict[str, LLMSession] = {}
+        self.sessions: Dict[str, LLMSession] = {}  # Cache local (reconstruction à la demande)
         self._lock = threading.Lock()
         self.rtdb_formatter = RTDBMessageFormatter()
         self.streaming_controller = StreamingController()
+        
+        # ═══════════════════════════════════════════════════════════════
+        # MANAGERS REDIS POUR SCALABILITÉ MULTI-INSTANCE
+        # ═══════════════════════════════════════════════════════════════
+        from .approval_state_manager import get_approval_state_manager
+        from .session_registry_manager import get_session_registry_manager
+        from .brain_state_manager import get_brain_state_manager
+        from .processed_messages_manager import get_processed_messages_manager
+        
+        self.approval_manager = get_approval_state_manager()
+        self.session_registry = get_session_registry_manager()
+        self.brain_state_manager = get_brain_state_manager()
+        self.processed_messages = get_processed_messages_manager()
     
     def _is_onboarding_like(self, chat_mode: Optional[str]) -> bool:
         return (chat_mode or "") in self.ONBOARDING_LIKE_MODES
@@ -1335,9 +1391,103 @@ class LLMManager:
             _schedule_billing_catchup(session)
             return session
         
-        # Session n'existe pas OU données manquantes → Initialiser
+        # Session n'existe pas en mémoire → Vérifier si état existe dans Redis
         logger.info(
-            f"[ENSURE_SESSION] Initialisation session (nouvelle ou données manquantes): {session_key}"
+            f"[ENSURE_SESSION] Session absente de la mémoire, vérification Redis: {session_key}"
+        )
+        
+        # ⭐ OPTIMISATION : Vérifier si l'état existe déjà dans Redis (créé par orchestrateur dashboard)
+        from .session_state_manager import get_session_state_manager
+        session_state_manager = get_session_state_manager()
+        
+        redis_state_exists = session_state_manager.session_exists(user_id, collection_name)
+        
+        if redis_state_exists:
+            logger.info(
+                f"[ENSURE_SESSION] ✅ État trouvé dans Redis, restauration session: {session_key}"
+            )
+            
+            # Charger l'état depuis Redis pour vérifier s'il est complet
+            redis_state = session_state_manager.load_session_state(user_id, collection_name)
+            
+            if redis_state and redis_state.get("user_context"):
+                # ⭐ État Redis complet → Créer session qui restaurera depuis Redis
+                logger.info(
+                    f"[ENSURE_SESSION] 📥 État Redis complet, création session avec restauration: {session_key}"
+                )
+                
+                # Créer le contexte avec les paramètres par défaut
+                # Le chat_mode sera mis à jour après restauration si nécessaire
+                context = LLMContext(
+                    user_id=user_id,
+                    collection_name=collection_name,
+                    dms_system="google_drive",  # Sera mis à jour depuis user_context restauré
+                    dms_mode="prod",
+                    chat_mode=chat_mode
+                )
+                
+                # Créer la session (elle restaurera automatiquement depuis Redis via _try_restore_from_redis)
+                session = LLMSession(
+                    session_key=session_key,
+                    context=context
+                )
+                
+                # Vérifier que la restauration a réussi
+                if session.user_context is not None:
+                    # Mettre à jour le dms_system depuis le user_context restauré
+                    if session.user_context.get("dms_system"):
+                        actual_dms_system = session.user_context.get("dms_system", "google_drive")
+                        if session.context.dms_system != actual_dms_system:
+                            session.update_context(dms_system=actual_dms_system)
+                            logger.info(
+                                f"[ENSURE_SESSION] 🔄 DMS mis à jour depuis Redis: {actual_dms_system}"
+                            )
+                    
+                    # Mettre à jour le chat_mode si nécessaire
+                    if session.context.chat_mode != chat_mode:
+                        logger.info(
+                            f"[ENSURE_SESSION] 🔄 Mise à jour chat_mode après restauration: "
+                            f"{session.context.chat_mode} → {chat_mode}"
+                        )
+                        session.update_context(chat_mode=chat_mode)
+                    
+                    # Stocker en mémoire
+                    with self._lock:
+                        # Double vérification pour éviter race condition
+                        if session_key not in self.sessions:
+                            self.sessions[session_key] = session
+                            logger.info(
+                                f"[ENSURE_SESSION] 💾 Session restaurée depuis Redis et stockée en mémoire: {session_key}"
+                            )
+                        else:
+                            # Une autre instance a créé la session entre temps
+                            session = self.sessions[session_key]
+                            logger.info(
+                                f"[ENSURE_SESSION] ✅ Session déjà créée par autre thread, réutilisation: {session_key}"
+                            )
+                    
+                    _schedule_billing_catchup(session)
+                    return session
+                else:
+                    logger.warning(
+                        f"[ENSURE_SESSION] ⚠️ État Redis incomplet (user_context=None), "
+                        f"initialisation complète nécessaire: {session_key}"
+                    )
+                    # Continuer vers initialisation complète
+            else:
+                logger.warning(
+                    f"[ENSURE_SESSION] ⚠️ État Redis incomplet ou vide, "
+                    f"initialisation complète nécessaire: {session_key}"
+                )
+                # Continuer vers initialisation complète
+        else:
+            logger.info(
+                f"[ENSURE_SESSION] 📝 Aucun état Redis trouvé, initialisation complète: {session_key}"
+            )
+        
+        # ⭐ État Redis absent ou incomplet → Initialisation complète depuis Firebase
+        logger.info(
+            f"[ENSURE_SESSION] Initialisation session complète (nouvelle ou données manquantes): {session_key}"
         )
         
         # ⭐ CRITIQUE : Récupérer client_uuid depuis contact_space_id AVANT d'initialiser
@@ -2680,7 +2830,7 @@ class LLMManager:
             realtime_service = get_firebase_realtime()
             mode = "chats"  # Default mode for user chats
 
-            success = realtime_service.update_thread_name(
+            success = realtime_service.rename_chat(
                 space_code=collection_name,
                 thread_key=thread_key,
                 new_name=generated_name,
@@ -3346,7 +3496,8 @@ class LLMManager:
         collection_name: str,
         thread_key: str,
         chat_mode: str = "general_chat",
-        job_status: Optional[str] = None
+        job_status: Optional[str] = None,
+        session_id: Optional[str] = None
         ) -> dict:
         """
         ⭐ NOUVEAU: Notifie que l'utilisateur ENTRE sur un thread de chat.
@@ -3355,12 +3506,16 @@ class LLMManager:
         Permet de capturer la présence AVANT l'envoi du premier message,
         ce qui active le mode UI pour le streaming et les notifications temps réel.
 
+        ⭐ Multi-Onglet: Si session_id fourni, permet à plusieurs onglets
+        d'avoir différents threads ouverts simultanément sans conflit.
+
         Args:
             user_id: ID Firebase de l'utilisateur
             collection_name: ID de la société
             thread_key: Thread sur lequel l'utilisateur entre
             chat_mode: Mode de chat (default: "general_chat")
             job_status: Statut du job (optionnel) - "running", "in queue", "completed", etc.
+            session_id: ID unique de l'onglet WebSocket (pour support multi-onglet)
 
         Returns:
             dict: {"success": bool, "message": str, "thread_key": str}
@@ -3370,7 +3525,7 @@ class LLMManager:
             
             logger.info(
                 f"[ENTER_CHAT] 📥 Signal reçu - "
-                f"session={base_session_key}, thread_key={thread_key}"
+                f"session={base_session_key}, thread_key={thread_key}, tab_session={session_id or 'legacy'}"
             )
             
             # ═══════════════════════════════════════════════════════════
@@ -3383,14 +3538,14 @@ class LLMManager:
             )
             
             # ═══════════════════════════════════════════════════════════
-            # ÉTAPE 2 : MARQUER PRÉSENCE SUR LE THREAD
+            # ÉTAPE 2 : MARQUER PRÉSENCE SUR LE THREAD (Multi-onglet)
             # ═══════════════════════════════════════════════════════════
             # Si user est déjà sur la page chat, c'est un changement de thread
             if session.is_on_chat_page and session.current_active_thread != thread_key:
-                session.switch_thread(thread_key)
+                session.switch_thread(thread_key, session_id=session_id)
             else:
                 # Première entrée sur la page chat
-                session.enter_chat(thread_key)
+                session.enter_chat(thread_key, session_id=session_id)
             
             logger.info(
                 f"[ENTER_CHAT] ✅ User {user_id} marqué comme PRÉSENT sur chat - "
@@ -4180,7 +4335,12 @@ class LLMManager:
         thread_key: str,
         initial_entries: Optional[List[str]] = None
         ) -> None:
-        """Démarre l'écoute RTDB follow-up pour les chats d'onboarding."""
+        """
+        Configure l'écoute onboarding via PubSub Redis.
+        
+        ⭐ MIGRATION: Utilise maintenant PubSub Redis au lieu de RTDB listener.
+        Le RedisSubscriber centralisé gère l'écoute et route vers cette méthode.
+        """
 
         existing_listener = session.onboarding_listeners.get(thread_key)
         initial_processed_ids = session.onboarding_processed_ids.get(thread_key)
@@ -4229,60 +4389,32 @@ class LLMManager:
         follow_thread = f"follow_{job_id}"
 
         try:
-            from ..firebase_providers import get_firebase_realtime
-
-            rtdb = get_firebase_realtime()
-
-            # S'assurer que la boucle dédiée est prête pour les callbacks
-            session.ensure_callback_loop()
-
-            async def _callback(message: Dict[str, Any]) -> None:
-                logger.info(
-                    f"[ONBOARDING_LISTENER] 📨 Message reçu depuis application métier - "
-                    f"job_id={job_id} thread={thread_key} message_id={message.get('id', 'N/A')} "
-                    f"content_preview={str(message.get('content', message.get('message', '')))[:100]}"
-                )
-                await self._handle_onboarding_log_event(
-                    session=session,
-                    brain=brain,
-                    collection_name=collection_name,
-                    thread_key=thread_key,
-                    follow_thread_key=follow_thread,  # ⚠️ Conservé pour compatibilité mais non utilisé
-                    message=message
-                )
-
-            # ⭐ MODIFIÉ: Écoute sur job_chats/{job_id} où l'application métier publie ses logs
-            # (pas sur chats/ qui est réservé aux conversations agent-utilisateur)
-            listener_path = f"{collection_name}/job_chats/{job_id}/messages"
-            logger.info(
-                f"[ONBOARDING_LISTENER] 🔍 Configuration écoute métier - "
-                f"space={collection_name} job_id={job_id} mode=job_chats path={listener_path}"
-            )
+            # ⭐ MIGRATION: Plus de listener RTDB, on utilise PubSub Redis
+            # Le RedisSubscriber centralisé écoute le canal: user:{uid}/{collection}/job_chats/{job_id}/messages
+            # et route vers _handle_onboarding_log_event() via _handle_job_chat_message()
             
-            listener = await rtdb.listen_realtime_channel(
-                space_code=collection_name,
-                thread_key=job_id,
-                callback=_callback,
-                mode='job_chats',  # ⭐ job_chats pour les logs métier
-                scheduler=session.schedule_coroutine
-            )
-
+            # Marquer la session comme "onboarding active" pour PubSub
             session.onboarding_listeners[thread_key] = {
-                "listener": listener,
+                "listener": None,  # Plus de listener RTDB
                 "job_id": job_id,
                 "follow_thread": follow_thread,
                 "log_entries": list(initial_entries) if initial_entries else [],
-                "processed_message_ids": initial_processed_ids
+                "processed_message_ids": initial_processed_ids,
+                "source": "pubsub"  # ⭐ Indique la source PubSub
             }
 
+            pubsub_channel = f"user:{session.context.user_id}/{collection_name}/job_chats/{job_id}/messages"
             logger.info(
-                f"[ONBOARDING_LISTENER] ✅ Écoute démarrée pour job_id={job_id} thread={thread_key} "
-                f"- Écoute sur: {listener_path}"
+                f"[ONBOARDING_LISTENER] ✅ Configuration PubSub démarrée pour job_id={job_id} thread={thread_key} "
+                f"- Canal PubSub: {pubsub_channel}"
+            )
+            logger.info(
+                f"[ONBOARDING_LISTENER] 🔍 Écoute gérée par RedisSubscriber centralisé (pattern: user:*)"
             )
 
         except Exception as e:
             logger.error(
-                f"[ONBOARDING_LISTENER] ❌ Échec démarrage écoute pour job_id={job_id}: {e}",
+                f"[ONBOARDING_LISTENER] ❌ Échec configuration PubSub pour job_id={job_id}: {e}",
                 exc_info=True
             )
 
@@ -6153,9 +6285,9 @@ The intermediation session has been closed {reason_text}. You can now continue t
         """
         Arrête les écouteurs onboarding pour un thread ou pour tous.
         
-        ⭐ OPTIMISATION: Fermeture NON-BLOQUANTE en arrière-plan
-        Les listeners Firebase RTDB sont fermés dans des threads séparés pour éviter
-        les blocages de 10-15 secondes qui retardent la réponse au client.
+        Utilise PubSub Redis uniquement. Supprime simplement l'entrée du registre.
+        Le RedisSubscriber continue d'écouter mais ignorera les messages
+        si la session n'a plus de listener actif.
         
         Args:
             session: Session LLM contenant les listeners
@@ -6170,36 +6302,14 @@ The intermediation session has been closed {reason_text}. You can now continue t
         for key, info in listeners.items():
             if not info:
                 continue
-            listener = info.get("listener")
             
-            # ⭐ Supprimer immédiatement du registre (pour éviter les doublons/réutilisations)
+            # Supprimer simplement l'entrée du registre
+            # Plus de fermeture de listener RTDB nécessaire (tous en PubSub maintenant)
             session.onboarding_listeners.pop(key, None)
-            
-            if listener:
-                # ⭐ FERMETURE EN ARRIÈRE-PLAN (NON-BLOQUANTE)
-                # listener.close() peut prendre 10-15 secondes avec Firebase RTDB
-                # → Exécution dans un thread séparé pour ne pas bloquer la réponse
-                def _close_listener_async():
-                    """Ferme le listener de manière asynchrone."""
-                    try:
-                        listener.close()
-                        logger.info(f"[ONBOARDING_LISTENER] 🔚 Listener arrêté pour thread={key}")
-                    except Exception as e:
-                        logger.warning(
-                            f"[ONBOARDING_LISTENER] ⚠️ Erreur arrêt listener thread={key}: {e}"
-                        )
-                
-                # Lancer dans un thread daemon (s'arrête automatiquement avec l'app)
-                close_thread = threading.Thread(
-                    target=_close_listener_async,
-                    daemon=True,  # Thread daemon pour ne pas bloquer l'arrêt de l'application
-                    name=f"listener_close_{key[:20]}"  # Nom explicite pour debug
-                )
-                close_thread.start()
-                
-                logger.info(
-                    f"[ONBOARDING_LISTENER] ⏳ Fermeture en arrière-plan lancée pour thread={key}"
-                )
+            logger.debug(
+                f"[ONBOARDING_LISTENER] 🛑 Arrêt listener PubSub pour thread={key} "
+                f"(suppression du registre uniquement)"
+            )
 
     # ═══════════════════════════════════════════════════════════════
     # COEUR MÉTIER UNIFIÉ - UI ET BACKEND
@@ -6495,11 +6605,68 @@ L'utilisateur a demandé la reprise du workflow{f' avec le message suivant: "{us
                     max_tokens=2048
                     ):
                     event_type = event.get("type")
-                    
+
+                    # ═════════════════════════════════════════════════
+                    # CAS 0a : DÉBUT PHASE THINKING
+                    # ═════════════════════════════════════════════════
+                    if event_type == "thinking_start":
+                        logger.info(f"[UNIFIED_WORKFLOW] 🧠 Début phase thinking")
+
+                        # Broadcast SI streaming activé
+                        if enable_streaming:
+                            await hub.broadcast(user_id, {
+                                "type": "thinking_start",
+                                "channel": ws_channel,
+                                "payload": {
+                                    "message_id": assistant_message_id,
+                                    "thread_key": thread_key,
+                                    "space_code": collection_name,
+                                    "timestamp": event.get("timestamp")
+                                }
+                            })
+
+                    # ═════════════════════════════════════════════════
+                    # CAS 0b : CHUNK THINKING (contenu reasoning)
+                    # ═════════════════════════════════════════════════
+                    elif event_type == "thinking_chunk":
+                        chunk = event.get("chunk")
+
+                        # Broadcast SI streaming activé (optionnel - pour afficher le contenu thinking)
+                        if enable_streaming:
+                            await hub.broadcast(user_id, {
+                                "type": "thinking_delta",
+                                "channel": ws_channel,
+                                "payload": {
+                                    "message_id": assistant_message_id,
+                                    "thread_key": thread_key,
+                                    "delta": chunk
+                                }
+                            })
+
+                    # ═════════════════════════════════════════════════
+                    # CAS 0c : FIN PHASE THINKING
+                    # ═════════════════════════════════════════════════
+                    elif event_type == "thinking_end":
+                        logger.info(f"[UNIFIED_WORKFLOW] 🧠 Fin phase thinking")
+
+                        # Broadcast SI streaming activé
+                        if enable_streaming:
+                            await hub.broadcast(user_id, {
+                                "type": "thinking_end",
+                                "channel": ws_channel,
+                                "payload": {
+                                    "message_id": assistant_message_id,
+                                    "thread_key": thread_key,
+                                    "space_code": collection_name,
+                                    "thinking_content": event.get("thinking_content"),
+                                    "timestamp": event.get("timestamp")
+                                }
+                            })
+
                     # ═════════════════════════════════════════════════
                     # CAS 1 : TEXTE (streaming normal)
                     # ═════════════════════════════════════════════════
-                    if event_type == "text_chunk":
+                    elif event_type == "text_chunk":
                         text_generated_this_turn = True
                         chunk = event.get("chunk")
                         accumulated_content += chunk
@@ -7726,16 +7893,21 @@ L'utilisateur a demandé la reprise du workflow{f' avec le message suivant: "{us
             card_message_id = f"card_{uuid.uuid4().hex[:12]}"
             approval_key = f"{user_id}:{thread_key}:{card_message_id}"
             
-            # ═══ ÉTAPE 3 : Création Future ═══
-            approval_future = asyncio.Future()
+            # ═══ ÉTAPE 3 : Création état d'approbation dans Redis ═══
+            from .approval_state_manager import get_approval_state_manager
+            approval_manager = get_approval_state_manager()
             
-            if not hasattr(self, 'pending_approvals'):
-                self.pending_approvals = {}
-            
-            self.pending_approvals[approval_key] = approval_future
+            approval_manager.create_pending_approval(
+                user_id=user_id,
+                thread_key=thread_key,
+                card_message_id=card_message_id,
+                card_type=card_type,
+                card_params=card_params,
+                timeout=timeout
+            )
             
             logger.info(
-                f"[APPROVAL_CARD] Future créé: {approval_key} "
+                f"[APPROVAL_CARD] ✅ Approbation créée dans Redis: {approval_key} "
                 f"(timeout={timeout}s)"
             )
             
@@ -7837,52 +8009,99 @@ L'utilisateur a demandé la reprise du workflow{f' avec le message suivant: "{us
                 )
                 # Continuer même si notification échoue
             
-            # ═══ ÉTAPE 7 : Attente réponse avec timeout ═══
+            # ═══ ÉTAPE 7 : Attente réponse avec polling Redis ═══
             try:
                 logger.info(
-                    f"[APPROVAL_CARD] ⏳ Attente réponse utilisateur "
+                    f"[APPROVAL_CARD] ⏳ Attente réponse utilisateur via Redis polling "
                     f"(timeout={timeout}s)..."
                 )
                 
-                result = await asyncio.wait_for(approval_future, timeout=timeout)
+                # Polling Redis avec asyncio.sleep()
+                start_time = datetime.now(timezone.utc)
+                poll_interval = 1.0  # Vérifier toutes les secondes
+                result = None
                 
-                # Mise à jour RTDB
-                rtdb_ref.update({
-                    "status": "responded",
-                    "responded_at": datetime.now(timezone.utc).isoformat(),
-                    "action": result.get("action"),
-                    "user_message": result.get("user_message", "")
+                while True:
+                    # Vérifier l'état dans Redis
+                    state = approval_manager.get_approval_state(
+                        user_id, thread_key, card_message_id
+                    )
+                    
+                    if state and state.get("status") != "pending":
+                        # Approbation résolue !
+                        approved = state.get("status") == "approved"
+                        result = {
+                            "approved": approved,
+                            "action": state.get("action"),
+                            "user_message": state.get("user_message", ""),
+                            "card_name": card_type,
+                            "card_message_id": card_message_id,
+                            "collection_name": collection_name,
+                            "responded_at": state.get("responded_at")
+                        }
+                        
+                        logger.info(
+                            f"[APPROVAL_CARD] ✅ Réponse reçue: approved={approved}, "
+                            f"action={result['action']}"
+                        )
+                        break
+                    
+                    # Vérifier timeout
+                    elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+                    if elapsed >= timeout:
+                        # Timeout atteint
+                        approval_manager.mark_timeout(user_id, thread_key, card_message_id)
+                        
+                        logger.warning(
+                            f"[APPROVAL_CARD] ⏰ Timeout atteint après {elapsed:.1f}s"
+                        )
+                        result = None
+                        break
+                    
+                    # Attendre avant prochaine vérification
+                    await asyncio.sleep(poll_interval)
+                
+                if result:
+                    # Mise à jour RTDB
+                    rtdb_ref.update({
+                        "status": "responded",
+                        "responded_at": result.get("responded_at"),
+                        "action": result.get("action"),
+                        "user_message": result.get("user_message", "")
                 })
                 
-                logger.info(
-                    f"[APPROVAL_CARD] ✅ Réponse reçue - "
-                    f"approved={result.get('approved')}"
-                )
+                logger.info(f"[APPROVAL_CARD] 💾 RTDB mis à jour: status=responded")
                 
                 return result
                 
-            except asyncio.TimeoutError:
-                # Mise à jour RTDB
-                rtdb_ref.update({
-                    "status": "timeout",
-                    "timeout_at": datetime.now(timezone.utc).isoformat()
-                })
-                
-                logger.warning(
-                    f"[APPROVAL_CARD] ⏰ Timeout - Aucune réponse après {timeout}s"
+            except Exception as wait_error:
+                # Erreur pendant le polling
+                logger.error(
+                    f"[APPROVAL_CARD] ❌ Erreur pendant polling: {wait_error}",
+                    exc_info=True
                 )
+                
+                # Marquer comme timeout dans RTDB
+                try:
+                    rtdb_ref.update({
+                        "status": "error",
+                        "error_at": datetime.now(timezone.utc).isoformat(),
+                        "error": str(wait_error)
+                    })
+                except Exception:
+                    pass
                 
                 return {
                     "approved": False,
-                    "timeout": True,
+                    "timeout": False,
+                    "error": True,
                     "card_message_id": card_message_id,
-                    "reason": "timeout"
+                    "reason": str(wait_error)
                 }
                 
             finally:
-                # Nettoyer
-                self.pending_approvals.pop(approval_key, None)
-                logger.info(f"[APPROVAL_CARD] 🧹 Future nettoyé: {approval_key}")
+                # Nettoyer (optionnel, le TTL Redis s'en chargera)
+                pass
                 
                 # Supprimer la notification de message direct
                 if notif_message_id:
@@ -8047,36 +8266,29 @@ L'utilisateur a demandé la reprise du workflow{f' avec le message suivant: "{us
                 return {"success": True, "message_id": message_id, "mode": mode_label, "transfer": transfer_mode}
             
             # ═══════════════════════════════════════════════════════════
-            # ÉTAPE 2 : MODE GENERAL_CHAT (logique Future existante)
+            # ÉTAPE 2 : MODE GENERAL_CHAT (mise à jour Redis)
             # ═══════════════════════════════════════════════════════════
-            if not hasattr(self, 'pending_approvals'):
-                logger.warning(f"[CARD_RESPONSE] ⚠️ Système approvals non initialisé")
-                return {"success": False, "error": "No approval system initialized"}
+            from .approval_state_manager import get_approval_state_manager
+            approval_manager = get_approval_state_manager()
             
-            future = self.pending_approvals.get(approval_key)
+            # Résoudre l'approbation dans Redis
+            success = approval_manager.resolve_approval(
+                user_id=user_id,
+                thread_key=thread_key,
+                card_message_id=card_message_id,
+                action=action,
+                user_message=user_message
+            )
             
-            if future and not future.done():
-                # Résoudre Future
-                approved = action.startswith("approve")  # approve_four_eyes → True
-                
-                future.set_result({
-                    "approved": approved,
-                    "action": action,
-                    "user_message": user_message,
-                    "card_name": card_name,
-                    "card_message_id": card_message_id,
-                    "collection_name": collection_name,
-                    "responded_at": datetime.now(timezone.utc).isoformat()
-                })
-                
+            if success:
                 logger.info(
-                    f"[CARD_RESPONSE] ✅ Future résolu - approved={approved}, "
-                    f"comment={'Yes' if user_message else 'No'}"
+                    f"[CARD_RESPONSE] ✅ Approbation résolue dans Redis - "
+                    f"action={action}, comment={'Yes' if user_message else 'No'}"
                 )
                 return {"success": True}
             else:
                 logger.warning(
-                    f"[CARD_RESPONSE] ⚠️ Future non trouvé ou déjà résolu: {approval_key}"
+                    f"[CARD_RESPONSE] ⚠️ Approbation introuvable ou déjà résolue: {approval_key}"
                 )
                 return {
                     "success": False,

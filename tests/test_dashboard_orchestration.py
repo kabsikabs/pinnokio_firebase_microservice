@@ -102,7 +102,7 @@ class TestOrchestrationStateManager:
         # Check state structure
         state = json.loads(args[2])
         assert state["orchestration_id"] == orchestration_id
-        assert state["phase"] == "company"
+        assert state["phase"] == "user_setup"  # Phase initiale mise à jour
         assert state["selected_company_id"] == "test-company"
         assert state["cancellation_requested"] is False
 

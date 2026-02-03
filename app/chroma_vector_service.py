@@ -166,6 +166,29 @@ class ChromaVectorService:
 
         return self._collection_instances[collection_name]
 
+    def delete_collection(self, collection_name: str) -> dict:
+        """
+        Delete an entire ChromaDB collection.
+
+        Args:
+            collection_name: Name of the collection to delete.
+
+        Returns:
+            {"success": True/False, "error": str (if failed)}
+        """
+        try:
+            self.chroma.delete_collection(name=collection_name)
+
+            # Clean up cached instance
+            with self._lock:
+                self._collection_instances.pop(collection_name, None)
+
+            print(f"✅ Collection '{collection_name}' supprimée de ChromaDB")
+            return {"success": True}
+        except Exception as e:
+            print(f"❌ Erreur lors de la suppression de la collection '{collection_name}': {e}")
+            return {"success": False, "error": str(e)}
+
     def generate_unique_id(self) -> str:
         """Génère un ID unique."""
         return str(uuid.uuid4())

@@ -3197,8 +3197,93 @@ class FirebaseManagement:
             print(f"❌ Erreur get_notifications: {e}")
             return []
 
-    
-    
+    def fetch_routing_documents(self, user_id: str, mandate_path: str) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Récupère les documents de routing triés par status depuis la collection notifications.
+
+        Cette méthode implémente la logique de tri pour les onglets de la page Routing:
+        - in_process: documents avec status in ['in_queue', 'on_process', 'stopping']
+        - pending: documents avec status == 'pending'
+        - processed: documents avec status == 'completed'
+
+        Note: Les documents "À traiter" (to_process) viennent du Drive, pas de cette méthode.
+
+        Args:
+            user_id (str): L'ID Firebase de l'utilisateur
+            mandate_path (str): Le chemin du mandat (company_id)
+
+        Returns:
+            Dict avec les clés 'in_process', 'pending', 'processed' contenant les listes de documents
+        """
+        result = {
+            "in_process": [],
+            "pending": [],
+            "processed": []
+        }
+
+        try:
+            if not user_id:
+                print("[fetch_routing_documents] user_id manquant")
+                return result
+
+            # Collection des notifications/jobs
+            collection_path = f"clients/{user_id}/notifications"
+            collection_ref = self.db.collection(collection_path)
+
+            # Récupérer tous les documents pour ce mandat (filtrer par function_name='Router' si applicable)
+            # Note: On filtre par company_id/mandate car un user peut avoir plusieurs mandats
+            try:
+                query = collection_ref.where(filter=FieldFilter("function_name", "==", "Router"))
+                docs = query.stream()
+            except Exception:
+                # Fallback si le champ function_name n'existe pas
+                docs = collection_ref.stream()
+
+            # Status groups selon les types définis
+            in_process_statuses = ['in_queue', 'on_process', 'stopping']
+            pending_statuses = ['pending']
+            processed_statuses = ['completed']
+
+            for doc in docs:
+                data = doc.to_dict() or {}
+                data["id"] = doc.id
+
+                # Extraire le status du document
+                status = data.get("status", "").lower()
+
+                # Construire l'objet document avec les champs nécessaires
+                doc_item = {
+                    "id": doc.id,
+                    "job_id": data.get("job_id", doc.id),
+                    "file_name": data.get("file_name", data.get("name", "")),
+                    "status": status,
+                    "timestamp": data.get("timestamp", data.get("created_at", "")),
+                    "source": data.get("source", ""),
+                    "drive_file_id": data.get("file_id", data.get("drive_file_id", "")),
+                    "uri_drive_link": data.get("uri_file_link", data.get("drive_link", "")),
+                    "pinnokio_func": data.get("function_name", data.get("pinnokio_func", "Router")),
+                }
+
+                # Trier dans la bonne catégorie selon le status
+                if status in in_process_statuses:
+                    result["in_process"].append(doc_item)
+                elif status in pending_statuses:
+                    result["pending"].append(doc_item)
+                elif status in processed_statuses:
+                    result["processed"].append(doc_item)
+                # Les autres statuts (to_process, error, stopped) sont gérés côté Drive
+
+            print(f"[fetch_routing_documents] Retrieved: in_process={len(result['in_process'])}, "
+                  f"pending={len(result['pending'])}, processed={len(result['processed'])}")
+
+            return result
+
+        except Exception as e:
+            print(f"❌ Erreur fetch_routing_documents: {e}")
+            return result
+
+
+
     def update_job_status(self, user_id: str, job_id: str, new_status: str, additional_info: dict = None):
         """
         Met à jour le statut d'un job spécifique.
@@ -3684,57 +3769,75 @@ class FirebaseManagement:
 
     def check_and_create_client_document(self, user_data):
         """
-        Vérifie si le document utilisateur existe et effectue les actions nécessaires.
-        
+        Vérifie si les documents utilisateur existent et les crée si nécessaire.
+
+        Crée INDÉPENDAMMENT:
+        1. users/{uid}
+        2. clients/{uid}
+        3. clients/{uid}/bo_clients/{uid}
+
         Args:
             user_data (dict): Données utilisateur contenant `email` et `displayName`.
         """
         user_id = user_data['uid']
         user_document_data = {
-        "uid": user_data["uid"],
-        "email": user_data["email"],
-        "displayName": user_data.get("displayName", ""),
-        "photoURL": user_data.get("photoUrl", "")
+            "uid": user_data["uid"],
+            "email": user_data["email"],
+            "displayName": user_data.get("displayName", ""),
+            "photoURL": user_data.get("photoUrl", "")
         }
-        
-        user_ref = self.db.collection("users").document(user_id)
-        print(f"🔍 Référence du document : {user_ref.path}")
 
-        doc = user_ref.get()
-        # Vérification de l'existence du document
-        if doc.exists:
-            print(f"✅ Le document pour l'utilisateur {user_id} existe déjà.")
+        # ═══════════════════════════════════════════════════════════════
+        # 1. Check/Create users/{uid}
+        # ═══════════════════════════════════════════════════════════════
+        user_ref = self.db.collection("users").document(user_id)
+        print(f"🔍 Vérification users/{user_id}")
+
+        user_doc = user_ref.get()
+        if user_doc.exists:
+            print(f"✅ users/{user_id} existe déjà - mise à jour")
             user_ref.update(user_data)
         else:
-            print(f"⚠️ Le document pour l'utilisateur {user_id} n'existe pas. Création...")
-            # Création du document principal dans 'users'
+            print(f"⚠️ users/{user_id} n'existe pas - création")
             user_ref.set(user_document_data)
-            print(f"✅ Document 'users' créé pour l'utilisateur {user_id}.")
+            print(f"✅ users/{user_id} créé")
 
-            # Création du document dans 'clients'
-            print(f"⚠️ Le document pour l'utilisateur {user_id} n'existe pas. Création...")
-            # Création du document principal
-            user_ref=self.db.collection('clients').document(user_id)
-            client_uuid=f"client_{str(uuid.uuid4())[:8]}"
-            user_ref.set({
+        # ═══════════════════════════════════════════════════════════════
+        # 2. Check/Create clients/{uid} (INDÉPENDAMMENT de users/)
+        # ═══════════════════════════════════════════════════════════════
+        client_ref = self.db.collection('clients').document(user_id)
+        print(f"🔍 Vérification clients/{user_id}")
+
+        client_doc = client_ref.get()
+        if client_doc.exists:
+            print(f"✅ clients/{user_id} existe déjà")
+        else:
+            print(f"⚠️ clients/{user_id} n'existe pas - création")
+            client_ref.set({
                 "client_email": user_data["email"],
-                "client_name": user_data["displayName"],
+                "client_name": user_data.get("displayName", ""),
                 "created_at": firestore.SERVER_TIMESTAMP,
-               
             })
-            # Création du sous-document
-            sub_doc_ref = user_ref.collection("bo_clients").document(user_id)
-            sub_doc_ref.set({
-               
-                "client_name": user_data["displayName"],
-                "created_at": firestore.SERVER_TIMESTAMP,
-                "client_uuid":client_uuid
-            })
+            print(f"✅ clients/{user_id} créé")
 
-            print(f"✅ Documents créés pour l'utilisateur {user_id}.")
-            # Règle de sécurité ou rôle dans PostgreSQL
-            
-            print(f"Assigning admin role to user in postgres {user_id}")
+        # ═══════════════════════════════════════════════════════════════
+        # 3. Check/Create clients/{uid}/bo_clients/{uid} (INDÉPENDAMMENT)
+        # ═══════════════════════════════════════════════════════════════
+        bo_client_ref = client_ref.collection("bo_clients").document(user_id)
+        print(f"🔍 Vérification clients/{user_id}/bo_clients/{user_id}")
+
+        bo_client_doc = bo_client_ref.get()
+        if bo_client_doc.exists:
+            print(f"✅ clients/{user_id}/bo_clients/{user_id} existe déjà")
+        else:
+            print(f"⚠️ clients/{user_id}/bo_clients/{user_id} n'existe pas - création")
+            client_uuid = f"klk_client_{str(uuid.uuid4())[:8]}"
+            bo_client_ref.set({
+                "client_name": user_data.get("displayName", ""),
+                "created_at": firestore.SERVER_TIMESTAMP,
+                "client_uuid": client_uuid
+            })
+            print(f"✅ clients/{user_id}/bo_clients/{user_id} créé avec client_uuid={client_uuid}")
            
 
     def get_erp_path(self, mandate_path: str, erp_name: str) -> dict:
@@ -4297,6 +4400,10 @@ class FirebaseManagement:
             else:
                 # Créer un nouveau document avec le file_id comme ID
                 doc_ref.set(job_data)
+            
+            # Publier notification si c'est dans le chemin notifications
+            if "notifications" in collection_path:
+                self._publish_notification_event(collection_path, job_data)
                 
             return file_id
                 
@@ -4364,7 +4471,9 @@ class FirebaseManagement:
 
     def _publish_notification_event(self, collection_path, job_data):
         """
-        Publie une notification sur Redis pour les events temps réel
+        Publie une notification sur Redis PubSub pour les events temps réel.
+        
+        Utilise le nouveau système PubSub Redis au lieu des listeners Firebase.
 
         Args:
             collection_path (str): Chemin de la collection
@@ -4376,29 +4485,53 @@ class FirebaseManagement:
             if len(path_parts) >= 2 and path_parts[0] == 'clients':
                 user_id = path_parts[1]
 
-                # Créer le payload pour la notification
-                notification_payload = {
-                    "type": "notif.job_updated",
-                    "uid": user_id,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "payload": {
-                        "job_id": job_data.get("job_id"),
-                        "batch_id": job_data.get("batch_id"),
-                        "function_name": job_data.get("function_name"),
-                        "status": job_data.get("status"),
-                        "collection_path": collection_path
-                    }
+                # Déterminer l'action (new ou update) selon si le document existe
+                doc_ref = self.db.collection(collection_path).document(job_data.get('job_id') or job_data.get('file_id') or job_data.get('batch_id'))
+                doc = doc_ref.get()
+                action = "update" if doc.exists else "new"
+
+                # Transformer job_data en format notification pour le frontend
+                notification_data = {
+                    "docId": job_data.get('job_id') or job_data.get('file_id') or job_data.get('batch_id'),
+                    "message": job_data.get('message', ''),
+                    "fileName": job_data.get('file_name', ''),
+                    "collectionId": job_data.get('collection_id', ''),
+                    "collectionName": job_data.get('collection_name', ''),
+                    "status": job_data.get('status', 'pending'),
+                    "read": job_data.get('read', False),
+                    "jobId": job_data.get('job_id', ''),
+                    "fileId": job_data.get('file_id', ''),
+                    "functionName": job_data.get('function_name', 'Router'),
+                    "timestamp": job_data.get('timestamp', datetime.now(timezone.utc).isoformat()),
+                    "additionalInfo": job_data.get('additional_info', ''),
+                    "driveLink": job_data.get('drive_link', ''),
+                    "batchId": job_data.get('batch_id', ''),
                 }
 
-                print(f"[DEBUG] Publishing notification for user {user_id}: {notification_payload.get('type')}")
+                # Utiliser le nouveau système PubSub Redis
+                import asyncio
+                from app.realtime.pubsub_helper import publish_notification_event
+                
+                # Publier de manière asynchrone
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # Si la boucle est déjà en cours, créer une tâche
+                        asyncio.create_task(
+                            publish_notification_event(user_id, action, notification_data)
+                        )
+                    else:
+                        # Sinon, exécuter directement
+                        loop.run_until_complete(
+                            publish_notification_event(user_id, action, notification_data)
+                        )
+                except RuntimeError:
+                    # Si aucune boucle n'existe, en créer une nouvelle
+                    asyncio.run(
+                        publish_notification_event(user_id, action, notification_data)
+                    )
 
-                # Utiliser l'instance globale listeners_manager pour publier
-                from app.main import listeners_manager
-                if listeners_manager:
-                    listeners_manager.publish(user_id, notification_payload)
-                    print(f"[DEBUG] Notification published successfully for user {user_id}")
-                else:
-                    print(f"[WARNING] listeners_manager not available, cannot publish notification")
+                print(f"[DEBUG] Notification published via PubSub Redis for user {user_id}, action={action}")
 
         except Exception as e:
             print(f"[ERROR] Failed to publish notification: {e}")
@@ -4437,6 +4570,10 @@ class FirebaseManagement:
             else:
                 # Créer un nouveau document avec le job_id comme ID
                 doc_ref.set(job_data)
+            
+            # Publier notification si c'est dans le chemin notifications
+            if "notifications" in collection_path:
+                self._publish_notification_event(collection_path, job_data)
                 
             return job_id
                 
@@ -4726,7 +4863,11 @@ class FirebaseManagement:
                             mandate["workflow_params"]["Apbookeeper_param"] = {
                                 "apbookeeper_approval_contact_creation": ap_param.get("apbookeeper_approval_contact_creation", False),
                                 "apbookeeper_approval_required": ap_param.get("apbookeeper_approval_required", False),
-                                "apbookeeper_communication_method": ap_param.get("apbookeeper_communication_method", "")
+                                "apbookeeper_communication_method": ap_param.get("apbookeeper_communication_method", ""),
+                                "apbookeeper_approval_pendinglist_enabled": ap_param.get("apbookeeper_approval_pendinglist_enabled", False),
+                                "apbookeeper_automated_workflow": ap_param.get("apbookeeper_automated_workflow", False),
+                                "trust_threshold_required": ap_param.get("trust_threshold_required", False),
+                                "trust_threshold_percent": ap_param.get("trust_threshold_percent", 95),
                             }
                         
                         # Extraire les paramètres pour Router
@@ -4735,21 +4876,82 @@ class FirebaseManagement:
                             mandate["workflow_params"]["Router_param"] = {
                                 "router_approval_required": router_param.get("router_approval_required", False),
                                 "router_automated_workflow": router_param.get("router_automated_workflow", False),
-                                "router_communication_method": router_param.get("router_communication_method", "")
+                                "router_communication_method": router_param.get("router_communication_method", ""),
+                                "router_approval_pendinglist_enabled": router_param.get("router_approval_pendinglist_enabled", False),
+                                "departments": router_param.get("departments", []),
                             }
                         
-                        # Extraire les paramètres pour Router
+                        # Extraire les paramètres pour Banker
                         if "Banker_param" in workflow_data:
-                            router_param = workflow_data.get("Banker_param", {})
+                            banker_param = workflow_data.get("Banker_param", {})
                             mandate["workflow_params"]["Banker_param"] = {
-                                "banker_approval_required": router_param.get("banker_approval_required", False),
-                                "banker_approval_thresholdworkflow": router_param.get("banker_approval_thresholdworkflow", 0),
-                                "banker_communication_method": router_param.get("banker_communication_method", "")
+                                "banker_approval_required": banker_param.get("banker_approval_required", False),
+                                "banker_approval_thresholdworkflow": banker_param.get("banker_approval_thresholdworkflow", 0),
+                                "banker_communication_method": banker_param.get("banker_communication_method", ""),
+                                "banker_approval_pendinglist_enabled": banker_param.get("banker_approval_pendinglist_enabled", False),
+                                "banker_gl_approval": banker_param.get("banker_gl_approval", False),
+                                "banker_voucher_approval": banker_param.get("banker_voucher_approval", False),
                             }
+
+                        # Extraire les paramètres de date comptable depuis Accounting_param
+                        if "Accounting_param" in workflow_data:
+                            accounting_param = workflow_data.get("Accounting_param", {})
+                            print(f"[FETCH_MANDATE] Found Accounting_param in Firestore: {accounting_param}")
+                            mandate["workflow_params"]["Accounting_param"] = {
+                                "accounting_date_definition": accounting_param.get("accounting_date_definition", True),
+                                "accounting_date": accounting_param.get("accounting_date", ""),
+                                "custom_mode": accounting_param.get("custom_mode", False),
+                                "date_prompt": accounting_param.get("date_prompt", ""),
+                            }
+                            print(f"[FETCH_MANDATE] Built Accounting_param: {mandate['workflow_params']['Accounting_param']}")
+                        else:
+                            # Fallback: legacy format at root level
+                            print(f"[FETCH_MANDATE] No Accounting_param key, using legacy format. workflow_data keys: {list(workflow_data.keys())}")
+                            mandate["workflow_params"]["Accounting_param"] = {
+                                "accounting_date_definition": workflow_data.get("automated_accounting_date_definition", True),
+                                "accounting_date": workflow_data.get("accounting_date", ""),
+                                "custom_mode": workflow_data.get("accounting_date_custom_mode", False),
+                                "date_prompt": workflow_data.get("accounting_date_custom_prompt", ""),
+                            }
+                            print(f"[FETCH_MANDATE] Built legacy Accounting_param: {mandate['workflow_params']['Accounting_param']}")
 
                     else:
                         print(f"Workflow params not found for path: {workflow_params_path}")
                         # Nous conservons la structure vide initialisée plus haut
+
+                    # Load Asset Management from separate document: setup/asset_model
+                    try:
+                        asset_model_path = f"{base_path}/{parent_doc_id}/mandates/{mandate_doc_id}/setup/asset_model"
+                        print(f"[FETCH_MANDATE] Loading Asset_param from: {asset_model_path}")
+                        asset_doc = self.db.document(asset_model_path).get()
+
+                        if asset_doc.exists:
+                            asset_data = asset_doc.to_dict()
+                            print(f"[FETCH_MANDATE] Found Asset_param in Firestore: {asset_data}")
+                            mandate["workflow_params"]["Asset_param"] = {
+                                "asset_management_activated": asset_data.get("asset_management_activated", False),
+                                "asset_automated_creation": asset_data.get("asset_automated_creation", True),
+                                "asset_default_method": asset_data.get("asset_default_method", "linear"),
+                                "asset_default_method_period": asset_data.get("asset_default_method_period", "12"),
+                            }
+                            print(f"[FETCH_MANDATE] Built Asset_param: {mandate['workflow_params']['Asset_param']}")
+                        else:
+                            # Default values if no asset_model document exists
+                            print(f"[FETCH_MANDATE] No asset_model document found, using defaults")
+                            mandate["workflow_params"]["Asset_param"] = {
+                                "asset_management_activated": False,
+                                "asset_automated_creation": True,
+                                "asset_default_method": "linear",
+                                "asset_default_method_period": "12",
+                            }
+                    except Exception as asset_err:
+                        print(f"[FETCH_MANDATE] Error fetching asset_model: {str(asset_err)}")
+                        mandate["workflow_params"]["Asset_param"] = {
+                            "asset_management_activated": False,
+                            "asset_automated_creation": True,
+                            "asset_default_method": "linear",
+                            "asset_default_method_period": "12",
+                        }
                 except Exception as e:
                     print(f"Error fetching workflow params: {str(e)}")
                     mandate["workflow_params"]["error"] = f"Error fetching workflow parameters: {str(e)}"
@@ -4970,7 +5172,19 @@ class FirebaseManagement:
                 raise ValueError(f"Mandat non trouvé au chemin: {mandate_path}")
             
             doc_data = mandate_doc.to_dict()
-            
+
+            # DEBUG: Log all keys in Firestore document
+            print(f"[fetch_single_mandate] Document keys: {list(doc_data.keys())}")
+            print(f"[fetch_single_mandate] Company info fields:")
+            print(f"  - legal_status: '{doc_data.get('legal_status', 'NOT_FOUND')}'")
+            print(f"  - country: '{doc_data.get('country', 'NOT_FOUND')}'")
+            print(f"  - address: '{doc_data.get('address', 'NOT_FOUND')}'")
+            print(f"  - phone_number: '{doc_data.get('phone_number', 'NOT_FOUND')}'")
+            print(f"  - email: '{doc_data.get('email', 'NOT_FOUND')}'")
+            print(f"  - website: '{doc_data.get('website', 'NOT_FOUND')}'")
+            print(f"  - language: '{doc_data.get('language', 'NOT_FOUND')}'")
+            print(f"  - has_vat: '{doc_data.get('has_vat', 'NOT_FOUND')}'")
+
             # Vérifier si le mandat est actif
             if not doc_data.get('isactive', True):
                 raise ValueError(f"Le mandat au chemin {mandate_path} n'est pas actif")
@@ -4993,7 +5207,36 @@ class FirebaseManagement:
                 "base_currency": doc_data.get('base_currency', ""),
                 "dms_type": doc_data.get('dms_type', ""),
                 "chat_type": doc_data.get('chat_type', ""),
-                "communication_log_type": doc_data.get('communication_log_type', "")
+                "communication_log_type": doc_data.get('communication_log_type', ""),
+                # Company info fields (added for Company Settings page)
+                "legal_status": doc_data.get('legal_status', ""),
+                "country": doc_data.get('country', ""),
+                "address": doc_data.get('address', ""),
+                "phone_number": doc_data.get('phone_number', ""),
+                "email": doc_data.get('email', ""),
+                "website": doc_data.get('website', ""),
+                "language": doc_data.get('language', ""),
+                "has_vat": doc_data.get('has_vat', False),
+                "vat_number": doc_data.get('vat_number', ""),
+                "ownership_type": doc_data.get('ownership_type', ""),
+                # Workflow parameters
+                "router_approval_required": doc_data.get('router_approval_required', False),
+                "router_automated_workflow": doc_data.get('router_automated_workflow', False),
+                "router_communication_method": doc_data.get('router_communication_method', "telegram"),
+                "apbookeeper_approval_required": doc_data.get('apbookeeper_approval_required', False),
+                "apbookeeper_approval_contact_creation": doc_data.get('apbookeeper_approval_contact_creation', False),
+                "apbookeeper_communication_method": doc_data.get('apbookeeper_communication_method', "telegram"),
+                "banker_approval_required": doc_data.get('banker_approval_required', False),
+                "banker_approval_threshold_workflow": doc_data.get('banker_approval_threshold_workflow', 0),
+                "banker_communication_method": doc_data.get('banker_communication_method', "telegram"),
+                # Context details for AI
+                "general_context": doc_data.get('general_context', ""),
+                "accounting_context": doc_data.get('accounting_context', ""),
+                "invoices_context": doc_data.get('invoices_context', ""),
+                "expenses_context": doc_data.get('expenses_context', ""),
+                "banks_cash_context": doc_data.get('banks_cash_context', ""),
+                "hr_context": doc_data.get('hr_context', ""),
+                "taxes_context": doc_data.get('taxes_context', ""),
             }
 
             # Récupérer les informations du document parent
@@ -5078,8 +5321,60 @@ class FirebaseManagement:
                             "banker_approval_thresholdworkflow": banker_param.get("banker_approval_thresholdworkflow", 0),
                             "banker_communication_method": banker_param.get("banker_communication_method", "")
                         }
+
+                    # Extraire les paramètres de date comptable (Accounting_param)
+                    if "Accounting_param" in workflow_data:
+                        accounting_param = workflow_data.get("Accounting_param", {})
+                        print(f"[fetch_single_mandate] Found Accounting_param: {accounting_param}")
+                        mandate["workflow_params"]["Accounting_param"] = {
+                            "accounting_date_definition": accounting_param.get("accounting_date_definition", True),
+                            "accounting_date": accounting_param.get("accounting_date", ""),
+                            "custom_mode": accounting_param.get("custom_mode", False),
+                            "date_prompt": accounting_param.get("date_prompt", ""),
+                        }
+                    else:
+                        # Valeurs par défaut si Accounting_param n'existe pas
+                        print(f"[fetch_single_mandate] No Accounting_param found, using defaults")
+                        mandate["workflow_params"]["Accounting_param"] = {
+                            "accounting_date_definition": True,
+                            "accounting_date": "",
+                            "custom_mode": False,
+                            "date_prompt": "",
+                        }
                 else:
                     print(f"Workflow params not found for path: {workflow_params_path}")
+
+                # Charger Asset_param depuis le document séparé setup/asset_model
+                try:
+                    asset_model_path = f"{mandate_path}/setup/asset_model"
+                    print(f"[fetch_single_mandate] Loading Asset_param from: {asset_model_path}")
+                    asset_doc = self.db.document(asset_model_path).get()
+
+                    if asset_doc.exists:
+                        asset_data = asset_doc.to_dict()
+                        print(f"[fetch_single_mandate] Found Asset_param: {asset_data}")
+                        mandate["workflow_params"]["Asset_param"] = {
+                            "asset_management_activated": asset_data.get("asset_management_activated", False),
+                            "asset_automated_creation": asset_data.get("asset_automated_creation", True),
+                            "asset_default_method": asset_data.get("asset_default_method", "linear"),
+                            "asset_default_method_period": asset_data.get("asset_default_method_period", "12"),
+                        }
+                    else:
+                        print(f"[fetch_single_mandate] No asset_model document found, using defaults")
+                        mandate["workflow_params"]["Asset_param"] = {
+                            "asset_management_activated": False,
+                            "asset_automated_creation": True,
+                            "asset_default_method": "linear",
+                            "asset_default_method_period": "12",
+                        }
+                except Exception as asset_err:
+                    print(f"[fetch_single_mandate] Error loading Asset_param: {asset_err}")
+                    mandate["workflow_params"]["Asset_param"] = {
+                        "asset_management_activated": False,
+                        "asset_automated_creation": True,
+                        "asset_default_method": "linear",
+                        "asset_default_method_period": "12",
+                    }
                     
             except Exception as e:
                 print(f"Error fetching workflow params: {str(e)}")
@@ -5106,10 +5401,13 @@ class FirebaseManagement:
             try:
                 mandate["context_details"] = {}
                 context_collection_path = f"{mandate_path}/context"
-                
-                context_docs = self.db.collection(context_collection_path).stream()
-                
+                print(f"[fetch_single_mandate] Loading contexts from: {context_collection_path}")
+
+                context_docs = list(self.db.collection(context_collection_path).stream())
+                print(f"[fetch_single_mandate] Found {len(context_docs)} context documents")
+
                 for context_doc in context_docs:
+                    print(f"[fetch_single_mandate] Processing context doc: {context_doc.id}")
                     context_data = context_doc.to_dict()
                     if context_doc.id == "accounting_context":
                         accounting_data = context_data.get('data', {}).get('accounting_context_0', {})
@@ -5135,6 +5433,11 @@ class FirebaseManagement:
                             
             except Exception as e:
                 mandate["context_details"]["error"] = f"Error fetching context documents: {str(e)}"
+                print(f"[fetch_single_mandate] Error loading contexts: {e}")
+
+            # DEBUG: Log context_details content
+            print(f"[fetch_single_mandate] context_details keys: {list(mandate.get('context_details', {}).keys())}")
+            print(f"[fetch_single_mandate] general_context present: {'general_context' in mandate.get('context_details', {})}")
 
             print(f"Mandat chargé avec succès: {mandate.get('legal_name', 'Nom non disponible')}")
             return mandate
@@ -9409,6 +9712,320 @@ class FirebaseManagement:
             logger.error(f"[TASKS] Erreur get_tasks_ready_for_execution_utc: {e}", exc_info=True)
             return []
 
+    # ========== Approval Pending List Management ==========
+
+    def save_approval_item_changes(
+        self,
+        mandate_path: str,
+        item_id: str,
+        changes: dict,
+        user_id: str = None
+    ) -> bool:
+        """
+        Sauvegarde les modifications locales d'un item d'approbation dans Firebase.
+        Utilisé pour persister les sélections utilisateur (service, année, instructions)
+        sans envoyer au jobbeur.
+
+        Args:
+            mandate_path: Chemin du mandat (ex: "bo_clients/xxx/mandates/yyy")
+            item_id: ID de l'item (ex: "router_abc123")
+            changes: Dict des modifications à appliquer
+                - selected_service: Service sélectionné
+                - selected_fiscal_year: Année fiscale sélectionnée
+                - instructions: Instructions additionnelles
+            user_id: ID de l'utilisateur (pour audit)
+
+        Returns:
+            bool: True si sauvegarde réussie
+        """
+        try:
+            # Construire le chemin du document
+            doc_path = f"{mandate_path}/approval_pendinglist/{item_id}"
+            logger.info(f"[APPROVAL] Saving changes to {doc_path}: {changes}")
+
+            doc_ref = self.db.document(doc_path)
+            doc = doc_ref.get()
+
+            if not doc.exists:
+                logger.warning(f"[APPROVAL] Item not found: {doc_path}")
+                return False
+
+            # Préparer les données à mettre à jour
+            update_data = {}
+
+            if "selected_service" in changes:
+                update_data["selected_service"] = changes["selected_service"]
+            if "selected_fiscal_year" in changes:
+                update_data["selected_fiscal_year"] = changes["selected_fiscal_year"]
+            if "instructions" in changes:
+                update_data["instructions"] = changes["instructions"]
+
+            # Ajouter métadonnées d'audit
+            update_data["last_modified_by"] = user_id
+            update_data["last_modified_at"] = firestore.SERVER_TIMESTAMP
+
+            # Mettre à jour le document
+            doc_ref.update(update_data)
+
+            logger.info(f"[APPROVAL] Changes saved successfully: {doc_path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[APPROVAL] Error saving changes: {e}", exc_info=True)
+            return False
+
+    def process_router_approval(
+        self,
+        mandate_path: str,
+        item_id: str,
+        selected_service: str,
+        selected_fiscal_year: str,
+        user_id: str,
+        instructions: str = None
+    ) -> bool:
+        """
+        Traite l'approbation d'un item Router.
+
+        1. Charge l'item depuis approval_pendinglist
+        2. Crée une notification avec approval_response_mode: true
+        3. Supprime l'item de approval_pendinglist
+        4. Publie sur Redis pour mise à jour temps réel
+
+        Args:
+            mandate_path: Chemin du mandat
+            item_id: ID de l'item (ex: "router_abc123")
+            selected_service: Service sélectionné par l'utilisateur
+            selected_fiscal_year: Année fiscale sélectionnée
+            user_id: ID de l'utilisateur Firebase
+            instructions: Instructions additionnelles (optionnel)
+
+        Returns:
+            bool: True si traitement réussi
+        """
+        import uuid
+        from datetime import datetime, timezone
+
+        try:
+            # 1. Charger l'item depuis approval_pendinglist
+            pending_path = f"{mandate_path}/approval_pendinglist/{item_id}"
+            logger.info(f"[APPROVAL] Processing router approval: {pending_path}")
+
+            doc_ref = self.db.document(pending_path)
+            doc = doc_ref.get()
+
+            if not doc.exists:
+                logger.error(f"[APPROVAL] Item not found: {pending_path}")
+                return False
+
+            item_data = doc.to_dict()
+            context_payload = item_data.get("context_payload", {})
+
+            # Extraire les informations nécessaires
+            drive_file_id = context_payload.get("drive_file_id", "")
+            file_name = context_payload.get("file_name", "") or item_data.get("file_name", "")
+
+            # Extraire company_id depuis mandate_path (format: bo_clients/{client}/mandates/{company})
+            path_parts = mandate_path.split("/")
+            company_id = path_parts[-1] if len(path_parts) >= 4 else ""
+            client_uuid = path_parts[1] if len(path_parts) >= 2 else ""
+
+            # 2. Créer la notification avec approval_response_mode
+            batch_id = f"approval_batch_{uuid.uuid4().hex[:10]}"
+            notification_path = f"clients/{user_id}/notifications"
+
+            notification_data = {
+                "job_id": item_id,
+                "file_id": drive_file_id,
+                "file_name": file_name,
+                "function_name": "router",
+                "status": "in queue",
+                "read": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "collection_id": company_id,
+                "collection_name": company_id,
+                "batch_id": batch_id,
+                "approval_response_mode": True,  # ← Clé importante pour le jobbeur
+                "approval_status": "approved",
+                "selected_service": selected_service,
+                "selected_fiscal_year": selected_fiscal_year,
+                "instructions": instructions or "",
+                "user_id": user_id,
+                "client_uuid": client_uuid,
+                "mandates_path": mandate_path,
+            }
+
+            # Ajouter la notification
+            notifications_ref = self.db.collection(notification_path)
+            notifications_ref.document(item_id).set(notification_data)
+            logger.info(f"[APPROVAL] Notification created: {notification_path}/{item_id}")
+
+            # 3. Supprimer l'item de approval_pendinglist
+            doc_ref.delete()
+            logger.info(f"[APPROVAL] Item deleted from pendinglist: {pending_path}")
+
+            # 4. Supprimer aussi le contexte d'approbation s'il existe
+            context_path = f"{mandate_path}/approval_context/{item_id}"
+            try:
+                context_ref = self.db.document(context_path)
+                if context_ref.get().exists:
+                    context_ref.delete()
+                    logger.info(f"[APPROVAL] Context deleted: {context_path}")
+            except Exception:
+                pass  # Le contexte peut ne pas exister
+
+            # 5. Publier sur Redis pour mise à jour temps réel (action: remove)
+            self._publish_pending_approval_redis(
+                user_id=user_id,
+                company_id=company_id,
+                item_id=item_id,
+                action="remove"
+            )
+
+            logger.info(f"[APPROVAL] Router approval processed successfully: {item_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[APPROVAL] Error processing router approval: {e}", exc_info=True)
+            return False
+
+    def process_router_rejection(
+        self,
+        mandate_path: str,
+        item_id: str,
+        rejection_reason: str,
+        instructions: str = None,
+        close: bool = False,
+        user_id: str = None
+    ) -> bool:
+        """
+        Traite le rejet d'un item Router.
+
+        Si close=True: Supprime l'item (ferme définitivement)
+        Si close=False: Met à jour le statut en "rejected" (peut être réouvert)
+
+        Args:
+            mandate_path: Chemin du mandat
+            item_id: ID de l'item
+            rejection_reason: Raison du rejet
+            instructions: Instructions additionnelles
+            close: Si True, supprime l'item définitivement
+            user_id: ID de l'utilisateur
+
+        Returns:
+            bool: True si traitement réussi
+        """
+        from datetime import datetime, timezone
+
+        try:
+            pending_path = f"{mandate_path}/approval_pendinglist/{item_id}"
+            logger.info(f"[APPROVAL] Processing router rejection: {pending_path}, close={close}")
+
+            doc_ref = self.db.document(pending_path)
+            doc = doc_ref.get()
+
+            if not doc.exists:
+                logger.error(f"[APPROVAL] Item not found: {pending_path}")
+                return False
+
+            item_data = doc.to_dict()
+
+            # Extraire company_id
+            path_parts = mandate_path.split("/")
+            company_id = path_parts[-1] if len(path_parts) >= 4 else ""
+
+            if close:
+                # Supprimer définitivement
+                doc_ref.delete()
+                logger.info(f"[APPROVAL] Item deleted (closed): {pending_path}")
+
+                # Supprimer aussi le contexte
+                context_path = f"{mandate_path}/approval_context/{item_id}"
+                try:
+                    context_ref = self.db.document(context_path)
+                    if context_ref.get().exists:
+                        context_ref.delete()
+                except Exception:
+                    pass
+
+                # Publier sur Redis (action: remove)
+                self._publish_pending_approval_redis(
+                    user_id=user_id,
+                    company_id=company_id,
+                    item_id=item_id,
+                    action="remove"
+                )
+            else:
+                # Mettre à jour le statut
+                update_data = {
+                    "status": "rejected",
+                    "rejection_reason": rejection_reason,
+                    "instructions": instructions or "",
+                    "rejected_by": user_id,
+                    "rejected_at": datetime.now(timezone.utc).isoformat(),
+                }
+                doc_ref.update(update_data)
+                logger.info(f"[APPROVAL] Item marked as rejected: {pending_path}")
+
+                # Publier sur Redis (action: update)
+                self._publish_pending_approval_redis(
+                    user_id=user_id,
+                    company_id=company_id,
+                    item_id=item_id,
+                    action="update",
+                    data={"status": "rejected", "rejection_reason": rejection_reason}
+                )
+
+            logger.info(f"[APPROVAL] Router rejection processed successfully: {item_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[APPROVAL] Error processing router rejection: {e}", exc_info=True)
+            return False
+
+    def _publish_pending_approval_redis(
+        self,
+        user_id: str,
+        company_id: str,
+        item_id: str,
+        action: str,
+        data: dict = None
+    ):
+        """
+        Publie une mise à jour pending_approval sur Redis.
+
+        Args:
+            user_id: ID utilisateur Firebase
+            company_id: ID de la société
+            item_id: ID de l'item
+            action: "add" | "update" | "remove"
+            data: Données additionnelles (optionnel)
+        """
+        try:
+            import json
+            from .redis_client import get_redis
+
+            redis = get_redis()
+            channel = f"user:{user_id}/pending_approval"
+
+            from datetime import datetime, timezone as tz
+
+            payload = {
+                "type": f"pending_approval_{'deleted' if action == 'remove' else 'updated' if action == 'update' else 'created'}",
+                "action": action,
+                "department": "routing",
+                "job_id": item_id,
+                "company_id": company_id,
+                "data": data or {"id": item_id},
+                "timestamp": datetime.now(tz.utc).isoformat(),
+            }
+
+            redis.publish(channel, json.dumps(payload, default=str))
+            logger.info(f"[REDIS] Published pending_approval to {channel}: action={action}")
+
+        except Exception as e:
+            logger.warning(f"[REDIS] Error publishing pending_approval: {e}")
+
+
 class FirebaseRealtimeChat:
     """
     Gestionnaire Firebase Realtime basé sur un singleton thread-safe.
@@ -9659,6 +10276,51 @@ class FirebaseRealtimeChat:
             message_id = new_message_ref.key
             
             logger.info(f"✅ Message direct envoyé à {recipient_id} - message_id={message_id}")
+            
+            # Publier sur Redis PubSub pour mise à jour temps réel
+            try:
+                import asyncio
+                from app.realtime.pubsub_helper import publish_messenger_new
+                
+                # Transformer message_data en format pour le frontend
+                messenger_data = {
+                    "docId": message_id,
+                    "message": message_data.get('message', ''),
+                    "fileName": message_data.get('file_name', ''),
+                    "collectionId": message_data.get('collection_id', ''),
+                    "collectionName": message_data.get('collection_name', ''),
+                    "status": message_data.get('status', ''),
+                    "jobId": message_data.get('job_id', ''),
+                    "fileId": message_data.get('file_id', ''),
+                    "functionName": message_data.get('function_name', 'Chat'),
+                    "timestamp": message_data.get('timestamp', datetime.now(timezone.utc).isoformat()),
+                    "additionalInfo": message_data.get('additional_info', ''),
+                    "chatMode": message_data.get('chat_mode', ''),
+                    "threadKey": message_data.get('thread_key', ''),
+                    "driveLink": message_data.get('drive_link', ''),
+                    "batchId": message_data.get('batch_id', ''),
+                }
+                
+                # Publier de manière asynchrone
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(
+                            publish_messenger_new(recipient_id, messenger_data)
+                        )
+                    else:
+                        loop.run_until_complete(
+                            publish_messenger_new(recipient_id, messenger_data)
+                        )
+                except RuntimeError:
+                    asyncio.run(
+                        publish_messenger_new(recipient_id, messenger_data)
+                    )
+                
+                logger.info(f"✅ Message published via PubSub Redis for user {recipient_id}")
+            except Exception as pubsub_error:
+                logger.warning(f"⚠️ Failed to publish message via PubSub: {pubsub_error}")
+            
             return message_id
             
         except Exception as e:

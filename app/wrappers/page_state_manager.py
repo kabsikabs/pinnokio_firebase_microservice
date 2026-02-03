@@ -65,8 +65,12 @@ VALID_PAGES = [
     "chat",
     "hr",
     "settings",
+    "company_settings",  # Company settings page
     "onboarding",
     "billing",
+    "routing",
+    "coa",  # Chart of Accounts page
+    "banking",  # Banking/Transactions page
 ]
 
 

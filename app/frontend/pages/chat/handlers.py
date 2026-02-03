@@ -90,14 +90,15 @@ class ChatHandlers:
         Returns:
             {"success": True, "sessions": [...], "total": int}
         """
-        # 1. Check cache
+        # 1. Check cache (use mode in cache key to separate chats vs active_chats)
+        cache_key = f"chat:sessions:{mode}"
         cached = await self._cache_manager.get_cached_data(
             user_id=uid,
             company_id=company_id,
-            data_type="chat:sessions"
+            data_type=cache_key
         )
         if cached:
-            logger.info(f"[CHAT] Cache hit for sessions list")
+            logger.info(f"[CHAT] Cache hit for sessions list (mode={mode})")
             sessions_data = cached.get("data", cached) if isinstance(cached, dict) else cached
             return {"success": True, "sessions": sessions_data, "total": len(sessions_data), "from_cache": True}
 
@@ -136,11 +137,11 @@ class ChatHandlers:
             # 4. Sort by last_activity (newest first)
             sessions.sort(key=lambda x: x.get("last_activity", ""), reverse=True)
 
-            # 5. Cache result
+            # 5. Cache result (use mode in cache key)
             await self._cache_manager.set_cached_data(
                 user_id=uid,
                 company_id=company_id,
-                data_type="chat:sessions",
+                data_type=cache_key,
                 data=sessions,
                 ttl_seconds=TTL_SESSIONS_LIST
             )
@@ -150,6 +151,76 @@ class ChatHandlers:
 
         except Exception as e:
             logger.error(f"[CHAT] Error loading sessions: {e}")
+            return {"success": False, "error": str(e), "sessions": [], "total": 0}
+
+    async def list_all_sessions(
+        self,
+        uid: str,
+        company_id: str,
+        space_code: str,
+    ) -> Dict[str, Any]:
+        """
+        CHAT.sessions_list_all - Fetch chat sessions from both compartments.
+
+        Loads:
+        - mode="chats" for regular user chats (general_chat)
+        - mode="active_chats" for job-created chats (apbookeeper, banker, router)
+
+        Returns:
+            {"success": True, "sessions": [...], "total": int}
+        """
+        try:
+            # 1. Load regular chats (general_chat mode)
+            chats_result = await self.list_sessions(
+                uid=uid,
+                company_id=company_id,
+                space_code=space_code,
+                mode="chats"
+            )
+            chats_sessions = chats_result.get("sessions", [])
+
+            # 2. Load active chats (apbookeeper, banker, router modes)
+            active_result = await self.list_sessions(
+                uid=uid,
+                company_id=company_id,
+                space_code=space_code,
+                mode="active_chats"
+            )
+            active_sessions = active_result.get("sessions", [])
+
+            # 3. Filter active_chats to only include specialized modes
+            # (exclude onboarding_chat and any general_chat that might be there)
+            specialized_modes = {'apbookeeper_chat', 'banker_chat', 'router_chat'}
+            active_sessions = [
+                s for s in active_sessions
+                if s.get("chat_mode") in specialized_modes
+            ]
+
+            # 4. Merge and deduplicate by thread_key (prefer active_chats over chats)
+            # Build a dict keyed by thread_key, active_chats will override chats if duplicate
+            sessions_dict = {s.get("thread_key"): s for s in chats_sessions}
+            for s in active_sessions:
+                sessions_dict[s.get("thread_key")] = s  # Override if exists
+
+            all_sessions = list(sessions_dict.values())
+
+            # 5. Sort by last_activity
+            all_sessions.sort(key=lambda x: x.get("last_activity", ""), reverse=True)
+
+            logger.info(f"[CHAT] Loaded {len(chats_sessions)} from chats, {len(active_sessions)} from active_chats")
+
+            return {
+                "success": True,
+                "sessions": all_sessions,
+                "total": len(all_sessions),
+                "sources": {
+                    "chats": len(chats_sessions),
+                    "active_chats": len(active_sessions),
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"[CHAT] Error loading all sessions: {e}")
             return {"success": False, "error": str(e), "sessions": [], "total": 0}
 
     async def create_session(
@@ -380,16 +451,190 @@ class ChatHandlers:
             logger.error(f"[CHAT] Error auto-naming session: {e}")
             return {"success": False, "error": str(e)}
 
+    async def auto_name_session_llm(
+        self,
+        uid: str,
+        company_id: str,
+        space_code: str,
+        thread_key: str,
+        first_message: str,
+        mode: str = "chats",
+    ) -> Dict[str, Any]:
+        """
+        CHAT.session_auto_name_llm - Auto-generate a name using LLM.
+
+        Uses Claude (Anthropic) to generate a descriptive, concise title
+        based on the first message content. Falls back to heuristic if LLM fails.
+
+        Args:
+            uid: User ID
+            company_id: Company ID
+            space_code: Firebase space code
+            thread_key: Thread key to rename
+            first_message: The first message content to generate name from
+            mode: Firebase mode
+
+        Returns:
+            {"success": True, "new_name": str, "thread_key": str, "method": "llm"|"heuristic"}
+        """
+        try:
+            # Try LLM-based naming first
+            generated_name = await self._generate_chat_name_llm(first_message)
+            method = "llm"
+
+            # Fallback to heuristic if LLM failed
+            if not generated_name:
+                generated_name = self._generate_chat_name(first_message)
+                method = "heuristic"
+
+            # Update the session name
+            result = await self.rename_session(
+                uid=uid,
+                company_id=company_id,
+                space_code=space_code,
+                thread_key=thread_key,
+                new_name=generated_name,
+                mode=mode
+            )
+
+            if result.get("success"):
+                logger.info(f"[CHAT] Auto-named session {thread_key} to '{generated_name}' via {method}")
+                return {
+                    "success": True,
+                    "thread_key": thread_key,
+                    "new_name": generated_name,
+                    "method": method
+                }
+            else:
+                return result
+
+        except Exception as e:
+            logger.error(f"[CHAT] Error in LLM auto-naming: {e}")
+            # Fallback to heuristic on any error
+            try:
+                generated_name = self._generate_chat_name(first_message)
+                result = await self.rename_session(
+                    uid=uid,
+                    company_id=company_id,
+                    space_code=space_code,
+                    thread_key=thread_key,
+                    new_name=generated_name,
+                    mode=mode
+                )
+                if result.get("success"):
+                    return {
+                        "success": True,
+                        "thread_key": thread_key,
+                        "new_name": generated_name,
+                        "method": "heuristic_fallback"
+                    }
+                return result
+            except Exception as fallback_error:
+                logger.error(f"[CHAT] Fallback naming also failed: {fallback_error}")
+                return {"success": False, "error": str(fallback_error)}
+
+    async def _generate_chat_name_llm(self, first_message: str, max_length: int = 50) -> Optional[str]:
+        """
+        Generate a chat name using LLM (Anthropic Claude).
+
+        Uses a tool-based approach to get structured output.
+
+        Args:
+            first_message: The first user message
+            max_length: Maximum name length
+
+        Returns:
+            Generated chat name or None if failed
+        """
+        import asyncio
+
+        if not first_message or not first_message.strip():
+            return None
+
+        try:
+            from app.llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_MOONSHOT_AIAgent
+
+            # Create a lightweight agent instance for naming with Moonshot provider
+            naming_agent = BaseAIAgent()
+            moonshot_instance = NEW_MOONSHOT_AIAgent()
+            naming_agent.register_provider(ModelProvider.MOONSHOT_AI, moonshot_instance, ModelSize.MEDIUM)
+            naming_agent.default_provider = ModelProvider.MOONSHOT_AI
+
+            # Define the tool for structured output
+            chat_title_tool = {
+                "name": "generate_chat_title",
+                "description": "Generates a short, descriptive title for a conversation based on the user's first message",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "Short title (max 50 chars), descriptive, in the same language as the user message. Avoid vague words like 'Question', 'Request'. Be specific and informative."
+                        },
+                    },
+                    "required": ["title"]
+                }
+            }
+
+            # Tool choice to force using the tool
+            tool_choice = {'type': 'tool', 'name': 'generate_chat_title'}
+
+            # Simple tool mapping (returns the title directly)
+            def extract_title(title: str) -> str:
+                return title
+
+            tool_mapping = {
+                "generate_chat_title": extract_title
+            }
+
+            # Run in thread to avoid blocking
+            def generate():
+                try:
+                    response = naming_agent.process_tool_use(
+                        content=f"Generate a title for this conversation based on this first user message: {first_message}",
+                        tools=[chat_title_tool],
+                        tool_mapping=tool_mapping,
+                        tool_choice=tool_choice,
+                        size=ModelSize.SMALL  # Use small model for efficiency
+                    )
+                    return response
+                except Exception as e:
+                    logger.warning(f"[CHAT] LLM title generation failed: {e}")
+                    return None
+
+            title = await asyncio.to_thread(generate)
+
+            # Validate and clean the title
+            if title and isinstance(title, str):
+                title = title.replace('"', '').replace("'", "").strip()
+
+                # Limit length
+                if len(title) > max_length:
+                    title = title[:max_length - 3] + "..."
+
+                # Check for empty or generic titles
+                if not title or title.lower() in ['nouveau chat', 'new chat', 'chat', 'untitled']:
+                    return None
+
+                return title
+
+            return None
+
+        except ImportError as e:
+            logger.warning(f"[CHAT] Could not import LLM agent: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"[CHAT] LLM naming error: {e}")
+            return None
+
     def _generate_chat_name(self, first_message: str, max_length: int = 50) -> str:
         """
-        Generate a chat name from the first message.
+        Generate a chat name from the first message (heuristic fallback).
 
         Uses a heuristic approach:
         1. Clean and truncate the message
         2. Remove common prefixes (Bonjour, Hello, etc.)
         3. Capitalize first letter
-
-        Can be enhanced later with LLM-based naming.
 
         Args:
             first_message: The first user message
@@ -472,48 +717,80 @@ class ChatHandlers:
         Returns:
             {"success": True, "messages": [...], "total": int}
         """
-        # 1. Check cache
-        cached = await self._cache_manager.get_cached_data(
-            user_id=uid,
-            company_id=company_id,
-            data_type="chat:history",
-            sub_type=thread_key
-        )
-        if cached:
-            logger.info(f"[CHAT] Cache hit for history: {thread_key}")
-            messages_data = cached.get("data", cached) if isinstance(cached, dict) else cached
-            return {"success": True, "messages": messages_data, "total": len(messages_data), "from_cache": True}
-
-        # 2. Fetch from Firebase Realtime
         try:
-            from app.firebase_providers import get_firebase_realtime
-
-            realtime_service = get_firebase_realtime()
-            messages = realtime_service.get_thread_messages(
-                space_code=space_code,
-                thread_key=thread_key,
-                mode=mode,
-                limit=limit
-            )
-
-            if messages is None:
-                messages = []
-
-            # 3. Transform messages to standard format
-            formatted_messages = self._transform_messages(messages)
-
-            # 4. Cache result
-            await self._cache_manager.set_cached_data(
+            # 1. Check cache for RAW messages (keyed by thread_key only - unique across compartments)
+            cached = await self._cache_manager.get_cached_data(
                 user_id=uid,
                 company_id=company_id,
-                data_type="chat:history",
-                sub_type=thread_key,
-                data=formatted_messages,
-                ttl_seconds=TTL_HISTORY
+                data_type="chat:history:raw",
+                sub_type=thread_key
             )
 
-            logger.info(f"[CHAT] Loaded {len(formatted_messages)} messages for {thread_key}")
-            return {"success": True, "messages": formatted_messages, "total": len(formatted_messages)}
+            raw_messages = None
+            from_cache = False
+            actual_mode = mode  # Track which mode actually has the data
+
+            if cached:
+                logger.info(f"[CHAT] Cache hit for history: {thread_key}")
+                raw_messages = cached.get("data", cached) if isinstance(cached, dict) else cached
+                from_cache = True
+
+            # 2. Fetch from Firebase Realtime if not cached
+            if raw_messages is None:
+                from app.firebase_providers import get_firebase_realtime
+
+                realtime_service = get_firebase_realtime()
+                raw_messages = realtime_service.get_thread_messages(
+                    space_code=space_code,
+                    thread_key=thread_key,
+                    mode=mode,
+                    limit=limit
+                )
+
+                # Fallback: if no messages found in requested mode, try the other compartment
+                # This handles cases where frontend sends wrong mode (e.g., page refresh without state)
+                if not raw_messages:
+                    alternate_mode = "active_chats" if mode == "chats" else "chats"
+                    logger.info(f"[CHAT] No messages in '{mode}', trying '{alternate_mode}' for {thread_key}")
+                    raw_messages = realtime_service.get_thread_messages(
+                        space_code=space_code,
+                        thread_key=thread_key,
+                        mode=alternate_mode,
+                        limit=limit
+                    )
+                    if raw_messages:
+                        actual_mode = alternate_mode
+                        logger.info(f"[CHAT] Found {len(raw_messages)} messages in '{alternate_mode}' (fallback)")
+
+                if raw_messages is None:
+                    raw_messages = []
+
+                # Only cache if we found messages (avoid caching empty results from wrong mode)
+                if raw_messages:
+                    await self._cache_manager.set_cached_data(
+                        user_id=uid,
+                        company_id=company_id,
+                        data_type="chat:history:raw",
+                        sub_type=thread_key,
+                        data=raw_messages,
+                        ttl_seconds=TTL_HISTORY
+                    )
+
+            # 3. Transform messages to standard format (always, even from cache)
+            formatted_messages = self._transform_messages(raw_messages)
+
+            # 4. Extract pending card (always recalculate to ensure freshness)
+            # Pass thread_key so the card knows which chat it belongs to
+            pending_card = self._extract_pending_card(raw_messages, thread_key)
+
+            logger.info(f"[CHAT] Loaded {len(formatted_messages)} messages for {thread_key}, pending_card={pending_card is not None}, from_cache={from_cache}")
+            return {
+                "success": True,
+                "messages": formatted_messages,
+                "total": len(formatted_messages),
+                "pending_card": pending_card,
+                "from_cache": from_cache,
+            }
 
         except Exception as e:
             logger.error(f"[CHAT] Error loading history: {e}")
@@ -696,6 +973,146 @@ class ChatHandlers:
         return ""
 
     # ──────────────────────────────────────────
+    # PENDING CARD DETECTION
+    # ──────────────────────────────────────────
+
+    def _extract_pending_card(self, raw_messages: List[Dict], thread_key: str) -> Optional[Dict[str, Any]]:
+        """
+        Extract the last pending interactive card from message history.
+
+        SIMPLIFIED RULE: A card is pending if its status == "pending_approval"
+
+        The backend sets:
+        - status: "pending_approval" when card is created
+        - status: "responded" when user clicks approve/reject
+        - status: "expired" when card times out
+
+        Supported card types:
+        - text_modification_approval
+        - task_creation_approval
+        - approval_card
+        - four_eyes_approval_card
+
+        Args:
+            raw_messages: Raw messages from Firebase (before transformation)
+            thread_key: The chat thread key (required for card responses)
+
+        Returns:
+            Card data dict if a pending card is found, None otherwise
+        """
+        import json
+
+        SUPPORTED_CARD_TYPES = {
+            'text_modification_approval',
+            'task_creation_approval',
+            'approval_card',
+            'four_eyes_approval_card',
+        }
+
+        last_pending_card: Optional[Dict[str, Any]] = None
+
+        logger.debug(f"[CHAT] Scanning {len(raw_messages)} messages for pending cards")
+
+        for msg in raw_messages:
+            # Check if this is a card message
+            message_type = msg.get("message_type", "")
+            msg_type = msg.get("type", "")
+            card_type_field = msg.get("card_type", "")
+
+            is_card_message = (
+                message_type == "CARD" or
+                msg_type == "CARD" or
+                bool(card_type_field)  # Has card_type field
+            )
+
+            if not is_card_message:
+                continue
+
+            # SIMPLIFIED RULE: Check status field
+            card_status = msg.get("status", "")
+
+            # Only process cards with pending_approval status
+            if card_status != "pending_approval":
+                logger.debug(f"[CHAT] Skipping card with status={card_status}")
+                continue
+
+            try:
+                content_raw = msg.get("content", "{}")
+                if isinstance(content_raw, str):
+                    content = json.loads(content_raw)
+                else:
+                    content = content_raw
+
+                card_id = None
+                card_type = None
+                card_params = {}
+
+                # Format 1: Standard format with cardsV2
+                if "cardsV2" in content:
+                    cards_v2 = content.get("cardsV2", [])
+                    if cards_v2 and len(cards_v2) > 0:
+                        card_id = cards_v2[0].get("cardId")
+                    card_params = content.get("message", {}).get("cardParams", {})
+                    card_type = content.get("message", {}).get("cardType", card_id)
+
+                # Format 2: cardParams in message
+                elif "message" in content:
+                    card_params = content.get("message", {}).get("cardParams", {})
+                    card_id = card_params.get("cardId")
+                    card_type = content.get("message", {}).get("cardType", card_id)
+
+                # Format 3: Alternative format with card_type at message level
+                if not card_type and card_type_field:
+                    card_type = card_type_field
+                    card_id = card_type
+                    if isinstance(content, dict):
+                        if "cardParams" in content:
+                            card_params = content.get("cardParams", {})
+                        elif "message" in content and "cardParams" in content.get("message", {}):
+                            card_params = content.get("message", {}).get("cardParams", {})
+                        elif "title" in content or "original_text" in content:
+                            card_params = content
+
+                # Check if it's a supported card type
+                if card_type in SUPPORTED_CARD_TYPES or card_id in SUPPORTED_CARD_TYPES:
+                    # Extract message_id from the Firebase message
+                    message_id = msg.get("id") or msg.get("message_id") or msg.get("name")
+
+                    logger.info(f"[CHAT] Found pending card: id={card_id}, type={card_type}, status={card_status}, message_id={message_id}")
+
+                    last_pending_card = {
+                        "cardId": card_id,
+                        "cardType": card_type or card_id,
+                        "title": card_params.get("title", ""),
+                        "subtitle": card_params.get("subtitle"),
+                        "text": card_params.get("text"),
+                        "params": card_params,
+                        "isVisible": True,
+                        # Thread key for card response (required - identifies the chat)
+                        "threadKey": thread_key,
+                        # Message ID for card response (required by send_card_response)
+                        "messageId": message_id,
+                        # Specific fields for text_modification_approval
+                        "originalText": card_params.get("original_text"),
+                        "finalText": card_params.get("final_text"),
+                        "operationsSummary": card_params.get("operations_summary"),
+                        "contextName": card_params.get("context_name"),
+                        # Specific fields for task_creation_approval
+                        "taskId": card_params.get("task_id"),
+                        "executionPlan": card_params.get("execution_plan"),
+                        "missionTitle": card_params.get("mission_title"),
+                        "missionDescription": card_params.get("mission_description"),
+                    }
+
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"[CHAT] Error parsing CARD message: {e}")
+
+        if last_pending_card:
+            logger.info(f"[CHAT] Pending card detected: {last_pending_card.get('cardId')}")
+
+        return last_pending_card
+
+    # ──────────────────────────────────────────
     # TASK MANAGEMENT (Chat-specific tasks)
     # ──────────────────────────────────────────
 
@@ -844,6 +1261,65 @@ class ChatHandlers:
 
         except Exception as e:
             logger.error(f"[CHAT] Error toggling task: {e}")
+            return {"success": False, "error": str(e)}
+
+
+    # ──────────────────────────────────────────
+    # ONBOARDING CHAT
+    # ──────────────────────────────────────────
+
+    async def start_onboarding_chat(
+        self,
+        uid: str,
+        company_id: str,
+        thread_key: str,
+    ) -> Dict[str, Any]:
+        """
+        CHAT.start_onboarding - Start onboarding chat session.
+
+        Triggered after company creation when user lands on /chat/{thread_key}?action=create.
+        Creates the brain, loads onboarding data, and launches the LPT job.
+
+        Args:
+            uid: User ID
+            company_id: Company ID (contact_space_id)
+            thread_key: Thread key (job_id from onboarding)
+
+        Returns:
+            {"success": True, "thread_key": str, "message": str}
+        """
+        try:
+            from app.llm_service import get_llm_manager
+
+            logger.info(f"[CHAT] start_onboarding_chat - uid={uid} company={company_id} thread={thread_key}")
+
+            llm_manager = get_llm_manager()
+            result = await llm_manager.start_onboarding_chat(
+                user_id=uid,
+                collection_name=company_id,
+                thread_key=thread_key,
+                chat_mode="onboarding_chat"
+            )
+
+            if result.get("success"):
+                logger.info(f"[CHAT] Onboarding chat started successfully for thread={thread_key}")
+                return {
+                    "success": True,
+                    "thread_key": thread_key,
+                    "message": "Onboarding chat started",
+                    "job_id": result.get("job_id"),
+                    "lpt_status": result.get("lpt_status"),
+                }
+            else:
+                logger.error(f"[CHAT] Failed to start onboarding chat: {result.get('error')}")
+                return {
+                    "success": False,
+                    "error": result.get("error", "Failed to start onboarding chat"),
+                    "details": result,
+                }
+
+        except Exception as e:
+            logger.error(f"[CHAT] Error starting onboarding chat: {e}")
             return {"success": False, "error": str(e)}
 
 

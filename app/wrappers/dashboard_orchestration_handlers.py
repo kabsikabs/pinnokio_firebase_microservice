@@ -24,22 +24,33 @@ Dependencies (Existing Services - DO NOT MODIFY):
     - llm_service/session_state_manager: LLM session state management
 
 Flow (mirrors AuthState.process_post_authentication):
-    Phase 0: User Setup
+    Phase 0: User Setup (Level 1)
         - check_and_create_client_document()
         - Check first_connect -> process_immediate_top_up(50)
         - process_share_settings()
-    Phase 1: Company Selection
+    Phase 1: Company Selection (Level 2)
         - fetch_all_mandates_light()
         - Auto-select first company
         - fetch_single_mandate() for details
-    Phase 2: Data Loading
-        - Load all dashboard widgets in parallel
-    Phase 3: LLM Session
+        - Cache Level 1 + Level 2
+    Phase LLM: LLM Session (Level 2 - Part of Company Context)
         - Initialize LLM with mandate_path and client_uuid
+        - LLM is company-scoped, not page-scoped
+        - Moved BEFORE data phase for chat availability
+    Phase 2: Data Loading (Level 3 - Dashboard specific)
+        - Load all dashboard widgets in parallel
+
+Reusable Function:
+    run_company_orchestration() - Can be called by onboarding or dashboard
+        - Builds company_data from full_mandate
+        - Broadcasts company.list + company.details
+        - Caches Level 1 + Level 2
+        - Initializes LLM session
+        - Broadcasts llm.session_ready
 
 Author: Lead Migration Architect
 Created: 2026-01-18
-Updated: 2026-01-18 - Added full process_post_authentication flow
+Updated: 2026-02-02 - Moved LLM to Level 2, added run_company_orchestration()
 """
 
 import asyncio
@@ -60,6 +71,7 @@ from ..llm_service.redis_namespaces import (
     RedisTTL
 )
 from ..redis_client import get_redis
+from ..tools.neon_hr_manager import get_neon_hr_manager
 from ..ws_events import WS_EVENTS
 from ..ws_hub import hub
 
@@ -659,18 +671,39 @@ async def _run_orchestration(
             # Update state with selected_company_id
             state_manager.update_orchestration(uid, session_id, {
                 "selected_company_id": company_id,
-                "phase": "data"
+                "phase": "llm"
             })
 
         # ========================================
-        # PHASE 2: DATA LOADING (Background)
+        # PHASE LLM: LLM SESSION (Part of Level 2 - Company Context)
+        # Moved BEFORE data phase because LLM is company-scoped, not page-scoped.
+        # This ensures chat works immediately after company selection.
         # ========================================
-        await _notify_phase_start(uid, "data")
+        await _notify_phase_start(uid, "llm")
 
-        # Get mandate_path from company_data for billing widget
+        # Get mandate_path from company_data for LLM
         mandate_path = ""
         if company_data:
             mandate_path = company_data.get("mandate_path", "")
+
+        await _run_llm_phase(
+            uid,
+            company_id,
+            mandate_path=mandate_path,
+            client_uuid=company_data.get("client_uuid", "") if company_data else ""
+        )
+
+        if state_manager.is_cancelled(uid, session_id, orchestration_id):
+            logger.info(f"[ORCHESTRATION] Cancelled during llm phase")
+            return
+
+        state_manager.update_orchestration(uid, session_id, {"phase": "data"})
+        await _notify_phase_complete(uid, "llm", success=True)
+
+        # ========================================
+        # PHASE 2: DATA LOADING (Level 3 - Dashboard specific)
+        # ========================================
+        await _notify_phase_start(uid, "data")
 
         await _run_data_phase(
             uid, session_id, orchestration_id, company_id,
@@ -682,26 +715,33 @@ async def _run_orchestration(
             logger.info(f"[ORCHESTRATION] Cancelled during data phase")
             return
 
-        state_manager.update_orchestration(uid, session_id, {"phase": "llm"})
+        state_manager.update_orchestration(uid, session_id, {"phase": "completed"})
         await _notify_phase_complete(uid, "data", success=True)
 
         # ========================================
-        # PHASE 3: LLM SESSION (Background)
+        # PHASE 4: REALTIME SUBSCRIPTIONS (Non-blocking)
+        # Load notifications and messenger messages
         # ========================================
-        await _notify_phase_start(uid, "llm")
+        try:
+            from ..realtime import get_subscription_manager
 
-        # Get company metadata for LLM from Niveau 2 cache
-        company_data = get_company_context(uid, company_id) or {}
+            manager = get_subscription_manager()
+            result = await manager.start_user_subscriptions(uid)
 
-        await _run_llm_phase(
-            uid,
-            company_id,
-            mandate_path=company_data.get("mandate_path", ""),
-            client_uuid=company_data.get("client_uuid", "")
-        )
-
-        state_manager.update_orchestration(uid, session_id, {"phase": "completed"})
-        await _notify_phase_complete(uid, "llm", success=True)
+            if result.get("success"):
+                logger.info(
+                    f"[ORCHESTRATION] Realtime subscriptions started: "
+                    f"notifications={result.get('notification_count', 0)} "
+                    f"messages={result.get('message_count', 0)}"
+                )
+            else:
+                logger.warning(
+                    f"[ORCHESTRATION] Realtime subscriptions warning: "
+                    f"uid={uid} error={result.get('error')}"
+                )
+        except Exception as e:
+            # Non-blocking - notifications are supplementary
+            logger.error(f"[ORCHESTRATION] Realtime phase error (non-blocking): {e}")
 
         logger.info(
             f"[ORCHESTRATION] Completed successfully: uid={uid} "
@@ -997,6 +1037,38 @@ def _build_workflow_params(selected_mandate: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ============================================
+# NEON HR SYNC HELPER
+# ============================================
+
+async def _sync_neon_hr_company(
+    uid: str,
+    mandate_path: str,
+    company_name: str,
+    country: str,
+) -> Optional[str]:
+    """
+    Sync company to PostgreSQL Neon (non-blocking).
+    Returns hr_company_id (UUID string) or None on failure.
+    """
+    if not mandate_path:
+        return None
+
+    try:
+        manager = get_neon_hr_manager()
+        hr_company_id = await manager.get_or_create_company(
+            account_firebase_uid=uid,
+            mandate_path=mandate_path,
+            company_name=company_name,
+            country=country,
+        )
+        logger.info(f"[ORCHESTRATION] Neon HR sync: hr_company_id={hr_company_id}")
+        return str(hr_company_id) if hr_company_id else None
+    except Exception as e:
+        logger.warning(f"[ORCHESTRATION] Neon HR sync failed (non-blocking): {e}")
+        return None
+
+
+# ============================================
 # PHASE 1: COMPANY SELECTION
 # ============================================
 
@@ -1256,6 +1328,19 @@ async def _run_company_phase(
         })
 
         # ─────────────────────────────────────────────────
+        # Step 5.5: Sync company to PostgreSQL Neon (non-blocking)
+        # Creates or retrieves hr_company_id for HR module
+        # ─────────────────────────────────────────────────
+        hr_company_id = await _sync_neon_hr_company(
+            uid=uid,
+            mandate_path=company_data.get("mandate_path", ""),
+            company_name=company_data.get("legal_name", "") or company_data.get("name", ""),
+            country=company_data.get("country", ""),
+        )
+        if hr_company_id:
+            company_data["hr_company_id"] = hr_company_id
+
+        # ─────────────────────────────────────────────────
         # Step 6: Cache company selection (Niveau 1 + Niveau 2)
         # Store selected_company_id (Niveau 1) and full context (Niveau 2)
         # ─────────────────────────────────────────────────
@@ -1266,6 +1351,264 @@ async def _run_company_phase(
     except Exception as e:
         logger.error(f"[ORCHESTRATION] Company phase error: {e}", exc_info=True)
         return None, None
+
+
+# ============================================
+# REUSABLE COMPANY ORCHESTRATION (Level 1 + Level 2 + LLM)
+# ============================================
+
+async def run_company_orchestration(
+    uid: str,
+    company_id: str,
+    full_mandate: Dict[str, Any],
+    companies_list: Optional[List[Dict[str, Any]]] = None,
+    broadcast_list: bool = True,
+) -> Dict[str, Any]:
+    """
+    Orchestration complète du contexte company (Level 1 + Level 2 + LLM).
+
+    Cette fonction est réutilisable par:
+    - Dashboard post-auth (après _run_company_phase qui fetch les mandats)
+    - Onboarding (après création du mandat dans company_setup)
+
+    Actions effectuées:
+    1. Build company_data complet depuis full_mandate
+    2. Broadcast company.list (optionnel, si companies_list fournie)
+    3. Broadcast company.details
+    4. Sync Neon HR (non-blocking)
+    5. Cache Level 1 + Level 2 via set_selected_company()
+    6. Initialize LLM session
+    7. Broadcast llm.session_ready
+
+    Args:
+        uid: Firebase user ID
+        company_id: ID de la société sélectionnée (contact_space_id)
+        full_mandate: Données complètes du mandat (de fetch_single_mandate ou création)
+        companies_list: Liste des sociétés pour broadcast (optionnel)
+        broadcast_list: Si True, broadcast company.list (default True)
+
+    Returns:
+        Dict avec:
+        - success: bool
+        - company_id: str
+        - company_data: Dict complet
+        - error: str (si échec)
+    """
+    try:
+        logger.info(
+            f"[COMPANY_ORCHESTRATION] Starting for uid={uid} company={company_id}"
+        )
+
+        # ─────────────────────────────────────────────────
+        # Step 1: Build company_data complet depuis full_mandate
+        # ─────────────────────────────────────────────────
+        parent_details = full_mandate.get("parent_details", {}) or {}
+
+        company_data = {
+            "id": full_mandate.get("id", ""),
+            "contact_space_id": company_id,
+            "name": full_mandate.get("legal_name", "") or full_mandate.get("name", ""),
+            "legal_name": full_mandate.get("legal_name", ""),
+            "contact_space_name": full_mandate.get("contact_space_name", ""),
+            "mandate_path": full_mandate.get("mandate_path", ""),
+            "client_uuid": (
+                full_mandate.get("client_uuid") or
+                parent_details.get("client_uuid", "")
+            ),
+            "bank_erp": full_mandate.get("bank_erp", ""),
+            "gl_accounting_erp": full_mandate.get("gl_accounting_erp", ""),
+            "ap_erp": full_mandate.get("ap_erp", ""),
+            "ar_erp": full_mandate.get("ar_erp", ""),
+            "dms_type": full_mandate.get("dms_type", ""),
+            "base_currency": full_mandate.get("base_currency", "EUR"),
+            # Drive IDs
+            "input_drive_doc_id": full_mandate.get("input_drive_doc_id", ""),
+            "drive_client_parent_id": (
+                full_mandate.get("drive_client_parent_id") or
+                parent_details.get("drive_client_parent_id", "")
+            ),
+            "parent_doc_id": (
+                full_mandate.get("parent_doc_id") or
+                parent_details.get("parent_doc_id", "")
+            ),
+            "parent_details": parent_details,
+            # Company Info Fields
+            "address": (
+                full_mandate.get("address") or
+                full_mandate.get("client_address") or
+                parent_details.get("client_address", "")
+            ),
+            "phone_number": (
+                full_mandate.get("phone_number") or
+                full_mandate.get("client_phone") or
+                parent_details.get("client_phone", "")
+            ),
+            "email": (
+                full_mandate.get("email") or
+                full_mandate.get("client_mail") or
+                parent_details.get("client_mail", "")
+            ),
+            "country": full_mandate.get("country", ""),
+            "language": full_mandate.get("language", ""),
+            "legal_status": full_mandate.get("legal_status", ""),
+            "has_vat": full_mandate.get("has_vat", False),
+            "website": full_mandate.get("website", ""),
+            "vat_number": full_mandate.get("vat_number", ""),
+            # Legacy fields
+            "client_mail": (
+                full_mandate.get("email") or
+                full_mandate.get("client_mail") or
+                parent_details.get("client_mail", "")
+            ),
+            "client_name": (
+                full_mandate.get("client_name") or
+                parent_details.get("client_name", "")
+            ),
+            "client_address": (
+                full_mandate.get("address") or
+                full_mandate.get("client_address") or
+                parent_details.get("client_address", "")
+            ),
+            "client_phone": (
+                full_mandate.get("phone_number") or
+                full_mandate.get("client_phone") or
+                parent_details.get("client_phone", "")
+            ),
+            # Workflow Params
+            "workflow_params": _build_workflow_params(full_mandate),
+            # Communication Settings
+            "communication_settings": {
+                "dms_type": full_mandate.get("dms_type", "odoo"),
+                "chat_type": full_mandate.get("chat_type", "rag"),
+                "communication_log_type": full_mandate.get("communication_log_type", "rag"),
+            },
+            # Flat workflow params for compatibility
+            "apbookeeper_approval_required": full_mandate.get("apbookeeper_approval_required", False),
+            "router_approval_required": full_mandate.get("router_approval_required", False),
+            "banker_approval_required": full_mandate.get("banker_approval_required", False),
+            "chat_type": full_mandate.get("chat_type", "rag"),
+            "communication_log_type": full_mandate.get("communication_log_type", "rag"),
+            "router_automated_workflow": full_mandate.get("router_automated_workflow", True),
+            # Context Details
+            "context_details": full_mandate.get("context_details", {
+                "general_context": "",
+                "accounting_context": "",
+                "bank_context": "",
+                "invoices_context": "",
+                "expenses_context": "",
+                "banks_cash_context": "",
+                "hr_context": "",
+                "taxes_context": "",
+                "letters_context": "",
+                "contrats_context": "",
+                "financial_statement_context": "",
+            }),
+        }
+
+        logger.info(
+            f"[COMPANY_ORCHESTRATION] company_data built: "
+            f"mandate_path={company_data.get('mandate_path', 'NONE')[:50]}"
+        )
+
+        # ─────────────────────────────────────────────────
+        # Step 2: Broadcast company.list (optionnel)
+        # ─────────────────────────────────────────────────
+        if broadcast_list:
+            if companies_list:
+                # Use provided list
+                await hub.broadcast(uid, {
+                    "type": WS_EVENTS.COMPANY.LIST,
+                    "payload": {
+                        "companies": companies_list,
+                        "total": len(companies_list)
+                    }
+                })
+            else:
+                # Build minimal list from current company
+                company_list_item = {
+                    "id": company_data.get("id", ""),
+                    "contact_space_id": company_id,
+                    "name": company_data.get("name", ""),
+                    "legal_name": company_data.get("legal_name", ""),
+                    "contact_space_name": company_data.get("contact_space_name", ""),
+                    "is_active": True,
+                    "mandate_path": company_data.get("mandate_path", ""),
+                    "client_uuid": company_data.get("client_uuid", ""),
+                    "parent_doc_id": company_data.get("parent_doc_id", ""),
+                }
+                await hub.broadcast(uid, {
+                    "type": WS_EVENTS.COMPANY.LIST,
+                    "payload": {
+                        "companies": [company_list_item],
+                        "total": 1
+                    }
+                })
+            logger.info(f"[COMPANY_ORCHESTRATION] company.list broadcasted")
+
+        # ─────────────────────────────────────────────────
+        # Step 3: Broadcast company.details
+        # ─────────────────────────────────────────────────
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY.DETAILS,
+            "payload": company_data
+        })
+        logger.info(f"[COMPANY_ORCHESTRATION] company.details broadcasted")
+
+        # ─────────────────────────────────────────────────
+        # Step 4: Sync Neon HR (non-blocking)
+        # ─────────────────────────────────────────────────
+        hr_company_id = await _sync_neon_hr_company(
+            uid=uid,
+            mandate_path=company_data.get("mandate_path", ""),
+            company_name=company_data.get("legal_name", "") or company_data.get("name", ""),
+            country=company_data.get("country", ""),
+        )
+        if hr_company_id:
+            company_data["hr_company_id"] = hr_company_id
+
+        # ─────────────────────────────────────────────────
+        # Step 5: Cache Level 1 + Level 2
+        # ─────────────────────────────────────────────────
+        set_selected_company(uid, company_id, company_data)
+        logger.info(f"[COMPANY_ORCHESTRATION] Cache L1+L2 set")
+
+        # ─────────────────────────────────────────────────
+        # Step 6: Initialize LLM session (NIVEAU 2)
+        # Le LLM est scopé à la company, pas à la page
+        # ─────────────────────────────────────────────────
+        await _run_llm_phase(
+            uid=uid,
+            company_id=company_id,
+            mandate_path=company_data.get("mandate_path", ""),
+            client_uuid=company_data.get("client_uuid", "")
+        )
+        logger.info(f"[COMPANY_ORCHESTRATION] LLM session initialized")
+
+        # ─────────────────────────────────────────────────
+        # Step 7: llm.session_ready déjà broadcast par _run_llm_phase
+        # ─────────────────────────────────────────────────
+
+        logger.info(
+            f"[COMPANY_ORCHESTRATION] Completed successfully: "
+            f"uid={uid} company={company_id}"
+        )
+
+        return {
+            "success": True,
+            "company_id": company_id,
+            "company_data": company_data
+        }
+
+    except Exception as e:
+        logger.error(
+            f"[COMPANY_ORCHESTRATION] Failed: uid={uid} error={e}",
+            exc_info=True
+        )
+        return {
+            "success": False,
+            "company_id": company_id,
+            "error": str(e)
+        }
 
 
 # ============================================
@@ -1472,7 +1815,18 @@ async def _populate_widget_caches(
     else:
         logger.warning(f"[ORCHESTRATION] No mandate_path for AP cache")
 
-    # 3. Bank transactions (requires ERP connection)
+    # 3. Tasks from Firebase (requires mandate_path)
+    if mandate_path:
+        tasks.append(
+            _safe_cache_fetch(
+                "Tasks",
+                firebase_handlers.get_tasks(uid, company_id, mandate_path=mandate_path)
+            )
+        )
+    else:
+        logger.warning(f"[ORCHESTRATION] No mandate_path for Tasks cache")
+
+    # 4. Bank transactions (requires ERP connection)
     # Bank transactions come from ERP (Odoo), NOT from Firebase
     client_uuid = company_data.get("client_uuid", "")
     bank_erp = company_data.get("bank_erp", "")
@@ -1494,7 +1848,7 @@ async def _populate_widget_caches(
             f"client_uuid={bool(client_uuid)} bank_erp={bank_erp}"
         )
 
-    # 4. COA (accounts + functions) - Cache Niveau 2
+    # 5. COA (accounts + functions) - Cache Niveau 2
     # Le COA est traité comme donnée critique de niveau entreprise
     # Il est pré-chargé pour que la page COA s'affiche immédiatement
     if mandate_path:
@@ -1748,6 +2102,41 @@ async def _run_data_phase(
             "type": WS_EVENTS.DASHBOARD.FULL_DATA,
             "payload": result
         })
+
+        # ════════════════════════════════════════════════════════════
+        # STEP 3.5: Load and broadcast approvals separately
+        # Uses approval_handlers.get_pending_approvals() as single source of truth
+        # Source: {mandate_path}/approval_pendinglist (NOT clients/{uid}/approvals)
+        # This populates approvalsData in frontend store (not data.approvals)
+        # ════════════════════════════════════════════════════════════
+        if mandate_path:
+            try:
+                from .approval_handlers import get_approval_handlers
+                approval_handlers = get_approval_handlers()
+
+                approvals_result = await approval_handlers.get_pending_approvals(
+                    user_id=uid,
+                    company_id=company_id,
+                    mandate_path=mandate_path
+                )
+
+                if approvals_result.get("success"):
+                    await hub.broadcast(uid, {
+                        "type": WS_EVENTS.DASHBOARD.APPROVALS_UPDATE,
+                        "payload": approvals_result
+                    })
+                    approvals_data = approvals_result.get("data", {})
+                    logger.info(
+                        f"[ORCHESTRATION] Approvals broadcasted: "
+                        f"router={approvals_data.get('router', {}).get('count', 0)} "
+                        f"banker={approvals_data.get('banker', {}).get('count', 0)} "
+                        f"ap={approvals_data.get('apbookeeper', {}).get('count', 0)}"
+                    )
+                else:
+                    logger.warning(f"[ORCHESTRATION] Failed to load approvals: {approvals_result.get('error')}")
+            except Exception as approvals_err:
+                # Non-blocking - approvals are supplementary
+                logger.warning(f"[ORCHESTRATION] Approvals load error (non-blocking): {approvals_err}")
 
         # ════════════════════════════════════════════════════════════
         # STEP 4: Save page_state for fast recovery on page refresh
@@ -2149,4 +2538,13 @@ __all__ = [
     "OrchestrationStateManager",
     # Helper functions (reusable)
     "transform_company_data_to_info",
+    # Company selection helpers (Level 1 + Level 2 cache)
+    "set_selected_company",
+    "get_selected_company_id",
+    "get_company_context",
+    # Reusable company orchestration (Level 1 + Level 2 + LLM)
+    "run_company_orchestration",
+    # Orchestration phase functions (kept for backwards compatibility)
+    "_build_workflow_params",
+    "_run_llm_phase",
 ]

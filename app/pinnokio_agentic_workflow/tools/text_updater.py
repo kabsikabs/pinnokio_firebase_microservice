@@ -14,6 +14,357 @@ class TextUpdaterAgent:
         self.firebase_user_id = firebase_user_id
         self.dms_system = dms_system
         self.space_manager = space_manager
+    
+    def _parse_text_into_sections(self, text: str, max_sections: int = 20) -> List[str]:
+        """
+        Parse le texte en sections (paragraphes) pour faciliter la référence.
+        
+        Args:
+            text: Texte à parser
+            max_sections: Nombre maximum de sections à retourner
+        
+        Returns:
+            Liste des sections (paragraphes)
+        """
+        if not text:
+            return []
+        
+        # Séparer par double saut de ligne (paragraphes)
+        sections = re.split(r'\n\s*\n', text.strip())
+        
+        # Si pas de paragraphes, séparer par saut de ligne simple
+        if len(sections) == 1:
+            sections = text.split('\n')
+        
+        # Filtrer les sections vides et limiter
+        sections = [s.strip() for s in sections if s.strip()][:max_sections]
+        
+        return sections
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 🆕 NOUVELLE APPROCHE : Modification par ancres (anchor_before / anchor_after)
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    def _find_target_by_anchors(self, text: str, anchor_before: str = None, anchor_after: str = None) -> Dict:
+        """
+        Trouve la position exacte de la zone cible en utilisant les ancres.
+        
+        Les ancres fonctionnent comme des coordonnées :
+        - anchor_before : texte qui PRÉCÈDE la zone cible (la zone commence APRÈS)
+        - anchor_after : texte qui SUIT la zone cible (la zone finit AVANT)
+        
+        Args:
+            text: Texte complet
+            anchor_before: Texte avant la zone cible (None = début du texte)
+            anchor_after: Texte après la zone cible (None = fin du texte)
+        
+        Returns:
+            Dict avec start, end, target_text ou error
+        """
+        start_pos = 0
+        end_pos = len(text)
+        
+        # Trouver la position après anchor_before
+        if anchor_before:
+            pos = text.find(anchor_before)
+            if pos == -1:
+                # Essayer recherche insensible à la casse
+                pos = text.lower().find(anchor_before.lower())
+                if pos != -1:
+                    # Utiliser la position trouvée
+                    anchor_before = text[pos:pos + len(anchor_before)]
+                else:
+                    return {
+                        "success": False,
+                        "error": f"anchor_before '{anchor_before[:30]}...' non trouvé dans le texte",
+                        "hint": "Vérifiez que les 12+ caractères correspondent exactement au texte"
+                    }
+            start_pos = pos + len(anchor_before)
+        
+        # Trouver la position de anchor_after (chercher après start_pos)
+        if anchor_after:
+            pos = text.find(anchor_after, start_pos)
+            if pos == -1:
+                # Essayer recherche insensible à la casse
+                pos = text.lower().find(anchor_after.lower(), start_pos)
+                if pos != -1:
+                    anchor_after = text[pos:pos + len(anchor_after)]
+                else:
+                    return {
+                        "success": False,
+                        "error": f"anchor_after '{anchor_after[:30]}...' non trouvé après anchor_before",
+                        "hint": "Vérifiez que anchor_after existe APRÈS anchor_before dans le texte"
+                    }
+            end_pos = pos
+        
+        # Extraire le texte cible
+        target_text = text[start_pos:end_pos]
+        
+        return {
+            "success": True,
+            "start": start_pos,
+            "end": end_pos,
+            "target_text": target_text,
+            "anchor_before_used": anchor_before,
+            "anchor_after_used": anchor_after
+        }
+    
+    def apply_operation_with_anchors(self, text: str, operation: str, 
+                                      anchor_before: str = None, 
+                                      anchor_after: str = None,
+                                      new_content: str = "") -> Dict:
+        """
+        Applique une opération en utilisant les ancres pour localiser la zone cible.
+        
+        🎯 PRINCIPE DES ANCRES :
+        - anchor_before : 12+ caractères QUI PRÉCÈDENT la zone à modifier
+        - anchor_after : 12+ caractères QUI SUIVENT la zone à modifier
+        - La zone cible est ENTRE les deux ancres
+        
+        📋 CAS D'UTILISATION :
+        | anchor_before | anchor_after | Zone ciblée                    |
+        |---------------|--------------|--------------------------------|
+        | None          | présent      | Du DÉBUT jusqu'à anchor_after  |
+        | présent       | None         | De anchor_before jusqu'à la FIN|
+        | présent       | présent      | ENTRE les deux ancres          |
+        | None          | None         | TOUT le texte                  |
+        
+        Args:
+            text: Texte à modifier
+            operation: "add", "replace", ou "delete"
+            anchor_before: Texte précédant la zone cible (None = début)
+            anchor_after: Texte suivant la zone cible (None = fin)
+            new_content: Nouveau contenu (pour add/replace)
+        
+        Returns:
+            Dict avec success, updated_text, et détails de l'opération
+        """
+        # Validation
+        if operation not in ["add", "replace", "delete"]:
+            return {
+                "success": False,
+                "error": f"Opération inconnue: {operation}. Utilisez 'add', 'replace', ou 'delete'",
+                "updated_text": text
+            }
+        
+        # Cas spécial : add au début/fin sans ancres
+        if operation == "add":
+            if anchor_before is None and anchor_after is None:
+                # Ajouter au début par défaut
+                return {
+                    "success": True,
+                    "updated_text": new_content + text,
+                    "operation_details": {
+                        "operation": "add",
+                        "position": "beginning",
+                        "added_content": new_content
+                    }
+                }
+            elif anchor_before and anchor_after is None:
+                # Ajouter après anchor_before
+                result = self._find_target_by_anchors(text, anchor_before, None)
+                if not result.get("success"):
+                    result["updated_text"] = text
+                    return result
+                
+                insert_pos = result["start"]
+                updated_text = text[:insert_pos] + new_content + text[insert_pos:]
+                return {
+                    "success": True,
+                    "updated_text": updated_text,
+                    "operation_details": {
+                        "operation": "add",
+                        "position": insert_pos,
+                        "after_anchor": anchor_before,
+                        "added_content": new_content
+                    }
+                }
+            elif anchor_before is None and anchor_after:
+                # Ajouter avant anchor_after
+                result = self._find_target_by_anchors(text, None, anchor_after)
+                if not result.get("success"):
+                    result["updated_text"] = text
+                    return result
+                
+                insert_pos = result["end"]
+                updated_text = text[:insert_pos] + new_content + text[insert_pos:]
+                return {
+                    "success": True,
+                    "updated_text": updated_text,
+                    "operation_details": {
+                        "operation": "add",
+                        "position": insert_pos,
+                        "before_anchor": anchor_after,
+                        "added_content": new_content
+                    }
+                }
+        
+        # Trouver la zone cible avec les ancres
+        result = self._find_target_by_anchors(text, anchor_before, anchor_after)
+        
+        if not result.get("success"):
+            result["updated_text"] = text
+            return result
+        
+        start = result["start"]
+        end = result["end"]
+        target_text = result["target_text"]
+        
+        # Appliquer l'opération
+        if operation == "add":
+            # Ajouter entre les ancres (après le texte existant)
+            updated_text = text[:end] + new_content + text[end:]
+            return {
+                "success": True,
+                "updated_text": updated_text,
+                "operation_details": {
+                    "operation": "add",
+                    "position": end,
+                    "anchor_before": anchor_before,
+                    "anchor_after": anchor_after,
+                    "added_content": new_content
+                }
+            }
+        
+        elif operation == "replace":
+            # Remplacer le contenu entre les ancres
+            updated_text = text[:start] + new_content + text[end:]
+            return {
+                "success": True,
+                "updated_text": updated_text,
+                "operation_details": {
+                    "operation": "replace",
+                    "start": start,
+                    "end": end,
+                    "replaced_text": target_text,
+                    "new_content": new_content,
+                    "anchor_before": anchor_before,
+                    "anchor_after": anchor_after
+                }
+            }
+        
+        elif operation == "delete":
+            # Supprimer le contenu entre les ancres
+            updated_text = text[:start] + text[end:]
+            return {
+                "success": True,
+                "updated_text": updated_text,
+                "operation_details": {
+                    "operation": "delete",
+                    "start": start,
+                    "end": end,
+                    "deleted_text": target_text,
+                    "anchor_before": anchor_before,
+                    "anchor_after": anchor_after
+                }
+            }
+    
+    def apply_operations_v2(self, text_to_update: str, operations_list: List[Dict]) -> Dict:
+        """
+        🆕 VERSION 2 : Applique des opérations avec le système d'ancres.
+        
+        Chaque opération peut contenir :
+        - operation: "add", "replace", "delete"
+        - anchor_before: Texte précédant la zone (12+ caractères recommandés)
+        - anchor_after: Texte suivant la zone (12+ caractères recommandés)
+        - new_content: Nouveau contenu (pour add/replace)
+        
+        Args:
+            text_to_update: Texte original
+            operations_list: Liste d'opérations avec ancres
+        
+        Returns:
+            Dict avec success, updated_text, operations_log
+        """
+        if not isinstance(operations_list, list):
+            return {
+                "success": False,
+                "updated_text": text_to_update,
+                "operations_log": [],
+                "error": "operations_list doit être une liste"
+            }
+        
+        current_text = str(text_to_update)
+        operations_log = []
+        final_success = True
+        
+        for i, op in enumerate(operations_list):
+            if not isinstance(op, dict):
+                log_entry = {
+                    "op_index": i,
+                    "success": False,
+                    "error": "L'opération doit être un dictionnaire"
+                }
+                operations_log.append(log_entry)
+                final_success = False
+                break
+            
+            operation = op.get("operation")
+            anchor_before = op.get("anchor_before")
+            anchor_after = op.get("anchor_after")
+            new_content = op.get("new_content", "")
+            
+            # Validation
+            if not operation:
+                log_entry = {
+                    "op_index": i,
+                    "success": False,
+                    "error": "Le champ 'operation' est requis"
+                }
+                operations_log.append(log_entry)
+                final_success = False
+                break
+            
+            # Pour replace/delete entre deux points, les deux ancres sont requises
+            if operation in ["replace", "delete"]:
+                if anchor_before is None and anchor_after is None:
+                    log_entry = {
+                        "op_index": i,
+                        "success": False,
+                        "error": f"Pour '{operation}', au moins une ancre (anchor_before ou anchor_after) est requise"
+                    }
+                    operations_log.append(log_entry)
+                    final_success = False
+                    break
+            
+            print(f"Opération {i+1}/{len(operations_list)}: {operation}")
+            print(f"  anchor_before: {anchor_before[:30] if anchor_before else 'None'}...")
+            print(f"  anchor_after: {anchor_after[:30] if anchor_after else 'None'}...")
+            
+            # Appliquer l'opération
+            result = self.apply_operation_with_anchors(
+                text=current_text,
+                operation=operation,
+                anchor_before=anchor_before,
+                anchor_after=anchor_after,
+                new_content=new_content
+            )
+            
+            log_entry = {
+                "op_index": i,
+                "operation": operation,
+                "anchor_before": anchor_before,
+                "anchor_after": anchor_after,
+                **result
+            }
+            
+            if result.get("success"):
+                current_text = result["updated_text"]
+                print(f"  -> ✅ Succès")
+            else:
+                print(f"  -> ❌ Échec: {result.get('error')}")
+                final_success = False
+                operations_log.append(log_entry)
+                break
+            
+            operations_log.append(log_entry)
+        
+        return {
+            "success": final_success,
+            "updated_text": current_text,
+            "operations_log": operations_log,
+            "error": None if final_success else "Une ou plusieurs opérations ont échoué"
+        }
 
     def apply_operations(self, text_to_update, operations_list):
         """
@@ -245,11 +596,65 @@ class TextUpdaterAgent:
                 if not context:
                     return {"success": False, "error": "Contexte requis pour section_type 'mid'", "updated_text": text}
                 
+                # 🆕 NOUVELLE APPROCHE : Recherche intelligente du contexte
+                # 1. Essayer recherche exacte d'abord
                 escaped_context = re.escape(context)
-                # Vérifier si le contexte existe pour éviter les erreurs avec re.sub si le pattern n'est pas trouvé
                 match_found = re.search(escaped_context, text)
+                
+                # 2. Si pas trouvé, essayer recherche flexible (ignorer espaces multiples, casse)
                 if not match_found:
-                    return {"success": False, "error": f"Contexte '{context}' non trouvé dans le texte.", "updated_text": text}
+                    # Normaliser : espaces multiples → un seul espace, ignorer casse
+                    normalized_context = re.sub(r'\s+', ' ', context.strip())
+                    normalized_text = re.sub(r'\s+', ' ', text)
+                    
+                    # Recherche insensible à la casse
+                    pattern = re.escape(normalized_context)
+                    match_found = re.search(pattern, normalized_text, re.IGNORECASE)
+                    
+                    if match_found:
+                        # Trouvé avec normalisation, utiliser le texte original pour la correspondance
+                        # Chercher dans le texte original avec une recherche plus flexible
+                        flexible_pattern = re.escape(context).replace(r'\ ', r'\s+')
+                        match_found = re.search(flexible_pattern, text, re.IGNORECASE)
+                        if match_found:
+                            # Utiliser le match trouvé
+                            context = text[match_found.start():match_found.end()]
+                            escaped_context = re.escape(context)
+                
+                # 3. Si toujours pas trouvé, essayer recherche par mots-clés (premiers mots du contexte)
+                if not match_found:
+                    # Extraire les premiers mots-clés (3-5 premiers mots)
+                    keywords = context.split()[:5]
+                    if len(keywords) >= 2:
+                        keyword_pattern = '.*?'.join([re.escape(kw) for kw in keywords])
+                        match_found = re.search(keyword_pattern, text, re.IGNORECASE)
+                        if match_found:
+                            # Utiliser une portion plus large autour des mots-clés trouvés
+                            start = max(0, match_found.start() - 20)
+                            end = min(len(text), match_found.end() + 20)
+                            context = text[start:end]
+                            escaped_context = re.escape(context)
+                
+                # 4. Si toujours pas trouvé, retourner erreur avec suggestions
+                if not match_found:
+                    context_preview = context[:50] + "..." if len(context) > 50 else context
+                    # Parser le texte en sections pour aider le LLM
+                    sections = self._parse_text_into_sections(text)
+                    sections_preview = "\n".join([f"  [{i}] {s[:60]}..." for i, s in enumerate(sections[:5])])
+                    
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Contexte '{context_preview}' non trouvé dans le texte. "
+                            f"💡 ASTUCE : Le système a essayé une recherche flexible mais n'a rien trouvé. "
+                            f"Essayez d'utiliser les premiers mots-clés de la section que vous voulez modifier, "
+                            f"ou référez-vous aux sections disponibles ci-dessous."
+                        ),
+                        "updated_text": text,
+                        "hint": "Utilisez les premiers mots-clés de la section à modifier plutôt que le texte complet.",
+                        "text_sections_preview": sections_preview if sections else None,
+                        "total_sections": len(sections) if sections else 0
+                    }
 
                 if operation == "add":
                     # Ajoute new_content APRÈS la première occurrence du contexte

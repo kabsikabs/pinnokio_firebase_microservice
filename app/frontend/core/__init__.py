@@ -1,24 +1,27 @@
 """
-Frontend Core - Shared Utilities
-================================
+Frontend Core - Re-exports from wrappers (DEPRECATED)
+======================================================
 
-Centralized utilities shared across all frontend pages.
-These handle authentication, page state recovery, and redirect flows.
+This module is maintained for backward compatibility.
+All implementations have been moved to app/wrappers/.
 
-Modules:
-    - auth_handlers: Firebase token verification & session management
-    - page_state_manager: Page state caching for fast refresh recovery
-    - pending_action_manager: OAuth/payment redirect state management
+The frontend/core directory now only contains this __init__.py file
+which re-exports from wrappers/ for backward compatibility.
 
-Usage:
-    from app.frontend.core import (
+New code should import directly from app.wrappers:
+    from app.wrappers import (
         handle_firebase_token,
         get_page_state_manager,
         get_pending_action_manager,
     )
+
+Migration Path:
+    OLD: from app.frontend.core import handle_firebase_token
+    NEW: from app.wrappers import handle_firebase_token
 """
 
-from .auth_handlers import (
+# Re-export from wrappers for backward compatibility
+from ...wrappers.auth_handlers import (
     AuthenticationError,
     handle_firebase_token,
     get_session,
@@ -26,12 +29,12 @@ from .auth_handlers import (
     invalidate_session,
 )
 
-from .page_state_manager import (
+from ...wrappers.page_state_manager import (
     PageStateManager,
     get_page_state_manager,
 )
 
-from .pending_action_manager import (
+from ...wrappers.pending_action_manager import (
     PendingActionManager,
     get_pending_action_manager,
 )

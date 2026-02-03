@@ -27,18 +27,12 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 from ..firebase_providers import FirebaseManagement
-from ..redis_client import get_redis
+from ..firebase_cache_handlers import get_firebase_cache_handlers
+from ..cache.unified_cache_manager import get_firebase_cache_manager
 from ..ws_events import WS_EVENTS
 from ..ws_hub import hub
 
 logger = logging.getLogger("task.handlers")
-
-
-# ============================================
-# CONSTANTS
-# ============================================
-
-TTL_TASKS_CACHE = 60  # 1 minute
 
 
 # ============================================
@@ -67,6 +61,40 @@ class TaskHandlers:
     """
 
     NAMESPACE = "TASK"
+
+    # ═══════════════════════════════════════════════════════════════
+    # CACHE INVALIDATION HELPER
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _invalidate_tasks_cache(
+        self,
+        user_id: str,
+        company_id: str
+    ) -> None:
+        """
+        Invalide les caches unifiés pour les tasks.
+        
+        Invalide:
+        1. Cache tasks séparé: business:{uid}:{cid}:tasks
+        2. Cache dashboard: business:{uid}:{cid}:dashboard (contient les tasks)
+        
+        Pattern identique à BankingHandlers._invalidate_central_cache()
+        """
+        try:
+            cache = get_firebase_cache_manager()
+            
+            # Invalider le cache tasks séparé
+            await cache.delete_cached_data(user_id, company_id, "tasks", "list")
+            
+            # Invalider le cache dashboard (contient une copie des tasks)
+            await cache.delete_cached_data(user_id, company_id, "dashboard", "full_data")
+            
+            logger.info(
+                f"[TASK] Caches invalidated: tasks/list and dashboard/full_data "
+                f"for company_id={company_id}"
+            )
+        except Exception as e:
+            logger.warning(f"[TASK] Failed to invalidate caches: {e}")
 
     # ============================================
     # LIST TASKS
@@ -105,28 +133,25 @@ class TaskHandlers:
             }
         """
         try:
-            redis = get_redis()
-            cache_key = f"tasks:{company_id}"
-
-            # Check cache
-            cached = redis.get(cache_key)
-            if cached:
-                import json
-                data = json.loads(cached if isinstance(cached, str) else cached.decode())
-                logger.info(f"TASK.list_tasks company_id={company_id} source=cache")
-                return {"success": True, "data": data}
-
-            # Fetch from Firebase
-            firebase = FirebaseManagement()
-            all_tasks = await asyncio.to_thread(
-                firebase.list_tasks_for_mandate,
-                mandate_path
+            # Use unified cache via firebase_cache_handlers (same as dashboard)
+            firebase_cache_handlers = get_firebase_cache_handlers()
+            tasks_result = await firebase_cache_handlers.get_tasks(
+                user_id,
+                company_id,
+                mandate_path=mandate_path
             )
 
-            if not all_tasks:
+            # Get tasks from cache result (already formatted)
+            all_tasks = tasks_result.get("data", [])
+            if not isinstance(all_tasks, list):
                 all_tasks = []
 
-            # Transform and group
+            logger.info(
+                f"TASK.list_tasks company_id={company_id} "
+                f"count={len(all_tasks)} source={tasks_result.get('source', 'unknown')}"
+            )
+
+            # Transform and group (tasks are already formatted from cache)
             planned_tasks = []
             on_demand_tasks = []
             today_tasks = []
@@ -138,8 +163,9 @@ class TaskHandlers:
             today_date = now.date()
             week_end = today_date + timedelta(days=7)
 
-            for task in all_tasks:
-                task_data = self._format_task(task)
+            for task_data in all_tasks:
+                # Tasks are already formatted from firebase_cache_handlers
+                # No need to call _format_task() again
 
                 if task_data["executionPlan"] in ["SCHEDULED", "ONE_TIME"]:
                     planned_tasks.append(task_data)
@@ -185,10 +211,6 @@ class TaskHandlers:
                     "thisWeek": len(this_week_tasks)
                 }
             }
-
-            # Cache result
-            import json
-            redis.setex(cache_key, TTL_TASKS_CACHE, json.dumps(result))
 
             logger.info(
                 f"TASK.list_tasks company_id={company_id} "
@@ -345,9 +367,8 @@ class TaskHandlers:
                         }
                     })
 
-                    # Invalidate tasks cache
-                    redis = get_redis()
-                    redis.delete(f"tasks:{company_id}")
+                    # Invalidate unified caches (tasks + dashboard)
+                    await self._invalidate_tasks_cache(user_id, company_id)
 
                     logger.info(
                         f"TASK.execute_task success task_id={task_id} "
@@ -428,9 +449,8 @@ class TaskHandlers:
                     }
                 })
 
-                # Invalidate tasks cache
-                redis = get_redis()
-                redis.delete(f"tasks:{company_id}")
+                # Invalidate unified caches (tasks + dashboard)
+                await self._invalidate_tasks_cache(user_id, company_id)
 
                 logger.info(f"TASK.toggle_task_enabled success task_id={task_id}")
                 return {"success": True, "data": {"enabled": enabled}}
@@ -558,9 +578,8 @@ class TaskHandlers:
                     }
                 })
 
-                # Invalidate tasks cache
-                redis = get_redis()
-                redis.delete(f"tasks:{company_id}")
+                # Invalidate unified caches (tasks + dashboard)
+                await self._invalidate_tasks_cache(user_id, company_id)
 
                 logger.info(f"TASK.update_task success task_id={task_id}")
                 return {"success": True, "data": {"task": updated_task}}

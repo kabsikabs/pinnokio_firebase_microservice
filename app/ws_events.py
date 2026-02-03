@@ -67,6 +67,11 @@ class LLMEvents:
     STREAM_INTERRUPTED = "llm.stream_interrupted"  # Streaming was interrupted by user action
     STOP_STREAMING = "llm.stop_streaming"          # Request to stop streaming
 
+    # Thinking events (reasoning phase)
+    THINKING_START = "llm.thinking_start"          # LLM starts reasoning
+    THINKING_DELTA = "llm.thinking_delta"          # Thinking content chunk
+    THINKING_END = "llm.thinking_end"              # LLM finishes reasoning
+
     # Tool use events
     TOOL_USE_START = "llm.tool_use_start"
     TOOL_USE_PROGRESS = "llm.tool_use_progress"
@@ -102,7 +107,7 @@ class CompanyEvents:
 
 
 # ============================================
-# Dashboard Events (13 events)
+# Dashboard Events (14 events)
 # ============================================
 class DashboardEvents:
     """Evenements dashboard."""
@@ -122,6 +127,8 @@ class DashboardEvents:
     EXPENSES_UPDATE = "dashboard.expenses_update"  # Expenses data updated
     TASKS_UPDATE = "dashboard.tasks_update"  # Tasks data updated
     APPROVALS_UPDATE = "dashboard.approvals_update"  # Approvals data updated
+    # Real-time updates from jobbeurs (via Redis PubSub)
+    PENDING_APPROVAL_UPDATE = "dashboard.pending_approval_update"  # Pending approval list update from jobbeurs
 
 
 # ============================================
@@ -338,6 +345,10 @@ class ChatEvents:
     # Tool use indicators
     TOOL_INDICATOR_START = "chat.tool_indicator_start"   # Tool use started
     TOOL_INDICATOR_END = "chat.tool_indicator_end"       # Tool use ended
+
+    # Onboarding chat (triggered after company creation)
+    START_ONBOARDING = "chat.start_onboarding"           # Request to start onboarding chat
+    ONBOARDING_STARTED = "chat.onboarding_started"       # Onboarding chat started confirmation
 
     # Error
     ERROR = "chat.error"                           # Chat-specific error
@@ -561,7 +572,9 @@ class CompanySettingsEvents:
 
     # Company deletion
     DELETE_COMPANY = "company_settings.delete_company"
+    DELETION_PROGRESS = "company_settings.deletion_progress"
     COMPANY_DELETED = "company_settings.company_deleted"
+    POST_DELETION_ACTION = "company_settings.post_deletion_action"
 
     # Error
     ERROR = "company_settings.error"
@@ -765,6 +778,137 @@ class PendingActionEvents:
 
 
 # ============================================
+# HR Events (21 events) - NEW
+# Human Resources management (PostgreSQL Neon)
+# ============================================
+class HREvents:
+    """
+    Evenements pour la page HR (Ressources Humaines).
+
+    Gere:
+    - Orchestration de page
+    - CRUD employes (PostgreSQL Neon)
+    - Calcul de paie
+    - Parametres HR
+    - Metriques HR
+
+    NOTE HR Specificites:
+    - Donnees stockees dans PostgreSQL (Neon) via NeonHRManager
+    - Synchronisation avec Firebase pour le mandate_path
+    - Calcul de paie = job long (async)
+    """
+    # Orchestration events
+    ORCHESTRATE_INIT = "hr.orchestrate_init"
+    FULL_DATA = "hr.full_data"
+
+    # Employee operations
+    EMPLOYEES_LIST = "hr.employees_list"
+    EMPLOYEES_LOADED = "hr.employees_loaded"
+    EMPLOYEE_GET = "hr.employee_get"
+    EMPLOYEE_LOADED = "hr.employee_loaded"
+    EMPLOYEE_CREATE = "hr.employee_create"
+    EMPLOYEE_CREATED = "hr.employee_created"
+    EMPLOYEE_UPDATE = "hr.employee_update"
+    EMPLOYEE_UPDATED = "hr.employee_updated"
+    EMPLOYEE_DELETE = "hr.employee_delete"
+    EMPLOYEE_DELETED = "hr.employee_deleted"
+
+    # Payroll operations
+    PAYROLL_GET = "hr.payroll_get"
+    PAYROLL_LOADED = "hr.payroll_loaded"
+    PAYROLL_CALCULATE = "hr.payroll_calculate"
+    PAYROLL_CALCULATING = "hr.payroll_calculating"
+    PAYROLL_CALCULATED = "hr.payroll_calculated"
+
+    # Settings
+    SETTINGS_GET = "hr.settings_get"
+    SETTINGS_LOADED = "hr.settings_loaded"
+    SETTINGS_UPDATE = "hr.settings_update"
+    SETTINGS_UPDATED = "hr.settings_updated"
+
+    # Metrics
+    METRICS_GET = "hr.metrics_get"
+    METRICS_LOADED = "hr.metrics_loaded"
+
+    # Rubrics (payroll items) operations
+    RUBRICS_LIST = "hr.rubrics_list"
+    RUBRICS_LOADED = "hr.rubrics_loaded"
+    RUBRIC_TOGGLE = "hr.rubric_toggle"
+    RUBRIC_TOGGLED = "hr.rubric_toggled"
+    RUBRIC_UPDATE = "hr.rubric_update"
+    RUBRIC_UPDATED = "hr.rubric_updated"
+
+    # Contracts operations
+    CONTRACTS_LIST = "hr.contracts_list"
+    CONTRACTS_LOADED = "hr.contracts_loaded"
+    CONTRACT_CREATE = "hr.contract_create"
+    CONTRACT_CREATED = "hr.contract_created"
+    CONTRACT_UPDATE = "hr.contract_update"
+    CONTRACT_UPDATED = "hr.contract_updated"
+    ACTIVE_CONTRACT_GET = "hr.active_contract_get"
+    ACTIVE_CONTRACT_LOADED = "hr.active_contract_loaded"
+
+    # Refresh
+    REFRESH = "hr.refresh"
+    REFRESHED = "hr.refreshed"
+
+    # Error
+    ERROR = "hr.error"
+
+
+# ============================================
+# Onboarding Events (17 events) - NEW
+# Company onboarding and setup
+# ============================================
+class OnboardingEvents:
+    """
+    Evenements pour l'onboarding de nouvelles societes.
+
+    Gere:
+    - Soumission du formulaire d'onboarding
+    - Test de connexion ERP (Odoo, Banana)
+    - OAuth Google Drive/Chat
+    - Gestion des clients (mandataires)
+    - Progression et completion
+
+    Flow:
+    1. SUBMIT: Utilisateur soumet le formulaire
+    2. PROGRESS: Updates pendant la creation
+    3. COMPLETE: Onboarding termine avec succes
+    """
+    # Form submission
+    SUBMIT = "onboarding.submit"
+    SUBMITTED = "onboarding.submitted"
+
+    # ERP connection test
+    TEST_ERP = "onboarding.test_erp_connection"
+    ERP_RESULT = "onboarding.erp_result"
+
+    # OAuth flow (Google Drive/Chat)
+    OAUTH_INIT = "onboarding.oauth_init"
+    OAUTH_URL = "onboarding.oauth_url"
+    OAUTH_CALLBACK = "onboarding.oauth_callback"
+    OAUTH_SUCCESS = "onboarding.oauth_success"
+
+    # Progress and completion
+    PROGRESS = "onboarding.progress"
+    COMPLETE = "onboarding.complete"
+
+    # Client management (for managing companies on behalf of others)
+    LOAD_CLIENTS = "onboarding.load_clients"
+    CLIENTS_LOADED = "onboarding.clients_loaded"
+    SAVE_CLIENT = "onboarding.save_client"
+    CLIENT_SAVED = "onboarding.client_saved"
+    DELETE_CLIENT = "onboarding.delete_client"
+    CLIENT_DELETED = "onboarding.client_deleted"
+    UPDATE_CLIENT = "onboarding.update_client"
+    CLIENT_UPDATED = "onboarding.client_updated"
+
+    # Error
+    ERROR = "onboarding.error"
+
+
+# ============================================
 # Consolidated WS_EVENTS Class
 # ============================================
 class WS_EVENTS:
@@ -807,6 +951,8 @@ class WS_EVENTS:
     EXPENSES = ExpensesEvents         # NEW: Expenses (Notes de Frais) page
     BANKING = BankingEvents           # NEW: Banking transactions page
     METRICS = MetricsEvents           # NEW: Shared metrics stores
+    ONBOARDING = OnboardingEvents     # NEW: Company onboarding and setup
+    HR = HREvents                     # NEW: Human Resources (PostgreSQL Neon)
 
 
 # ============================================
@@ -973,6 +1119,7 @@ EVENT_DESCRIPTIONS = {
     WS_EVENTS.DASHBOARD.DATA_LOADING_PROGRESS: "Dashboard data loading progress update",
     WS_EVENTS.DASHBOARD.COMPANY_CHANGE: "Dashboard company selection changed",
     WS_EVENTS.DASHBOARD.SWITCH_ACCOUNT: "Switch between own account and shared accounts",
+    WS_EVENTS.DASHBOARD.PENDING_APPROVAL_UPDATE: "Pending approval list update from jobbeurs (real-time via Redis)",
 
     # Job Events
     WS_EVENTS.JOB.STATUS_CHANGED: "Job status changed",
@@ -998,6 +1145,10 @@ EVENT_DESCRIPTIONS = {
     # Connection Events
     WS_EVENTS.CONNECTION.STATUS: "WebSocket connection status changed",
     WS_EVENTS.CONNECTION.ERROR: "WebSocket error occurred",
+
+    # Chat Events (onboarding)
+    WS_EVENTS.CHAT.START_ONBOARDING: "Request to start onboarding chat after company creation",
+    WS_EVENTS.CHAT.ONBOARDING_STARTED: "Onboarding chat started confirmation",
 }
 
 
@@ -1079,6 +1230,8 @@ __all__ = [
     'ExpensesEvents',       # NEW: Expenses (Notes de Frais) page
     'BankingEvents',        # NEW: Banking transactions page
     'MetricsEvents',        # NEW: Shared metrics stores
+    'OnboardingEvents',     # NEW: Company onboarding and setup
+    'HREvents',             # NEW: Human Resources (PostgreSQL Neon)
     'LEGACY_EVENT_MAPPING',
     'EVENT_DESCRIPTIONS',
     'normalize_event_type',

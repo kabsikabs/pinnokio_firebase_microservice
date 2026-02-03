@@ -801,30 +801,128 @@ Aucun paramètre requis.
 """,
 
     "UPDATE_CONTEXT": """
-✏️ **UPDATE_CONTEXT** - Modifier un contexte
+✏️ **UPDATE_CONTEXT** - Modifier un contexte avec précision chirurgicale
 
 ## Rôle
-Permet de modifier et sauvegarder un contexte (Router, APBookkeeper, Company).
+Permet de modifier un contexte (Router, APBookkeeper, Bank, Company) en utilisant des **ANCRES** pour localiser précisément la zone à modifier.
 
-## Paramètres
+## 🎯 CONCEPT DES ANCRES
+
+Les ancres fonctionnent comme des coordonnées GPS dans le texte :
+- `anchor_before` : 12+ caractères QUI PRÉCÈDENT la zone à modifier
+- `anchor_after` : 12+ caractères QUI SUIVENT la zone à modifier
+- La zone cible est **ENTRE** les deux ancres
+
+```
+Texte: "...On lui passe toujours context..."
+                    ↑        ↑
+              anchor_before  anchor_after
+              "On lui passe" "context..."
+              
+Zone cible = " toujours " (entre les ancres)
+```
+
+## Paramètres principaux
 | Paramètre | Type | Description |
 |-----------|------|-------------|
-| `context_type` | string | `router`, `apbookeeper`, ou `company` |
-| `updates` | object | Les modifications à appliquer |
+| `context_type` | string | `router`, `accounting`, `bank`, ou `company` |
+| `service_name` | string | Nom du service (OBLIGATOIRE si `context_type=router`) |
+| `operations` | array | Liste d'opérations avec ancres |
+| `preview_only` | boolean | Si `true`, prévisualisation uniquement |
 
-## Exemple
+## Structure d'une opération
+
+| Champ | Type | Description |
+|-------|------|-------------|
+| `operation` | string | `"add"`, `"replace"`, ou `"delete"` |
+| `anchor_before` | string | 12+ caractères AVANT la zone (null = début du texte) |
+| `anchor_after` | string | 12+ caractères APRÈS la zone (null = fin du texte) |
+| `new_content` | string | Nouveau contenu (pour add/replace) |
+
+## 📋 MATRICE DES CAS
+
+| anchor_before | anchor_after | Zone ciblée |
+|---------------|--------------|-------------|
+| `null` | présent | Du DÉBUT jusqu'à anchor_after |
+| présent | `null` | De anchor_before jusqu'à la FIN |
+| présent | présent | ENTRE les deux ancres |
+| `null` | `null` | Ajoute au début (pour add) |
+
+## Exemples
+
+### Exemple 1 : Remplacer une phrase précise
+Texte original : "Convention de nommage recommandée : [TYPE]_[DATE]. Règles de classification..."
+
 ```json
 {
     "context_type": "router",
-    "updates": {
-        "invoices": {
-            "keywords": ["facture", "invoice", "bill"]
+    "service_name": "letters",
+    "operations": [
+        {
+            "operation": "replace",
+            "anchor_before": "recommandée : ",
+            "anchor_after": ". Règles de",
+            "new_content": "[DATE]_[OBJET]_[SOURCE]"
         }
-    }
+    ]
+}
+```
+Résultat : "Convention de nommage recommandée : [DATE]_[OBJET]_[SOURCE]. Règles de classification..."
+
+### Exemple 2 : Ajouter au début du texte
+```json
+{
+    "context_type": "router",
+    "service_name": "hr",
+    "operations": [
+        {
+            "operation": "add",
+            "anchor_before": null,
+            "anchor_after": null,
+            "new_content": "⚠️ MISE À JOUR 2026 : "
+        }
+    ]
 }
 ```
 
-⚠️ **Attention** : Les modifications sont persistantes.
+### Exemple 3 : Ajouter après une section
+```json
+{
+    "context_type": "router",
+    "service_name": "invoices",
+    "operations": [
+        {
+            "operation": "add",
+            "anchor_before": "fin de la section.",
+            "anchor_after": null,
+            "new_content": "\\n\\nNouvelle section ajoutée ici."
+        }
+    ]
+}
+```
+
+### Exemple 4 : Supprimer une portion
+```json
+{
+    "context_type": "accounting",
+    "operations": [
+        {
+            "operation": "delete",
+            "anchor_before": "Texte avant ",
+            "anchor_after": " texte après"
+        }
+    ]
+}
+```
+
+## ⚠️ BONNES PRATIQUES
+
+1. **Ancres de 12+ caractères** : Plus c'est long, plus c'est unique
+2. **Utilisez ROUTER_PROMPT** d'abord pour voir le texte complet
+3. **Copiez les ancres exactement** depuis le texte affiché
+4. **Testez avec preview_only=true** avant de valider
+
+⚠️ **Attention** : Les modifications sont persistantes après approbation.
 """,
 
     # ─────────────────────────────────────────────────────────────────────────────

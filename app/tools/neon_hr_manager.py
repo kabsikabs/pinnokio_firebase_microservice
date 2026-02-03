@@ -289,7 +289,78 @@ class NeonHRManager:
             self._company_cache[mandate_path] = company_id
             logger.info(f"✅ Entreprise créée: {company_name} ({company_id})")
             return company_id
-    
+
+    async def delete_company(
+        self,
+        mandate_path: str,
+        cascade: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Supprime une société et cascade vers les données HR.
+
+        Args:
+            mandate_path: Chemin Firebase pour identifier la société
+            cascade: Si True, supprime aussi employés, contrats, paies
+
+        Returns:
+            Dict avec rapport de suppression
+        """
+        try:
+            company_id = await self.get_company_id_from_mandate_path(mandate_path)
+
+            if not company_id:
+                return {
+                    "success": True,
+                    "company_id": None,
+                    "deleted_counts": {},
+                    "message": "Company not found in Neon"
+                }
+
+            pool = await self.get_pool()
+            deleted_counts = {"employees": 0, "contracts": 0, "payroll_results": 0}
+
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    if cascade:
+                        # 1. Supprimer payroll_results
+                        result = await conn.execute("""
+                            DELETE FROM hr.payroll_results
+                            WHERE employee_id IN (
+                                SELECT id FROM hr.employees WHERE company_id = $1
+                            )
+                        """, company_id)
+                        deleted_counts["payroll_results"] = int(result.split()[-1]) if "DELETE" in result else 0
+
+                        # 2. Supprimer contracts
+                        result = await conn.execute("""
+                            DELETE FROM hr.contracts
+                            WHERE employee_id IN (
+                                SELECT id FROM hr.employees WHERE company_id = $1
+                            )
+                        """, company_id)
+                        deleted_counts["contracts"] = int(result.split()[-1]) if "DELETE" in result else 0
+
+                        # 3. Supprimer employees
+                        result = await conn.execute(
+                            "DELETE FROM hr.employees WHERE company_id = $1",
+                            company_id
+                        )
+                        deleted_counts["employees"] = int(result.split()[-1]) if "DELETE" in result else 0
+
+                    # 4. Supprimer la société
+                    await conn.execute("DELETE FROM core.companies WHERE id = $1", company_id)
+
+            # Nettoyer le cache
+            if mandate_path in self._company_cache:
+                del self._company_cache[mandate_path]
+
+            logger.info(f"✅ Company deleted from Neon: {company_id} {deleted_counts}")
+            return {"success": True, "company_id": str(company_id), "deleted_counts": deleted_counts}
+
+        except Exception as e:
+            logger.error(f"❌ Neon delete failed: {e}")
+            return {"success": False, "error": str(e)}
+
     # ═══════════════════════════════════════════════════════════════
     # ENDPOINTS EMPLOYEES
     # ═══════════════════════════════════════════════════════════════

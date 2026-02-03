@@ -81,6 +81,7 @@ TTL_EXPENSES = 2400              # 40 minutes
 TTL_AP_DOCUMENTS = 2400          # 40 minutes
 TTL_BANK_TRANSACTIONS = 2400     # 40 minutes
 TTL_APPROVAL_PENDINGLIST = 2400  # 40 minutes
+TTL_TASKS = 2400                 # 40 minutes
 
 
 class FirebaseCacheHandlers:
@@ -485,7 +486,7 @@ class FirebaseCacheHandlers:
             mandate_path (str): Unused - kept for API compatibility
 
         Returns:
-            {"data": {"to_reconcile": [...], "in_process": [...], "pending": [...], "matched": [...]}, "source": "cache"|"erp"}
+            {"data": {"to_reconcile": [...], "in_process": [...], "pending": [...]}, "source": "cache"|"erp"}
         """
         import asyncio
 
@@ -525,7 +526,7 @@ class FirebaseCacheHandlers:
                     f"no_bank_erp_configured"
                 )
                 return {
-                    "data": {"to_reconcile": [], "in_process": [], "pending": [], "matched": []},
+                    "data": {"to_reconcile": [], "in_process": [], "pending": []},
                     "source": "none",
                     "warning": "No bank ERP configured"
                 }
@@ -537,7 +538,7 @@ class FirebaseCacheHandlers:
                     f"unsupported_erp={bank_erp_type}"
                 )
                 return {
-                    "data": {"to_reconcile": [], "in_process": [], "pending": [], "matched": []},
+                    "data": {"to_reconcile": [], "in_process": [], "pending": []},
                     "source": "none",
                     "warning": f"ERP type '{bank_erp_type}' not yet supported. Only Odoo is available."
                 }
@@ -548,7 +549,7 @@ class FirebaseCacheHandlers:
                     f"no_client_uuid"
                 )
                 return {
-                    "data": {"to_reconcile": [], "in_process": [], "pending": [], "matched": []},
+                    "data": {"to_reconcile": [], "in_process": [], "pending": []},
                     "source": "none",
                     "warning": "No client UUID for ERP connection"
                 }
@@ -578,19 +579,25 @@ class FirebaseCacheHandlers:
                     f"FIREBASE_CACHE.get_bank_transactions erp_error={erp_error}"
                 )
                 return {
-                    "data": {"to_reconcile": [], "in_process": [], "pending": [], "matched": []},
+                    "data": {"to_reconcile": [], "in_process": [], "pending": []},
                     "source": "none",
                     "error": str(erp_error)
                 }
 
-            # Organize transactions by reconciliation status
-            organized = self._organize_bank_transactions_by_status(bank_transactions)
+            # Organize transactions by reconciliation status with business logic
+            organized = await self._organize_bank_transactions_by_status(
+                bank_transactions,
+                user_id,
+                company_id,
+                mandate_path
+            )
 
             total_count = sum(len(v) for v in organized.values() if isinstance(v, list))
             logger.info(
                 f"FIREBASE_CACHE.get_bank_transactions company_id={company_id} "
                 f"total={total_count} (to_reconcile={len(organized.get('to_reconcile', []))}, "
-                f"matched={len(organized.get('matched', []))}) source=erp"
+                f"in_process={len(organized.get('in_process', []))}, "
+                f"pending={len(organized.get('pending', []))}) source=erp"
             )
 
             # 3. Sync vers Redis
@@ -613,34 +620,296 @@ class FirebaseCacheHandlers:
             logger.error(f"FIREBASE_CACHE.get_bank_transactions error={e}")
             import traceback
             traceback.print_exc()
-            return {"data": {"to_reconcile": [], "in_process": [], "pending": [], "matched": []}, "error": str(e)}
+            return {"data": {"to_reconcile": [], "in_process": [], "pending": []}, "error": str(e)}
 
-    def _organize_bank_transactions_by_status(self, transactions: List[Dict]) -> Dict[str, List]:
-        """Organize bank transactions by reconciliation status for metrics widget."""
+    async def _organize_bank_transactions_by_status(
+        self, 
+        transactions: List[Dict],
+        user_id: str,
+        company_id: str,
+        mandate_path: str = None
+    ) -> Dict[str, List]:
+        """
+        Organize bank transactions by status using Firebase data.
+        
+        Applies business logic to determine transaction status:
+        1. Start with all transactions in to_reconcile
+        2. Remove transactions in active batches -> in_process
+        3. Remove transactions in pending sheet -> pending
+        
+        Args:
+            transactions: List of transactions from Odoo ERP
+            user_id: Firebase user ID
+            company_id: Company/mandate ID
+            mandate_path: Path to mandate in Firebase
+            
+        Returns:
+            Dict with 3 categories: to_reconcile, in_process, pending
+        """
+        import asyncio
+        
+        # Initialize all transactions in to_reconcile
         organized = {
             "to_reconcile": [],
             "in_process": [],
-            "pending": [],
-            "matched": []
+            "pending": []
         }
-
+        
+        # Build a dict for quick lookup by move_id
+        tx_by_id = {}
         for tx in transactions:
-            # Check reconciliation status
-            reconciled = tx.get("reconciled", False)
-            status = tx.get("status", "").lower()
-            reconciliation_status = tx.get("reconciliation_status", "").lower()
-
-            if reconciled or status in ["matched", "reconciled", "done"]:
-                organized["matched"].append(tx)
-            elif status in ["in_process", "processing"] or reconciliation_status in ["in_process", "processing"]:
-                organized["in_process"].append(tx)
-            elif status in ["pending", "waiting"] or reconciliation_status in ["pending", "waiting"]:
-                organized["pending"].append(tx)
-            else:
-                # Default to to_reconcile
+            move_id = tx.get("move_id")
+            if move_id is not None:
+                tx_by_id[str(move_id)] = tx
                 organized["to_reconcile"].append(tx)
-
+        
+        # Track IDs to remove from to_reconcile
+        in_process_ids = set()
+        pending_ids = set()
+        
+        # Parallel fetch of batches and pending transactions
+        tasks = []
+        
+        # Task 1: Get active batches (in_process transactions)
+        async def fetch_batches():
+            try:
+                from .firebase_providers import FirebaseManagement
+                firebase = FirebaseManagement()
+                notifications_path = f"clients/{user_id}/notifications"
+                
+                batches = await asyncio.to_thread(
+                    firebase.get_banker_batches,
+                    user_id,
+                    notifications_path,
+                    company_id
+                )
+                
+                batch_tx_ids = set()
+                if batches and isinstance(batches, list):
+                    for batch in batches:
+                        batch_transactions = batch.get('transactions', [])
+                        if isinstance(batch_transactions, list):
+                            for tx_item in batch_transactions:
+                                if isinstance(tx_item, dict):
+                                    # Try different possible ID fields
+                                    tx_id = tx_item.get('move_id') or tx_item.get('transaction_id') or tx_item.get('Id')
+                                    if tx_id:
+                                        batch_tx_ids.add(str(tx_id))
+                
+                logger.info(f"[BANK_ORGANIZE] Found {len(batch_tx_ids)} transactions in active batches")
+                return batch_tx_ids
+                
+            except Exception as e:
+                logger.warning(f"[BANK_ORGANIZE] Failed to fetch batches: {e}")
+                return set()
+        
+        # Task 2: Get pending transactions
+        async def fetch_pending():
+            try:
+                if not mandate_path:
+                    logger.debug("[BANK_ORGANIZE] No mandate_path, skipping pending transactions")
+                    return set()
+                    
+                from .firebase_providers import FirebaseManagement
+                firebase = FirebaseManagement()
+                
+                pending_doc = await asyncio.to_thread(
+                    firebase.download_pending_item_docsheet,
+                    mandate_path
+                )
+                
+                pending_tx_ids = set()
+                if pending_doc and isinstance(pending_doc, dict):
+                    items = pending_doc.get('items', {})
+                    if isinstance(items, dict):
+                        for key, item in items.items():
+                            if isinstance(item, dict):
+                                # Try to get ID from item
+                                tx_id = item.get('Id') or item.get('move_id') or item.get('transaction_id')
+                                if tx_id:
+                                    pending_tx_ids.add(str(tx_id))
+                
+                logger.info(f"[BANK_ORGANIZE] Found {len(pending_tx_ids)} transactions in pending")
+                return pending_tx_ids
+                
+            except Exception as e:
+                logger.warning(f"[BANK_ORGANIZE] Failed to fetch pending transactions: {e}")
+                return set()
+        
+        # Execute both tasks in parallel
+        batch_ids, pending_ids = await asyncio.gather(
+            fetch_batches(),
+            fetch_pending(),
+            return_exceptions=False
+        )
+        
+        # Move transactions from to_reconcile to appropriate categories
+        to_remove_from_reconcile = []
+        
+        for tx in organized["to_reconcile"]:
+            move_id = str(tx.get("move_id", ""))
+            
+            if move_id in batch_ids:
+                organized["in_process"].append(tx)
+                to_remove_from_reconcile.append(tx)
+            elif move_id in pending_ids:
+                organized["pending"].append(tx)
+                to_remove_from_reconcile.append(tx)
+        
+        # Remove transactions that were moved to other categories
+        for tx in to_remove_from_reconcile:
+            organized["to_reconcile"].remove(tx)
+        
+        logger.info(
+            f"[BANK_ORGANIZE] Final counts - "
+            f"to_reconcile={len(organized['to_reconcile'])}, "
+            f"in_process={len(organized['in_process'])}, "
+            f"pending={len(organized['pending'])}"
+        )
+        
         return organized
+
+    # ═══════════════════════════════════════════════════════════════
+    # TASKS
+    # ═══════════════════════════════════════════════════════════════
+
+    async def get_tasks(
+        self,
+        user_id: str,
+        company_id: str,
+        mandate_path: str = None
+    ) -> Dict[str, Any]:
+        """
+        Récupère les tâches planifiées depuis {mandate_path}/tasks avec cache.
+
+        RPC: FIREBASE_CACHE.get_tasks
+
+        Uses FirebaseManagement.list_tasks_for_mandate() which queries:
+        - {mandate_path}/tasks
+
+        Args:
+            user_id (str): Firebase UID (injecté auto)
+            company_id (str): Company/Mandate ID
+            mandate_path (str): Full Firestore path to mandate (required)
+
+        Returns:
+            {"data": [...], "source": "cache"|"firebase"}
+        """
+        import asyncio
+
+        try:
+            # 1. Tentative cache
+            cache = get_firebase_cache_manager()
+            cached = await cache.get_cached_data(
+                user_id,
+                company_id,
+                "tasks",
+                "list",
+                ttl_seconds=TTL_TASKS
+            )
+
+            if cached and cached.get("data"):
+                data = cached["data"]
+                count = len(data) if isinstance(data, list) else 0
+                logger.info(
+                    f"FIREBASE_CACHE.get_tasks company_id={company_id} "
+                    f"count={count} source=cache"
+                )
+                return {
+                    "data": cached["data"],
+                    "source": "cache"
+                }
+
+            # 2. Fallback Firebase - requires mandate_path
+            if not mandate_path:
+                logger.warning(
+                    f"FIREBASE_CACHE.get_tasks company_id={company_id} "
+                    f"no_mandate_path"
+                )
+                return {
+                    "data": [],
+                    "source": "none",
+                    "warning": "No mandate_path provided"
+                }
+
+            from .firebase_providers import get_firebase_management
+            firebase_mgmt = get_firebase_management()
+
+            # Fetch tasks from {mandate_path}/tasks
+            raw_tasks = await asyncio.to_thread(
+                firebase_mgmt.list_tasks_for_mandate,
+                mandate_path
+            )
+
+            if not raw_tasks:
+                logger.info(
+                    f"FIREBASE_CACHE.get_tasks company_id={company_id} "
+                    f"no_tasks_found"
+                )
+                # Cache empty result to avoid repeated Firebase calls
+                await cache.set_cached_data(
+                    user_id,
+                    company_id,
+                    "tasks",
+                    "list",
+                    [],
+                    ttl_seconds=TTL_TASKS
+                )
+                return {
+                    "data": [],
+                    "source": "firebase"
+                }
+
+            # Transform tasks to match dashboard format
+            tasks = []
+            for task in raw_tasks:
+                mission = task.get("mission", {})
+                schedule = task.get("schedule", {})
+
+                task_data = {
+                    "id": task.get("task_id", task.get("id", "")),
+                    "title": mission.get("title", ""),
+                    "description": mission.get("description"),
+                    "status": task.get("status", "inactive"),
+                    "priority": task.get("priority", "medium"),
+                    "executionPlan": task.get("execution_plan", "ON_DEMAND"),
+                    "enabled": task.get("enabled", False),
+                    "nextExecution": schedule.get("next_execution_utc", ""),
+                    "frequency": schedule.get("frequency", ""),
+                    "createdAt": task.get("created_at", ""),
+                    "updatedAt": task.get("updated_at", ""),
+                    "category": "accounting",
+                }
+                tasks.append(task_data)
+
+            # Convert timestamps to JSON-serializable format
+            tasks = _convert_timestamps(tasks)
+
+            logger.info(
+                f"FIREBASE_CACHE.get_tasks company_id={company_id} "
+                f"count={len(tasks)} source=firebase"
+            )
+
+            # 3. Sync vers Redis
+            await cache.set_cached_data(
+                user_id,
+                company_id,
+                "tasks",
+                "list",
+                tasks,
+                ttl_seconds=TTL_TASKS
+            )
+
+            return {
+                "data": tasks,
+                "source": "firebase"
+            }
+
+        except Exception as e:
+            logger.error(f"FIREBASE_CACHE.get_tasks error={e}")
+            import traceback
+            traceback.print_exc()
+            return {"data": [], "error": str(e)}
 
     # ═══════════════════════════════════════════════════════════════
     # APPROVAL PENDING LIST

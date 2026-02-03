@@ -1787,12 +1787,13 @@ class CompanySettingsHandlers:
     # COMPANY DELETION
     # ============================================
 
-    async def delete_company(
+    def delete_company(
         self,
         user_id: str,
         company_id: str,
         mandate_path: str,
         confirmation_name: str,
+        progress_callback=None,
     ) -> Dict[str, Any]:
         """
         Delete a company and all its associated data.
@@ -1800,82 +1801,266 @@ class CompanySettingsHandlers:
         RPC: COMPANY_SETTINGS.delete_company
 
         DANGER: This is a destructive operation that cannot be undone.
-        All data including:
-        - Firestore documents (mandate, setup, contexts, jobs, etc.)
-        - Drive files and folders
-        - ChromaDB collections
-        - RTDB nodes
+        Deletes: Firestore documents, Drive folders, ChromaDB collections,
+        RTDB nodes, GCS files, scheduler jobs, ERP secrets, Telegram users.
 
         Args:
             user_id: Firebase UID
             company_id: Company/Mandate ID
             mandate_path: Full Firebase path to mandate
             confirmation_name: Company name typed by user for confirmation
+            progress_callback: Optional async callback(step_name, step_index, total_steps)
 
         Returns:
-            {"success": True} or {"success": False, "error": "..."}
+            {"success": True/False, "message": str, "report": list}
         """
+        import asyncio
+
+        report: List[Dict[str, str]] = []
+        total_steps = 13
+
+        def _report(name: str, status: str, reason: str = ""):
+            report.append({"name": name, "status": status, "reason": reason})
+
+        def _notify(step_name: str, step_index: int):
+            """Fire progress callback if available (non-blocking)."""
+            if progress_callback:
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.ensure_future(progress_callback(step_name, step_index, total_steps))
+                    else:
+                        loop.run_until_complete(progress_callback(step_name, step_index, total_steps))
+                except Exception:
+                    pass  # Progress notification is best-effort
+
         try:
             logger.info(
-                f"COMPANY_SETTINGS.delete_company "
+                f"COMPANY_SETTINGS.delete_company START "
                 f"company_id={company_id} user_id={user_id}"
             )
 
-            # Get company data to verify confirmation
+            # ── Step 1: Validation ──────────────────────────
+            _notify("Validating confirmation", 1)
+
             mandate_data = self._firebase.get_document(mandate_path)
             if not mandate_data:
-                return {
-                    "success": False,
-                    "error": "Company not found"
-                }
+                return {"success": False, "error": "Company not found", "report": report}
 
             company_name = mandate_data.get("legal_name") or mandate_data.get("name", "")
 
-            # Verify confirmation name matches
             if confirmation_name != company_name:
                 return {
                     "success": False,
-                    "error": "Confirmation name does not match company name"
+                    "error": "Confirmation name does not match company name",
+                    "report": report,
                 }
 
-            # TODO: Implement actual deletion when singletons are configured
-            # When services are ready, implement:
-            #
-            # 1. Delete Drive folder (root_folder_id)
-            # drive_service = get_drive_service()
-            # if mandate_data.get("root_folder_id"):
-            #     drive_service.delete_folder(mandate_data["root_folder_id"])
-            #
-            # 2. Delete ChromaDB collection
-            # chroma_client = get_chroma_client()
-            # chroma_client.delete_collection(company_id)
-            #
-            # 3. Delete RTDB nodes
-            # rtdb = self._firebase.get_rtdb_reference()
-            # rtdb.child(f"companies/{company_id}").delete()
-            #
-            # 4. Delete all Firestore subcollections recursively
-            # self._firebase.delete_document_recursive(mandate_path)
-            #
-            # 5. Remove from user's company list
-            # parent_path = mandate_path.rsplit("/mandates/", 1)[0]
-            # Update parent document to remove reference
+            _report("Validation", "success", "Confirmation name verified")
 
-            # PLACEHOLDER: Log warning and return success
-            logger.warning(
-                f"COMPANY_SETTINGS.delete_company PLACEHOLDER - "
-                f"Full deletion not yet implemented. company_id={company_id}"
+            # ── Step 2: Read mandate data ───────────────────
+            _notify("Reading company data", 2)
+
+            drive_space_parent_id = mandate_data.get("drive_space_parent_id", "")
+            contact_space_id = mandate_data.get("contact_space_id", "")
+            client_name = mandate_data.get("client_name", company_name)
+
+            _report("Read Company Data", "success", f"Client: {client_name}")
+
+            # ── Step 3: Verify contact_space_id ─────────────
+            _notify("Verifying identifiers", 3)
+
+            if not contact_space_id:
+                logger.warning(
+                    f"delete_company: contact_space_id missing for {company_id}, "
+                    "RTDB and ChromaDB steps will be skipped"
+                )
+                _report("Verify Identifiers", "skipped", "No contact_space_id found")
+            else:
+                _report("Verify Identifiers", "success", f"contact_space_id={contact_space_id}")
+
+            # ── Step 4: Delete Scheduler Jobs ───────────────
+            _notify("Removing scheduled jobs", 4)
+            try:
+                job_types = ["apbookeeper", "banker", "router"]
+                deleted_jobs = 0
+                for jt in job_types:
+                    # Job IDs use mandate_path with slashes replaced by underscores
+                    job_id = mandate_path.replace("/", "_") + f"_{jt}"
+                    if self._firebase.delete_scheduler_job_completely(job_id):
+                        deleted_jobs += 1
+                _report("Scheduled Jobs", "success", f"Deleted {deleted_jobs}/{len(job_types)} jobs")
+            except Exception as e:
+                logger.warning(f"delete_company: scheduler jobs cleanup failed: {e}")
+                _report("Scheduled Jobs", "failed", str(e))
+
+            # ── Step 5: Delete ERP Secrets ──────────────────
+            _notify("Removing security credentials", 5)
+            try:
+                from app.tools.g_cred import delete_secret
+
+                erp_types = ["gl_accounting_erp", "ap_erp", "ar_erp", "bank_erp"]
+                deleted_secrets = 0
+                for erp_type in erp_types:
+                    erp_data = self._firebase.get_erp_path(mandate_path, erp_type)
+                    if erp_data and erp_data.get("secret_name"):
+                        try:
+                            delete_secret(erp_data["secret_name"])
+                            deleted_secrets += 1
+                        except Exception as se:
+                            logger.warning(f"delete_company: failed to delete secret for {erp_type}: {se}")
+                _report("Security Credentials", "success", f"Cleaned {deleted_secrets} ERP secrets")
+            except Exception as e:
+                logger.warning(f"delete_company: ERP secrets cleanup failed: {e}")
+                _report("Security Credentials", "failed", str(e))
+
+            # ── Step 6: Archive Drive Folder ────────────────
+            _notify("Archiving document management system", 6)
+            try:
+                if drive_space_parent_id:
+                    from app.driveClientService import get_drive_client_service
+
+                    drive_service = get_drive_client_service()
+                    archived = drive_service.Archived_Pinnokio_folder(user_id, drive_space_parent_id)
+                    if archived:
+                        _report("Document Management System", "success", "Drive folder archived")
+                    else:
+                        _report("Document Management System", "failed", "Archive operation returned False")
+                else:
+                    _report("Document Management System", "skipped", "No drive_space_parent_id")
+            except Exception as e:
+                logger.warning(f"delete_company: Drive archive failed: {e}")
+                _report("Document Management System", "failed", str(e))
+
+            # ── Step 7: Delete ChromaDB Collection ──────────
+            _notify("Cleaning vector database", 7)
+            try:
+                if contact_space_id:
+                    from app.chroma_vector_service import get_chroma_vector_service
+
+                    chroma = get_chroma_vector_service()
+                    result = chroma.delete_collection(contact_space_id)
+                    if result.get("success"):
+                        _report("Vector Database", "success", f"Collection '{contact_space_id}' deleted")
+                    else:
+                        _report("Vector Database", "failed", result.get("error", "Unknown error"))
+                else:
+                    _report("Vector Database", "skipped", "No contact_space_id")
+            except Exception as e:
+                logger.warning(f"delete_company: ChromaDB cleanup failed: {e}")
+                _report("Vector Database", "failed", str(e))
+
+            # ── Step 8: Delete Scheduler Documents ──────────
+            _notify("Cleaning scheduled tasks", 8)
+            try:
+                result = self._firebase.delete_scheduler_documents_for_mandate(mandate_path)
+                if result:
+                    _report("Scheduled Tasks", "success", "Scheduler documents cleaned")
+                else:
+                    _report("Scheduled Tasks", "failed", "delete_scheduler_documents_for_mandate returned False")
+            except Exception as e:
+                logger.warning(f"delete_company: scheduler documents cleanup failed: {e}")
+                _report("Scheduled Tasks", "failed", str(e))
+
+            # ── Step 9: Clean Telegram Users ────────────────
+            _notify("Cleaning communication channels", 9)
+            try:
+                result = self._firebase.clean_telegram_users_for_mandate(mandate_path)
+                if result:
+                    _report("Communication Channels", "success", "Telegram users cleaned")
+                else:
+                    _report("Communication Channels", "failed", "clean_telegram_users_for_mandate returned False")
+            except Exception as e:
+                logger.warning(f"delete_company: Telegram cleanup failed: {e}")
+                _report("Communication Channels", "failed", str(e))
+
+            # ── Step 10: Delete PostgreSQL Neon HR Data ────
+            # NOTE: Cette étape est maintenant gérée de manière async dans orchestration.py
+            # pour utiliser correctement le pool de connexions asyncpg et garantir la scalabilité.
+            # Voir handle_delete_company() dans orchestration.py
+
+            # ── Step 11: Delete GCS Storage ─────────────────
+            _notify("Removing file storage", 11)
+            try:
+                from app.storage_client import get_storage_client
+
+                storage_client = get_storage_client()
+                # Two GCS paths: company files and processed outputs
+                paths_to_delete = [
+                    f"companies/{company_id}/",
+                    f"mandates/{mandate_path.replace('/', '_')}/",
+                ]
+                total_deleted = 0
+                for gcs_path in paths_to_delete:
+                    result = storage_client.delete_path(gcs_path, recursive=True)
+                    total_deleted += result.get("deleted_count", 0)
+                _report("File Storage", "success", f"Deleted {total_deleted} files from GCS")
+            except Exception as e:
+                logger.warning(f"delete_company: GCS cleanup failed: {e}")
+                _report("File Storage", "failed", str(e))
+
+            # ── Step 12: Delete Firestore (CRITICAL) ────────
+            _notify("Removing company database", 12)
+            try:
+                result = self._firebase.delete_document_recursive(mandate_path)
+                if result:
+                    _report("Company Database", "success", "Firestore documents deleted recursively")
+                else:
+                    _report("Company Database", "failed", "delete_document_recursive returned False")
+            except Exception as e:
+                logger.error(f"delete_company: CRITICAL - Firestore deletion failed: {e}")
+                _report("Company Database", "failed", str(e))
+                # Firestore deletion failure is critical
+                return {
+                    "success": False,
+                    "message": f"Critical failure: Firestore deletion failed for '{company_name}'",
+                    "report": report,
+                }
+
+            # ── Step 13: Delete RTDB Space ──────────────────
+            _notify("Cleaning real-time services", 13)
+            try:
+                if contact_space_id:
+                    from app.firebase_providers import get_firebase_realtime
+
+                    rtdb = get_firebase_realtime()
+                    result = rtdb.delete_space(contact_space_id)
+                    if result:
+                        _report("Real-time Services", "success", f"RTDB space '{contact_space_id}' deleted")
+                    else:
+                        _report("Real-time Services", "failed", "delete_space returned False")
+                else:
+                    _report("Real-time Services", "skipped", "No contact_space_id")
+            except Exception as e:
+                logger.warning(f"delete_company: RTDB cleanup failed: {e}")
+                _report("Real-time Services", "failed", str(e))
+
+            # ── Final Result ────────────────────────────────
+            failed_steps = [r for r in report if r["status"] == "failed"]
+            has_critical_failure = any(
+                r["name"] == "Company Database" and r["status"] == "failed" for r in report
+            )
+
+            logger.info(
+                f"COMPANY_SETTINGS.delete_company COMPLETE "
+                f"company_id={company_id} "
+                f"total={len(report)} failed={len(failed_steps)}"
             )
 
             return {
-                "success": True,
-                "message": f"[PLACEHOLDER] Company '{company_name}' deletion queued. "
-                           f"Full deletion pending service singleton configuration.",
+                "success": not has_critical_failure,
+                "message": (
+                    f"Company '{company_name}' successfully deleted"
+                    if not has_critical_failure
+                    else f"Company '{company_name}' deletion completed with errors"
+                ),
+                "report": report,
             }
 
         except Exception as e:
             logger.error(f"COMPANY_SETTINGS.delete_company error: {e}")
             return {
                 "success": False,
-                "error": str(e)
+                "error": str(e),
+                "report": report,
             }

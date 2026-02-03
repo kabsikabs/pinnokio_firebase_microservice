@@ -163,26 +163,20 @@ class ListenersManager:
         self.logger.info("user_attach_start uid=%s", uid)
         unsubs: List[Callable[[], None]] = []
         try:
-            self.logger.info("user_attach_firebase_query uid=%s", uid)
-            q = (
-                self.db.collection("clients").document(uid)
-                .collection("notifications")
-                .where(filter=FieldFilter("read", "==", False))
-            )
-            self.logger.info("user_attach_firebase_listener uid=%s", uid)
-            unsub_notif = q.on_snapshot(lambda docs, changes, rt: self._on_notifications(uid, docs, changes, rt))  # type: ignore[arg-type]
-            unsubs.append(unsub_notif)
-            self.logger.info("user_attach_notification_listener_attached uid=%s", uid)
-
+            # ❌ LISTENERS FIRESTORE/RTDB DÉSACTIVÉS - Migration vers PubSub Redis
+            # Les notifications et messages sont maintenant publiés directement sur Redis PubSub
+            # par les jobbeurs après écriture dans Firebase/RTDB
+            # Le subscription_manager écoute les canaux Redis PubSub au lieu des listeners Firebase
+            
+            self.logger.info("user_attach_skip_firestore_listeners uid=%s reason=migrated_to_redis_pubsub", uid)
+            
+            # Charger les données initiales une fois (pour compatibilité)
+            # Le subscription_manager s'occupe déjà de cela dans la Phase 4 de l'orchestration
+            # On garde juste la publication initiale pour les anciens clients
             self.logger.info("user_attach_publish_sync_notifications uid=%s", uid)
             self._publish_notifications_sync(uid)
-
-            # Messages directs (Firebase Realtime Database)
-            self.logger.info("user_attach_rtdb_messages uid=%s", uid)
-            unsub_msg = self._start_direct_messages_listener(uid)
-            if unsub_msg:
-                unsubs.append(unsub_msg)
-                self.logger.info("user_attach_message_listener_attached uid=%s", uid)
+            
+            self.logger.info("user_attach_publish_sync_messages uid=%s", uid)
             self._publish_messages_sync(uid)
 
             # ❌ WORKFLOW LISTENER RETIRÉ : Désormais démarré à la demande par job_id

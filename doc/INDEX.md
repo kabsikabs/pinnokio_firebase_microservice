@@ -1,12 +1,4 @@
 # 📚 Index de la Documentation - Microservice Firebase
- 
-Ce fichier est un **point d’entrée stable**.
- 
-➡️ L’index principal a été déplacé ici :
- 
-- `doc/architecture/INDEX.md`
- 
-# 📚 Index de la Documentation - Microservice Firebase
 
 ## 🎯 Vue d'ensemble
 
@@ -23,10 +15,17 @@ Ce document sert de guide pour naviguer dans la documentation du microservice Fi
 **Fichiers :**
 - `ARCHITECTURE_AGENTIQUE_COMPLETE.md` - Architecture complète du système agentique Pinnokio (structure multi-niveaux, agents, modes d'exécution)
 - `ARCHITECTURE_INITIALIZE_SESSION_MULTI_USER.md` - Architecture d'initialisation des sessions multi-utilisateurs
-- `ARCHITECTURE_OUTILS_AGENTS.md` - Architecture des outils disponibles pour les agents (SPT/LPT) + pattern d’ajout d’outils (incluant `GET_TASK_MANAGER_INDEX` / `GET_TASK_MANAGER_DETAILS`)
+- `ARCHITECTURE_OUTILS_AGENTS.md` - Architecture des outils disponibles pour les agents (SPT/LPT) + pattern d'ajout d'outils
 - `ARCHITECTURE_REDIS_JOBS_METRICS.md` - Architecture Redis pour les jobs et métriques
+- `CARTographie_FLUX_AUTH.md` - Cartographie complète du flux d'authentification
+- `FLUX_CACHE_BUSINESS_IMPLEMENTATION.md` - Documentation complète des flux cache business logic
 - `LLM_MICROSERVICE_ARCHITECTURE.md` - Architecture du microservice LLM (communication, isolation, scalabilité)
+- `MAPPING_CHARGEMENT_DONNEES.md` - Mapping du chargement des données
+- `PATTERN_CACHE_BUSINESS_LOGIC.md` - Pattern Cache-First avec logique métier unifiée
+- `REDIS_SCALABILITY_MIGRATION.md` - Migration LLMManager vers architecture scalable Redis
 - `RESUME_INITIALIZE_SESSION_FR.md` - Résumé de l'initialisation des sessions (version française)
+- `SCHEMA_FLUX_CACHE_COMPLET.md` - Schéma complet du flux Auth → Cache → Sources
+- `WEBSOCKET_AUTH_IMPLEMENTATION.md` - Implémentation du handler WebSocket d'authentification
 
 **Quand consulter :**
 - Comprendre l'architecture globale du système
@@ -58,11 +57,12 @@ Ce document sert de guide pour naviguer dans la documentation du microservice Fi
 
 **Fichiers :**
 - `DOCUMENTATION_VERIFICATION_SOLDE_LPT.md` - Documentation sur la vérification des soldes LPT
+- `instructions.md` - Instructions diverses pour les intégrations
 - `INTERMEDIATION_MODE_IMPLEMENTATION.md` - Implémentation du mode d'intermédiation
 - `LPT_CALLBACK_SYSTEM.md` - Système de callbacks pour les Long Process Tools
 - `LPT_PAYLOAD_FORMAT.md` - Format des payloads LPT
+- `RAPPORT_INTEGRATION_HR.md` - Rapport d'accomplissement - Intégration Module HR
 - `REFLEX_INTEGRATION.md` - Architecture de communication entre Reflex et le microservice
-- `REFLEX_LLM_INTEGRATION.md` - Intégration LLM avec Reflex (version initiale)
 - `REFLEX_LLM_INTEGRATION_FINAL.md` - Intégration LLM avec Reflex (version finale)
 - `REFLEX_MODIFICATIONS_EXAMPLES.md` - Exemples de modifications pour Reflex
 - `REFLEX_WEBSOCKET_STREAMING.md` - Streaming WebSocket avec Reflex
@@ -103,6 +103,9 @@ Ce document sert de guide pour naviguer dans la documentation du microservice Fi
 **Fichiers :**
 - `CHANGELOG_SCALABILITE_REDIS.md` - Changelog des améliorations de scalabilité Redis
 - `Chroma_doc.md` - Documentation sur Chroma (base de données vectorielle)
+- `firestore_indexes_optimization.md` - Optimisation des index Firestore pour `task_manager`
+- `HR_REDIS_CACHE_BACKEND.md` - Documentation HR Redis Cache - Backend
+- `HR_REDIS_CACHE_IMPLEMENTATION_SUMMARY.md` - Résumé d'implémentation du cache Redis HR
 - `infrastructure_docu.md` - Documentation générale de l'infrastructure
 - `REDIS_ARCHITECTURE_COHERENTE_SCALABILITE.md` - Architecture Redis cohérente et scalable
 
@@ -160,19 +163,32 @@ Ce document sert de guide pour naviguer dans la documentation du microservice Fi
 
 ---
 
-### 📦 **other/** - Autres documents
+### 💰 **billing/** - Système de facturation
 
-**Contenu :** Documents divers, résumés, et fichiers temporaires.
+**Contenu :** Documentation sur le système de facturation et de pricing.
 
 **Fichiers :**
-- `instructions.md` - Instructions diverses
-- `PHASE1_SUMMARY.md` - Résumé de la phase 1 du projet
-- `recent_logs.json` - Logs récents (fichier temporaire)
+- `billing_system.md` - Règles et architecture du système de facturation
 
 **Quand consulter :**
-- Documents de référence générale
-- Résumés de phases de développement
-- Fichiers temporaires de debug
+- Comprendre le système de facturation
+- Configurer le pricing
+- Déboguer des problèmes de facturation
+
+---
+
+### 🔧 **operations/** - Opérations et monitoring
+
+**Contenu :** Documentation sur les opérations, le monitoring, et les outils d'extraction de logs.
+
+**Fichiers :**
+- `cloudwatch_logs_extractor.md` - Extracteur de logs CloudWatch
+- `PHASE1_SUMMARY.md` - Résumé de la phase 1 du projet
+
+**Quand consulter :**
+- Extraire des logs depuis CloudWatch
+- Comprendre les phases de développement
+- Effectuer des opérations de maintenance
 
 ---
 
@@ -190,6 +206,7 @@ Ce document sert de guide pour naviguer dans la documentation du microservice Fi
 | Déboguer un problème | `guides/` | `DIAGNOSTIC_HEALTH_CHECK.md` |
 | Comprendre les listeners | `listeners/` | `REGISTRY_LISTENERS.md` |
 | Onboarder un développeur | `onboarding/` | `Onboarding_agent_structure.md` |
+| Extraire des logs | `operations/` | `cloudwatch_logs_extractor.md` |
 
 ### Par composant
 
@@ -201,8 +218,10 @@ Ce document sert de guide pour naviguer dans la documentation du microservice Fi
 | **Workflows** | `workflow/` |
 | **Listeners** | `listeners/`, `workflow/WORKFLOW_LISTENER_*.md` |
 | **LPT/SPT** | `integration/LPT_*.md`, `architecture/ARCHITECTURE_OUTILS_*.md` |
-| **WebSocket** | `integration/REFLEX_WEBSOCKET_*.md`, `integration/WEBSOCKET_FIXES.md` |
+| **WebSocket** | `integration/REFLEX_WEBSOCKET_*.md`, `integration/WEBSOCKET_FIXES.md`, `architecture/WEBSOCKET_AUTH_IMPLEMENTATION.md` |
 | **Firebase RTDB** | `integration/REFLEX_*.md`, `architecture/LLM_MICROSERVICE_ARCHITECTURE.md` |
+| **Cache** | `architecture/FLUX_CACHE_*.md`, `architecture/PATTERN_CACHE_*.md`, `architecture/SCHEMA_FLUX_CACHE_*.md` |
+| **Auth** | `architecture/CARTographie_FLUX_AUTH.md`, `architecture/WEBSOCKET_AUTH_IMPLEMENTATION.md` |
 
 ---
 
@@ -219,6 +238,9 @@ Les fichiers suivent une convention de nommage pour faciliter l'identification :
 - **REDIS_*** : Documentation sur Redis
 - **GUIDE_*** : Guides pratiques
 - **DIAGNOSTIC_*** : Documentation de diagnostic
+- **FLUX_*** : Documentation sur les flux de données
+- **PATTERN_*** : Patterns architecturaux
+- **SCHEMA_*** : Schémas et diagrammes
 
 ---
 
@@ -238,8 +260,4 @@ Pour toute question sur l'organisation de la documentation ou pour suggérer des
 
 ---
 
-*Dernière mise à jour : Décembre 2025*
-
-
-
-
+*Dernière mise à jour : Janvier 2026*

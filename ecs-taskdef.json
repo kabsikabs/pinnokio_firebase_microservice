@@ -38,7 +38,9 @@
         {"name": "STRIPE_CANCEL_URL", "value": "https://www.pinnokioagent.com/payment-canceled/"},
         {"name": "PINNOKIO_ENVIRONMENT", "value": "PROD"},
         {"name": "PINNOKIO_AWS_URL", "value": "http://klk-load-balancer-http-https-435479360.us-east-1.elb.amazonaws.com"},
-        {"name": "PINNOKIO_SOURCE", "value": "aws"}
+        {"name": "PINNOKIO_SOURCE", "value": "aws"},
+        {"name": "GOOGLE_AUTH_REDIRECT_LOCAL", "value": "https://app.pinnokioagent.com/google_auth_callback/"},
+        {"name": "GOOGLE_AUTH2_KEY", "value": "pinnokio_auth2"}
       ],
       "logConfiguration": {
         "logDriver": "awslogs",

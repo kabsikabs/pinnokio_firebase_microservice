@@ -31,6 +31,8 @@ from datetime import datetime
 
 from .cache.unified_cache_manager import get_drive_cache_manager
 from .llm_service.redis_namespaces import RedisTTL
+from .firebase_providers import get_firebase_management
+from .status_normalization import StatusNormalizer
 
 logger = logging.getLogger("drive.cache_handlers")
 
@@ -281,9 +283,9 @@ class DriveCacheHandlers:
                     "error_message": data.get("erreur", "Drive API error")
                 }
 
-            # Cas 3: Succès - organiser les documents par statut
+            # Cas 3: Succès - organiser les documents par statut avec check Firebase
             if isinstance(data, list):
-                organized_docs = self._organize_documents_by_status(data)
+                organized_docs = await self._organize_documents_by_status_with_firebase(user_id, data)
                 logger.info(
                     f"DRIVE_CACHE._fetch_from_drive user_id={user_id} "
                     f"success count={len(data)}"
@@ -322,35 +324,142 @@ class DriveCacheHandlers:
                 "error_message": str(e)
             }
 
-    def _organize_documents_by_status(self, drive_files: List[Dict]) -> Dict[str, List]:
+    async def _organize_documents_by_status_with_firebase(
+        self,
+        user_id: str,
+        drive_files: List[Dict]
+    ) -> Dict[str, List]:
         """
-        Organise les documents Drive par statut.
+        Organise les documents Drive par statut en vérifiant les notifications Firebase.
+
+        Logique de tri (conforme à Router.py):
+        1. Pour chaque fichier Drive, vérifier check_job_status(user_id, file_id)
+        2. Si notification existe avec function_name='Router':
+           - status='running'|'in queue'|'stopping' → in_process (En cours)
+           - status='pending' → pending (En attente)
+           - status='error'|'completed'|'success' ou autre → to_process (À traiter)
+        3. Pas de notification → to_process (À traiter)
 
         Args:
+            user_id: Firebase user ID
             drive_files: Liste brute de fichiers depuis Drive API
 
         Returns:
             {
                 "to_process": [...],
                 "in_process": [...],
-                "processed": [...]
+                "pending": [...]
             }
         """
         organized = {
             "to_process": [],
             "in_process": [],
-            "processed": []
+            "pending": []
+        }
+
+        firebase_mgmt = get_firebase_management()
+
+        for doc in drive_files:
+            file_id = doc.get('id', '')
+            file_name = doc.get('name', '')
+
+            # Créer l'objet document enrichi
+            created_time = doc.get('createdTime', '')
+            try:
+                if created_time:
+                    formatted_time = datetime.strptime(
+                        created_time, "%Y-%m-%dT%H:%M:%S.%fZ"
+                    ).strftime("%d/%m/%Y %H:%M")
+                else:
+                    formatted_time = datetime.now().strftime("%d/%m/%Y %H:%M")
+            except Exception:
+                formatted_time = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+            doc_item = {
+                "id": file_id,
+                "job_id": file_id,  # job_id = file_id pour les documents Drive
+                "file_name": file_name,
+                "name": file_name,
+                "created_time": formatted_time,
+                "timestamp": formatted_time,
+                "status": "to_process",  # Statut par défaut
+                "source": "drive",
+                "drive_file_id": file_id,
+                "uri_drive_link": doc.get('webViewLink', ''),
+                "web_view_link": doc.get('webViewLink', ''),
+            }
+
+            # Vérifier le status dans Firebase notifications
+            try:
+                notification = await asyncio.to_thread(
+                    firebase_mgmt.check_job_status,
+                    user_id,
+                    None,  # job_id
+                    file_id  # file_id
+                )
+
+                # Si notification existe et correspond à la fonction Router
+                if notification and notification.get('function_name') == 'Router':
+                    firebase_status = notification.get('status', '')
+                    function_name = notification.get('function_name', '')
+
+                    # Utiliser le normalizer centralisé
+                    normalized_status = StatusNormalizer.normalize_for_function(
+                        function_name,
+                        firebase_status,
+                        default="to_process"
+                    )
+                    doc_item['status'] = normalized_status
+
+                    # Catégoriser selon le statut normalisé
+                    category = StatusNormalizer.get_category(normalized_status)
+                    if category == "in_process":
+                        organized["in_process"].append(doc_item)
+                    elif category == "pending":
+                        organized["pending"].append(doc_item)
+                    else:
+                        # to_process ou processed → dans to_process pour Router
+                        organized["to_process"].append(doc_item)
+                else:
+                    # Pas de notification Router → À traiter
+                    organized["to_process"].append(doc_item)
+
+            except Exception as e:
+                logger.warning(f"Error checking job status for {file_id}: {e}")
+                # En cas d'erreur, mettre dans À traiter
+                organized["to_process"].append(doc_item)
+
+            logger.debug(f"Document {file_name} (ID: {file_id}): status={doc_item['status']}")
+
+        logger.info(
+            f"DRIVE_CACHE._organize_documents_with_firebase "
+            f"to_process={len(organized['to_process'])} "
+            f"in_process={len(organized['in_process'])} "
+            f"pending={len(organized['pending'])}"
+        )
+
+        return organized
+
+    def _organize_documents_by_status(self, drive_files: List[Dict]) -> Dict[str, List]:
+        """
+        DEPRECATED: Ancienne méthode sans vérification Firebase.
+        Utilisez _organize_documents_by_status_with_firebase à la place.
+
+        Organise les documents Drive par statut (sans vérification Firebase).
+        """
+        organized = {
+            "to_process": [],
+            "in_process": [],
+            "pending": []
         }
 
         for doc in drive_files:
-            # Déterminer le statut depuis les métadonnées
-            # (logique à adapter selon votre convention de nommage Drive)
             status = doc.get("status", "to_process")
 
-            if status == "in_process":
+            if status in ("in_process", "on_process", "in_queue", "stopping", "running"):
                 organized["in_process"].append(doc)
-            elif status == "processed":
-                organized["processed"].append(doc)
+            elif status == "pending":
+                organized["pending"].append(doc)
             else:
                 organized["to_process"].append(doc)
 
@@ -358,7 +467,7 @@ class DriveCacheHandlers:
             f"DRIVE_CACHE._organize_documents "
             f"to_process={len(organized['to_process'])} "
             f"in_process={len(organized['in_process'])} "
-            f"processed={len(organized['processed'])}"
+            f"pending={len(organized['pending'])}"
         )
 
         return organized

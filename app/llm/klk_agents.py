@@ -303,6 +303,15 @@ class ModelPricing:
             "output_price": 0.08,
             "sales_multiplier": 8.5
         },
+        # Moonshot AI (Kimi K2.5)
+        "kimi-k2.5": {
+            "mode": "text",
+            "input_price": 0.50,              # Prix par million de tokens en entrée
+            "output_price": 2.80,             # Prix par million de tokens en sortie
+            "thought_price": 2.80,            # Prix du raisonnement (pensées)
+            "cached_input_price": 0.25,       # Prix réduit pour entrée en cache
+            "sales_multiplier": 16            # Multiplicateur pour prix de vente
+        },
     }
 
 
@@ -418,7 +427,8 @@ class ModelProvider(Enum):
     LLAMA = "llama"
     DEEP_SEEK = "deep_seek"
     PERPLEXITY = "perplexity"
-    GROQ = "groq"  
+    GROQ = "groq"
+    MOONSHOT_AI = "moonshot_ai"  
 class BaseAIAgent:
     """
     Agent de base pour l'IA avec support de différents systèmes de gestion documentaire (DMS).
@@ -501,6 +511,10 @@ class BaseAIAgent:
                 ModelSize.REASONING_SMALL: ["qwen-qwq-32b"],
                 ModelSize.REASONING_MEDIUM: ["moonshotai/kimi-k2-instruct-0905", "qwen/qwen3-32b"],
                 ModelSize.REASONING_LARGE: ["deepseek-r1-distill-llama-70b"],
+            },
+            ModelProvider.MOONSHOT_AI: {
+                ModelSize.MEDIUM: ["kimi-k2.5"],
+                ModelSize.REASONING_MEDIUM: ["kimi-k2.5"],  # Mode thinking activé
             },
         }
         self.current_model = None
@@ -862,7 +876,26 @@ class BaseAIAgent:
                         }
                     ]
                 }]
-            
+
+            elif provider == ModelProvider.MOONSHOT_AI:
+                # Moonshot AI utilise le même format qu'OpenAI (compatible OpenAI API)
+                return [{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": text
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{media_type};base64,{base64.b64encode(img_data).decode('utf-8')}",
+                                "detail": "high"
+                            }
+                        }
+                    ]
+                }]
+
             else:
                 raise ValueError(f"Provider {provider} non supporté pour le traitement d'images")
 
@@ -1314,7 +1347,46 @@ class BaseAIAgent:
                             input_schema["required"]
                 
                 transformed_tools.append(transformed_tool)
-            
+
+            return transformed_tools
+
+        elif provider == ModelProvider.MOONSHOT_AI:
+            # Moonshot AI utilise le format OpenAI standard
+            # Si les outils sont déjà au bon format, on les retourne tels quels
+            if tools and isinstance(tools[0], dict) and "type" in tools[0] and tools[0]["type"] == "function":
+                return tools  # Déjà au bon format
+
+            # Sinon, transformer depuis le format Anthropic
+            transformed_tools = []
+            for tool in tools:
+                transformed_tool = {
+                    "type": "function",
+                    "function": {
+                        "name": tool.get("name"),
+                        "description": tool.get("description"),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                            "additionalProperties": False
+                        }
+                    }
+                }
+
+                # Récupération des propriétés depuis input_schema
+                if "input_schema" in tool:
+                    input_schema = tool["input_schema"]
+                    if "properties" in input_schema:
+                        transformed_tool["function"]["parameters"]["properties"] = \
+                            input_schema["properties"]
+
+                    # Gérer les champs requis
+                    if "required" in input_schema:
+                        transformed_tool["function"]["parameters"]["required"] = \
+                            input_schema["required"]
+
+                transformed_tools.append(transformed_tool)
+
             return transformed_tools
 
         else:
@@ -1450,7 +1522,31 @@ class BaseAIAgent:
             # Utiliser le mapping ou retourner "auto" par défaut
             return groq_mappings.get(tool_choice_type, "auto")
 
-        
+        elif provider == ModelProvider.MOONSHOT_AI:
+            # Moonshot AI utilise le format OpenAI standard
+            if not isinstance(tool_choice, dict):
+                return "auto"
+
+            tool_choice_type = tool_choice.get("type", "auto")
+
+            # Mappings pour Moonshot AI (compatible OpenAI)
+            moonshot_mappings = {
+                "auto": "auto",
+                "any": "required",
+                "none": "none"
+            }
+
+            # Cas spécial pour les outils nommés
+            if tool_choice_type == "tool" and "name" in tool_choice:
+                return {
+                    "type": "function",
+                    "function": {
+                        "name": tool_choice["name"]
+                    }
+                }
+
+            # Utiliser le mapping ou retourner "auto" par défaut
+            return moonshot_mappings.get(tool_choice_type, "auto")
 
         else:
             raise ValueError(f"Provider non supporté: {provider}")
@@ -1667,8 +1763,15 @@ class BaseAIAgent:
             # Formatage de la réponse Groq pour correspondre au format unifié
             return data
 
-        
-                
+        elif provider == ModelProvider.MOONSHOT_AI:
+            response = provider_instance.process_text(
+                content=content,
+                model_name=model,
+                stream=stream,
+                max_tokens=max_tokens,
+                thinking=False
+            )
+            return response
 
         else:
             raise ValueError(f"Provider {provider} not implemented")
@@ -1840,10 +1943,20 @@ class BaseAIAgent:
         elif provider == ModelProvider.DEEP_SEEK:
             # TODO: Implémenter le streaming DeepSeek
             yield {"content": "Streaming DeepSeek non implémenté", "is_final": True}
-            
+
+        elif provider == ModelProvider.MOONSHOT_AI:
+            # Utiliser la méthode streaming de Moonshot AI
+            async for chunk in provider_instance.moonshot_send_message_streaming(
+                content=content,
+                model_name=model,
+                max_tokens=max_tokens,
+                thinking=False
+            ):
+                yield chunk
+
         else:
             raise ValueError(f"Streaming not implemented for provider {provider}")
-    
+
     async def process_tool_use_streaming(
         self,
         content: str,
@@ -1950,7 +2063,19 @@ class BaseAIAgent:
                 "type": "error",
                 "error": "Streaming avec outils non implémenté pour DeepSeek"
             }
-        
+
+        elif provider == ModelProvider.MOONSHOT_AI:
+            # Déléguer à la méthode du provider Moonshot AI
+            async for event in provider_instance.moonshot_send_message_with_tools_streaming(
+                content=content,
+                tools=transformed_tools,  # Outils transformés (format OpenAI)
+                tool_mapping=tool_mapping,
+                model_name=model,
+                max_tokens=max_tokens,
+                thinking=True
+            ):
+                yield event
+
         else:
             yield {
                 "type": "error",
@@ -2285,10 +2410,41 @@ class BaseAIAgent:
                 return response['text_output']
             return response
 
+        elif provider == ModelProvider.MOONSHOT_AI:
+            # Moonshot AI (Kimi K2.5) supporte la vision
+            # content est déjà transformé par _transforme_image_for_provider au format OpenAI
+            response = provider_instance.moonshot_send_message(
+                content=content,
+                model_name=model,
+                max_tokens=max_tokens
+            )
+            print(f"impression de response vision pour Moonshot AI: {response}")
+
+            # Si un résumé final est demandé
+            if final_resume and response:
+                response_text = response if isinstance(response, str) else str(response)
+
+                resume_prompt = f"""Un document a été traité avec plusieurs pages.
+                Voici les réponses par page: {response_text}
+
+                Question initiale: {text}
+
+                Merci de faire une synthèse des réponses."""
+
+                final_summary = provider_instance.process_text(
+                    content=resume_prompt,
+                    model_name=model,
+                    max_tokens=max_tokens,
+                    thinking=False
+                )
+                print(f"impression du résumé final pour Moonshot AI: {final_summary}")
+                return final_summary
+
+            return response
 
         else:
             raise ValueError(f"Provider {provider} not implemented")
-    
+
     def process_tool_use(self,
                     content: str,
                     tools: List[Dict[str, Any]],
@@ -2408,7 +2564,20 @@ class BaseAIAgent:
                 max_tokens=max_tokens
             )
             return response
-        
+
+        elif provider == ModelProvider.MOONSHOT_AI:
+            response = provider_instance.process_tool_use(
+                content=content,
+                tools=transformed_tools,  # Utilise les outils transformés (format OpenAI)
+                model_name=model,
+                tool_mapping=transformed_mapping,
+                tool_choice=transformed_tool_choice,
+                thinking=thinking,
+                max_tokens=max_tokens,
+                raw_output=raw_output
+            )
+            return response
+
         else:
             raise ValueError(f"Provider {provider} not implemented")
 
@@ -2475,6 +2644,11 @@ class BaseAIAgent:
         elif model in self.provider_models[ModelProvider.GROQ][ModelSize.REASONING_LARGE]:
             return self.provider_models[ModelProvider.GROQ][ModelSize.REASONING_LARGE][0]
 
+        # Moonshot AI models
+        elif model in self.provider_models[ModelProvider.MOONSHOT_AI][ModelSize.MEDIUM]:
+            return self.provider_models[ModelProvider.MOONSHOT_AI][ModelSize.MEDIUM][0]
+        elif model in self.provider_models[ModelProvider.MOONSHOT_AI][ModelSize.REASONING_MEDIUM]:
+            return self.provider_models[ModelProvider.MOONSHOT_AI][ModelSize.REASONING_MEDIUM][0]
 
         raise ValueError(f"Unknown model: {model}")
 
@@ -8762,14 +8936,949 @@ class NEW_GROQ_AGENT:
         
         return output
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Constante pour les rôles de system prompt
+# ═══════════════════════════════════════════════════════════════════════════════
+SYSTEM_PROMPT_ROLES = ['system', 'developer']
+
+
+class NEW_MOONSHOT_AIAgent:
+    """
+    Agent pour l'intégration de Moonshot AI (Kimi K2.5), compatible SDK OpenAI.
+    Supporte: texte, vision, tool calling, et mode thinking/reasoning.
+    """
+
+    def __init__(self, space_manager=None, collection_name=None, job_id=None):
+        """
+        Initialise l'agent Moonshot AI avec la clé API nécessaire.
+
+        Args:
+            space_manager: Gestionnaire d'espace (optionnel).
+            collection_name: Nom de la collection (optionnel).
+            job_id: ID du job (optionnel).
+        """
+        self.chat_history = []
+        self.space_manager = space_manager
+        self.collection_name = collection_name
+        self.job_id = job_id
+        self.api_key = get_secret('moonshot_ai')
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url="https://api.moonshot.ai/v1",
+            timeout=120.0  # Timeout de 2 minutes
+        )
+        self.client_stream = AsyncOpenAI(
+            api_key=self.api_key,
+            base_url="https://api.moonshot.ai/v1",
+            timeout=120.0
+        )
+        self.token_usage = {}
+        self.current_model = None
+        self.models = ['kimi-k2.5']
+
+    def update_token_usage(self, raw_response):
+        """
+        Met à jour les compteurs de tokens pour Moonshot AI.
+        Format similaire à OpenAI.
+        """
+        if not (hasattr(raw_response, "model") and hasattr(raw_response, "usage")):
+            return
+
+        model = raw_response.model
+        usage = raw_response.usage
+
+        self.token_usage.setdefault(model, {
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_cached_tokens": 0,
+            "total_thought_tokens": 0,
+        })
+
+        prompt_tokens_raw = getattr(usage, "prompt_tokens", 0)
+        completion_tokens = getattr(usage, "completion_tokens", 0)
+
+        # Détails facultatifs
+        cached_tokens = 0
+        if hasattr(usage, "prompt_tokens_details"):
+            cached_tokens = getattr(usage.prompt_tokens_details, "cached_tokens", 0)
+
+        # Tokens de raisonnement (reasoning_tokens dans completion_tokens_details)
+        thought_tokens = 0
+        if hasattr(usage, "completion_tokens_details"):
+            thought_tokens = getattr(usage.completion_tokens_details, "reasoning_tokens", 0)
+
+        effective_prompt_tokens = max(prompt_tokens_raw - cached_tokens, 0)
+
+        self.token_usage[model]["total_input_tokens"] += effective_prompt_tokens
+        self.token_usage[model]["total_output_tokens"] += completion_tokens
+        self.token_usage[model]["total_cached_tokens"] += cached_tokens
+        self.token_usage[model]["total_thought_tokens"] += thought_tokens
+
+        self.current_model = model
+
+    def get_total_tokens(self):
+        """
+        Retourne l'utilisation totale des tokens pour chaque modèle.
+        """
+        token_stats = {}
+        for model, usage in self.token_usage.items():
+            stats = {
+                'total_input_tokens': usage['total_input_tokens'],
+                'total_output_tokens': usage['total_output_tokens'],
+                'total_cached_tokens': usage.get('total_cached_tokens', 0),
+                'total_thought_tokens': usage.get('total_thought_tokens', 0),
+                'model': model
+            }
+            token_stats[model] = stats
+        return token_stats
+
+    def flush_chat_history(self):
+        """Efface l'historique des messages user/assistant, conserve le system_prompt."""
+        system_messages = [msg for msg in self.chat_history if msg.get('role') in SYSTEM_PROMPT_ROLES]
+        self.chat_history = system_messages
+
+    def flush_all_chat_history(self):
+        """Efface TOUT l'historique, y compris le system_prompt."""
+        self.chat_history = []
+
+    def reset_token_counters(self):
+        """Réinitialise tous les compteurs de tokens."""
+        self.token_usage = {}
+
+    def add_user_message(self, content):
+        """Ajoute un message utilisateur à l'historique."""
+        if isinstance(content, dict):
+            content = json.dumps(content)
+        self.chat_history.append({'role': 'user', 'content': content})
+
+    def add_ai_message(self, content):
+        """Ajoute un message assistant à l'historique."""
+        if isinstance(content, dict):
+            content = json.dumps(content)
+        self.chat_history.append({'role': 'assistant', 'content': content})
+
+    def update_system_prompt(self, content):
+        """Met à jour le system prompt."""
+        if isinstance(content, dict):
+            content = json.dumps(content)
+        # Supprimer l'ancien system prompt s'il existe
+        self.chat_history = [msg for msg in self.chat_history if msg.get('role') != 'system']
+        # Ajouter le nouveau au début
+        self.chat_history.insert(0, {'role': 'system', 'content': content})
+
+    def process_text(self, content, model_index=None, model_name=None,
+                     stream=False, max_tokens=4096, thinking=True,
+                     thinking_budget=8192, **kwargs):
+        """
+        Génère du texte avec Moonshot AI (Kimi K2.5).
+
+        Args:
+            content: Le contenu du message
+            model_index: Index du modèle (optionnel)
+            model_name: Nom du modèle (optionnel)
+            stream: Activer le streaming
+            max_tokens: Nombre maximum de tokens de sortie
+            thinking: Activer le mode thinking (raisonnement)
+            thinking_budget: Budget de tokens pour le raisonnement
+
+        Returns:
+            str ou dict: La réponse générée
+        """
+        if not model_name and model_index is not None:
+            chosen_model = self.models[model_index]
+        else:
+            chosen_model = model_name or self.models[0]
+
+        self.add_user_message(content)
+
+        api_params = {
+            "model": chosen_model,
+            "messages": self.chat_history,
+            "max_tokens": max_tokens,
+            "stream": stream,
+        }
+
+        # Configuration selon le mode thinking
+        if thinking:
+            api_params["temperature"] = 1.0
+            api_params["top_p"] = 0.95
+        else:
+            api_params["temperature"] = 0.6
+            api_params["extra_body"] = {'thinking': {'type': 'disabled'}}
+
+        try:
+            if stream:
+                def stream_generator():
+                    response_stream = self.client.chat.completions.create(**api_params)
+                    full_content = ""
+                    full_reasoning = ""
+                    for chunk in response_stream:
+                        if chunk.choices and len(chunk.choices) > 0:
+                            delta = chunk.choices[0].delta
+                            if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                                full_reasoning += delta.reasoning_content
+                                yield {"thinking_text": delta.reasoning_content}
+                            if hasattr(delta, 'content') and delta.content:
+                                full_content += delta.content
+                                yield {"text_output": {"content": delta.content}}
+                    self.add_ai_message(full_content)
+                return stream_generator()
+            else:
+                response = self.client.chat.completions.create(**api_params)
+                self.update_token_usage(response)
+
+                message = response.choices[0].message
+                reasoning_content = getattr(message, 'reasoning_content', '') or ''
+                answer_text = message.content or ''
+
+                self.add_ai_message(answer_text)
+
+                # Always return string for consistency with other providers (OpenAI, etc.)
+                return answer_text
+
+        except Exception as e:
+            print(f"Erreur Moonshot AI process_text: {e}")
+            return None
+
+    def moonshot_send_message(self, content, model_index=None, model_name=None,
+                               max_tokens=4096, thinking=False, **kwargs):
+        """
+        Envoie un message avec contenu pré-formaté (images transformées par BaseAIAgent).
+        Utilisé pour la vision quand les images viennent de Drive, URL ou local.
+
+        Args:
+            content: Contenu pré-formaté au format OpenAI [{"role": "user", "content": [...]}]
+            model_index: Index du modèle (optionnel)
+            model_name: Nom du modèle (optionnel)
+            max_tokens: Nombre maximum de tokens de sortie
+            thinking: Activer le mode thinking
+
+        Returns:
+            str: La réponse générée
+        """
+        if not model_name and model_index is not None:
+            chosen_model = self.models[model_index]
+        else:
+            chosen_model = model_name or self.models[0]
+
+        # Le content est déjà formaté comme messages par _transforme_image_for_provider
+        # Format: [{"role": "user", "content": [{"type": "text", ...}, {"type": "image_url", ...}]}]
+        if isinstance(content, list) and len(content) > 0:
+            # Ajouter à l'historique et utiliser comme messages
+            for msg in content:
+                if isinstance(msg, dict) and 'role' in msg:
+                    self.chat_history.append(msg)
+            messages = self.chat_history
+        else:
+            # Fallback: traiter comme texte simple
+            self.add_user_message(content)
+            messages = self.chat_history
+
+        api_params = {
+            "model": chosen_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+        }
+
+        if thinking:
+            api_params["temperature"] = 1.0
+            api_params["top_p"] = 0.95
+        else:
+            api_params["temperature"] = 0.6
+            api_params["extra_body"] = {'thinking': {'type': 'disabled'}}
+
+        try:
+            response = self.client.chat.completions.create(**api_params)
+            self.update_token_usage(response)
+
+            message = response.choices[0].message
+            answer_text = message.content or ''
+
+            self.add_ai_message(answer_text)
+            return answer_text
+
+        except Exception as e:
+            print(f"Erreur Moonshot AI moonshot_send_message: {e}")
+            return None
+
+    def process_vision(self, text, local_files=None, model_index=None, model_name=None,
+                       max_tokens=4096, thinking=False, **kwargs):
+        """
+        Analyse d'images avec Moonshot AI (Kimi K2.5).
+
+        Args:
+            text: Le prompt textuel
+            local_files: Liste des chemins vers les fichiers images locaux
+            model_index: Index du modèle (optionnel)
+            model_name: Nom du modèle (optionnel)
+            max_tokens: Nombre maximum de tokens de sortie
+            thinking: Activer le mode thinking
+
+        Returns:
+            str ou dict: La réponse générée
+        """
+        if not model_name and model_index is not None:
+            chosen_model = self.models[model_index]
+        else:
+            chosen_model = model_name or self.models[0]
+
+        # Construire le contenu multimodal
+        content_parts = []
+
+        # Ajouter les images
+        if local_files:
+            for file_path in local_files:
+                try:
+                    with open(file_path, "rb") as f:
+                        image_data = f.read()
+                    base64_data = base64.b64encode(image_data).decode('utf-8')
+
+                    # Déterminer le type MIME
+                    ext = os.path.splitext(file_path)[1].lower()
+                    mime_map = {
+                        '.jpg': 'jpeg', '.jpeg': 'jpeg', '.png': 'png',
+                        '.gif': 'gif', '.webp': 'webp'
+                    }
+                    media_type = mime_map.get(ext, 'jpeg')
+
+                    content_parts.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/{media_type};base64,{base64_data}"
+                        }
+                    })
+                except Exception as e:
+                    print(f"Erreur lecture image {file_path}: {e}")
+
+        # Ajouter le texte
+        content_parts.append({
+            "type": "text",
+            "text": text
+        })
+
+        self.chat_history.append({'role': 'user', 'content': content_parts})
+
+        api_params = {
+            "model": chosen_model,
+            "messages": self.chat_history,
+            "max_tokens": max_tokens,
+        }
+
+        if thinking:
+            api_params["temperature"] = 1.0
+            api_params["top_p"] = 0.95
+        else:
+            api_params["temperature"] = 0.6
+            api_params["extra_body"] = {'thinking': {'type': 'disabled'}}
+
+        try:
+            response = self.client.chat.completions.create(**api_params)
+            self.update_token_usage(response)
+
+            message = response.choices[0].message
+            reasoning_content = getattr(message, 'reasoning_content', '') or ''
+            answer_text = message.content or ''
+
+            self.add_ai_message(answer_text)
+
+            if thinking and reasoning_content:
+                return {
+                    "answer_text": answer_text,
+                    "thinking_text": reasoning_content
+                }
+            return answer_text
+
+        except Exception as e:
+            print(f"Erreur Moonshot AI process_vision: {e}")
+            return {"error": str(e)}
+
+    def process_tool_use(self, content, tools, model_index=None, model_name=None,
+                         tool_mapping=None, tool_choice="auto", thinking=True,
+                         thinking_budget=8192, raw_output=False, max_tokens=4096,
+                         **kwargs):
+        """
+        Utilisation d'outils avec Moonshot AI (Kimi K2.5).
+
+        Args:
+            content: Le contenu du message
+            tools: Liste des outils au format OpenAI
+            model_index: Index du modèle (optionnel)
+            model_name: Nom du modèle (optionnel)
+            tool_mapping: Mapping des noms d'outils vers les fonctions
+            tool_choice: Choix d'outil ("auto", "required", "none" ou dict)
+            thinking: Activer le mode thinking
+            thinking_budget: Budget de tokens pour le raisonnement
+            raw_output: Retourner les données brutes
+            max_tokens: Nombre maximum de tokens
+
+        Returns:
+            list ou dict: Les réponses générées
+        """
+        if not model_name and model_index is not None:
+            chosen_model = self.models[model_index]
+        else:
+            chosen_model = model_name or self.models[0]
+
+        self.add_user_message(content)
+
+        api_params = {
+            "model": chosen_model,
+            "messages": self.chat_history,
+            "max_tokens": max_tokens,
+            "tools": tools,
+            "tool_choice": tool_choice,
+        }
+
+        if thinking:
+            api_params["temperature"] = 1.0
+            api_params["top_p"] = 0.95
+        else:
+            api_params["temperature"] = 0.6
+            api_params["extra_body"] = {'thinking': {'type': 'disabled'}}
+
+        try:
+            response = self.client.chat.completions.create(**api_params)
+            self.update_token_usage(response)
+
+            responses = []
+            message = response.choices[0].message
+
+            # Récupérer le raisonnement si disponible
+            reasoning_content = getattr(message, 'reasoning_content', '') or ''
+
+            # Traiter les appels d'outils
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                for tool_call in message.tool_calls:
+                    function_call = tool_call.function
+                    tool_name = function_call.name
+
+                    try:
+                        arguments = json.loads(function_call.arguments)
+
+                        # Chercher la fonction dans le mapping
+                        function_or_none = None
+                        if tool_mapping:
+                            for tool_dict in (tool_mapping if isinstance(tool_mapping, list) else [tool_mapping]):
+                                if tool_name in tool_dict:
+                                    function_or_none = tool_dict[tool_name]
+                                    break
+
+                        if callable(function_or_none):
+                            tool_result = function_or_none(**arguments)
+                            tool_response = {
+                                "tool_output": {
+                                    "tool_name": tool_name,
+                                    "content": tool_result
+                                }
+                            }
+                        else:
+                            tool_response = {
+                                "tool_output": {
+                                    "tool_name": tool_name,
+                                    "content": arguments
+                                }
+                            }
+                        responses.append(tool_response)
+
+                    except json.JSONDecodeError as e:
+                        print(f"Erreur JSON pour l'outil {tool_name}: {e}")
+                        responses.append({
+                            "tool_output": {
+                                "tool_name": tool_name,
+                                "content": {"error": str(e)}
+                            }
+                        })
+
+            # Traiter le contenu texte
+            if message.content:
+                text_response = {
+                    "text_output": {
+                        "content": {
+                            "answer_text": message.content,
+                            "thinking_text": reasoning_content
+                        }
+                    }
+                }
+                responses.append(text_response)
+
+            self.add_ai_message(message.content if message.content else str(responses))
+
+            if not raw_output:
+                return self.final_handle_responses(responses)
+            return responses
+
+        except Exception as e:
+            print(f"Erreur Moonshot AI process_tool_use: {e}")
+            return [{
+                "text_output": {
+                    "content": {
+                        "answer_text": f"Erreur: {str(e)}",
+                        "thinking_text": ""
+                    }
+                }
+            }]
+
+    async def moonshot_send_message_streaming(
+        self,
+        content: str,
+        model_name: str,
+        max_tokens: int = 4096,
+        thinking: bool = False
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Envoie un message en streaming avec Moonshot AI.
+
+        Args:
+            content: Le contenu du message
+            model_name: Nom du modèle
+            max_tokens: Nombre maximum de tokens
+            thinking: Activer le mode thinking
+
+        Yields:
+            Dict avec events: text_chunk, thinking_chunk, final
+        """
+        try:
+            self.add_user_message(content)
+
+            api_params = {
+                "model": model_name,
+                "messages": self.chat_history,
+                "max_tokens": max_tokens,
+                "stream": True,
+            }
+
+            # Configuration selon le mode thinking
+            if thinking:
+                api_params["temperature"] = 1.0
+                api_params["top_p"] = 0.95
+            else:
+                api_params["temperature"] = 0.6
+                api_params["extra_body"] = {'thinking': {'type': 'disabled'}}
+
+            accumulated_text = ""
+            accumulated_thinking = ""
+            thinking_started = False  # Track if thinking phase has started
+            thinking_ended = False    # Track if thinking phase has ended
+
+            response = await self.client_stream.chat.completions.create(**api_params)
+
+            async for chunk in response:
+                if not chunk.choices:
+                    continue
+
+                delta = chunk.choices[0].delta
+
+                # Traiter le contenu de raisonnement (thinking)
+                if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                    # Emit thinking_start on first thinking chunk
+                    if not thinking_started:
+                        thinking_started = True
+                        yield {
+                            "type": "thinking_start",
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        }
+
+                    accumulated_thinking += delta.reasoning_content
+                    yield {
+                        "type": "thinking_chunk",
+                        "chunk": delta.reasoning_content
+                    }
+
+                # Traiter le contenu texte
+                if hasattr(delta, 'content') and delta.content:
+                    # Emit thinking_end when transitioning from thinking to text
+                    if thinking_started and not thinking_ended:
+                        thinking_ended = True
+                        yield {
+                            "type": "thinking_end",
+                            "thinking_content": accumulated_thinking,
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        }
+
+                    accumulated_text += delta.content
+                    yield {
+                        "type": "text_chunk",
+                        "chunk": delta.content
+                    }
+
+            # Emit thinking_end if we had thinking but no text output
+            if thinking_started and not thinking_ended:
+                yield {
+                    "type": "thinking_end",
+                    "thinking_content": accumulated_thinking,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+
+            # Sauvegarder la réponse dans l'historique
+            self.add_ai_message(accumulated_text)
+
+            # Événement final
+            yield {
+                "type": "final",
+                "content": accumulated_text,
+                "thinking": accumulated_thinking,
+                "model": model_name
+            }
+
+        except Exception as e:
+            logging.error(f"[MOONSHOT_STREAMING] Erreur: {e}", exc_info=True)
+            yield {
+                "type": "error",
+                "error": str(e)
+            }
+
+    async def moonshot_send_message_with_tools_streaming(
+        self,
+        content: str,
+        tools: List[Dict[str, Any]],
+        tool_mapping: Dict[str, Callable],
+        model_name: str,
+        max_tokens: int = 4096,
+        thinking: bool = True,
+        system_prompt: Optional[str] = None
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Envoie un message avec outils et streaming pour Moonshot AI.
+        Gère le cycle complet: message -> tool_use -> tool_result -> réponse
+
+        Args:
+            content: Message utilisateur (peut être vide pour tours suivants)
+            tools: Liste des définitions d'outils (format OpenAI)
+            tool_mapping: Dict {tool_name: fonction} pour exécuter les outils
+            model_name: Nom du modèle à utiliser
+            max_tokens: Nombre max de tokens
+            thinking: Activer le mode thinking
+            system_prompt: Prompt système (optionnel)
+
+        Yields:
+            Dict avec events: text_chunk, thinking_chunk, tool_use, tool_result, error
+        """
+        try:
+            # Préparer les messages
+            messages = self.chat_history.copy()
+
+            # Ajouter le system prompt si fourni
+            if system_prompt and (not messages or messages[0].get("role") != "system"):
+                messages.insert(0, {"role": "system", "content": system_prompt})
+
+            # N'ajouter un nouveau message utilisateur QUE si content n'est pas vide
+            if content and content.strip():
+                self.add_user_message(content)
+                messages.append({"role": "user", "content": content})
+
+            api_params = {
+                "model": model_name,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
+
+            # Ajouter tools si fournis
+            if tools:
+                api_params["tools"] = tools
+
+            # Configuration selon le mode thinking
+            if thinking:
+                api_params["temperature"] = 1.0
+                api_params["top_p"] = 0.95
+            else:
+                api_params["temperature"] = 0.6
+                api_params["extra_body"] = {'thinking': {'type': 'disabled'}}
+
+            accumulated_text = ""
+            accumulated_thinking = ""
+            tool_uses = []
+            last_usage = None
+            thinking_started = False  # Track if thinking phase has started
+            thinking_ended = False    # Track if thinking phase has ended
+
+            response = await self.client_stream.chat.completions.create(**api_params)
+
+            async for chunk in response:
+                if not chunk.choices:
+                    continue
+
+                delta = chunk.choices[0].delta
+
+                if hasattr(chunk, "usage") and chunk.usage:
+                    last_usage = chunk.usage
+
+                # Traiter le contenu de raisonnement (thinking)
+                if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                    # Emit thinking_start on first thinking chunk
+                    if not thinking_started:
+                        thinking_started = True
+                        yield {
+                            "type": "thinking_start",
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        }
+
+                    accumulated_thinking += delta.reasoning_content
+                    yield {
+                        "type": "thinking_chunk",
+                        "chunk": delta.reasoning_content
+                    }
+
+                # Traiter le contenu texte
+                if hasattr(delta, 'content') and delta.content:
+                    # Emit thinking_end when transitioning from thinking to text
+                    if thinking_started and not thinking_ended:
+                        thinking_ended = True
+                        yield {
+                            "type": "thinking_end",
+                            "thinking_content": accumulated_thinking,
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        }
+
+                    accumulated_text += delta.content
+                    yield {
+                        "type": "text_chunk",
+                        "chunk": delta.content
+                    }
+
+                # Traiter les appels d'outils
+                if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                    # Emit thinking_end when transitioning from thinking to tool use
+                    if thinking_started and not thinking_ended:
+                        thinking_ended = True
+                        yield {
+                            "type": "thinking_end",
+                            "thinking_content": accumulated_thinking,
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        }
+                    for tool_call in delta.tool_calls:
+                        # Accumuler les tool calls en chunks
+                        if not tool_uses or (tool_call.index >= len(tool_uses)):
+                            tool_uses.append({
+                                "id": tool_call.id if hasattr(tool_call, 'id') else f"tool_{len(tool_uses)}",
+                                "name": "",
+                                "arguments": ""
+                            })
+
+                        if hasattr(tool_call, 'function'):
+                            if hasattr(tool_call.function, 'name') and tool_call.function.name:
+                                tool_uses[tool_call.index]["name"] = tool_call.function.name
+                            if hasattr(tool_call.function, 'arguments') and tool_call.function.arguments:
+                                tool_uses[tool_call.index]["arguments"] += tool_call.function.arguments
+
+            # Emit thinking_end if we had thinking but no text/tool output triggered it
+            if thinking_started and not thinking_ended:
+                yield {
+                    "type": "thinking_end",
+                    "thinking_content": accumulated_thinking,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+
+            # Sauvegarder la réponse de l'assistant en format OpenAI
+            # Format OpenAI: {"role": "assistant", "content": ..., "tool_calls": [...]}
+            # Note: Moonshot AI requiert reasoning_content quand thinking est activé
+            assistant_message = {
+                "role": "assistant",
+                "content": accumulated_text if accumulated_text else None
+            }
+
+            # Ajouter reasoning_content si thinking est activé (requis par Moonshot)
+            if thinking and accumulated_thinking:
+                assistant_message["reasoning_content"] = accumulated_thinking
+
+            if tool_uses:
+                tool_calls_list = []
+                for tool_use in tool_uses:
+                    if tool_use["name"]:
+                        # Yield tool_use_start first (for UI feedback)
+                        yield {
+                            "type": "tool_use_start",
+                            "tool_name": tool_use["name"],
+                            "tool_id": tool_use["id"]
+                        }
+
+                        tool_calls_list.append({
+                            "id": tool_use["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tool_use["name"],
+                                "arguments": tool_use["arguments"] or "{}"
+                            }
+                        })
+
+                        # Yield l'événement tool_use
+                        yield {
+                            "type": "tool_use",
+                            "tool_name": tool_use["name"],
+                            "tool_input": json.loads(tool_use["arguments"]) if tool_use["arguments"] else {},
+                            "tool_id": tool_use["id"]
+                        }
+
+                if tool_calls_list:
+                    assistant_message["tool_calls"] = tool_calls_list
+
+            # Sauvegarder dans l'historique (ajouter directement le dict au format OpenAI)
+            self.chat_history.append(assistant_message)
+
+            # Mettre à jour le tracking tokens
+            try:
+                if last_usage is not None:
+                    class _TokenUsage:
+                        def __init__(self, usage_data, model_name):
+                            self.usage = usage_data
+                            self.model = model_name
+                    self.update_token_usage(_TokenUsage(last_usage, model_name))
+            except Exception as e:
+                print(f"[MOONSHOT_STREAMING] Impossible d'enregistrer l'usage tokens: {e}")
+
+            # Exécuter les outils si présents
+            if tool_uses and tool_mapping:
+                tool_results_added = False
+
+                for tool_use in tool_uses:
+                    if not tool_use["name"]:
+                        continue
+
+                    tool_name = tool_use["name"]
+                    tool_input = json.loads(tool_use["arguments"]) if tool_use["arguments"] else {}
+
+                    if tool_name in tool_mapping:
+                        tool_function = tool_mapping[tool_name]
+
+                        # Exécuter l'outil (async ou sync)
+                        if asyncio.iscoroutinefunction(tool_function):
+                            tool_result = await tool_function(**tool_input)
+                        else:
+                            tool_result = await asyncio.to_thread(tool_function, **tool_input)
+
+                        # Formater le résultat
+                        tool_result_str = json.dumps(tool_result) if isinstance(tool_result, dict) else str(tool_result)
+
+                        # Ajouter le résultat en format OpenAI directement à l'historique
+                        # Format OpenAI: {"role": "tool", "tool_call_id": ..., "content": ...}
+                        self.chat_history.append({
+                            "role": "tool",
+                            "tool_call_id": tool_use["id"],
+                            "content": tool_result_str
+                        })
+                        tool_results_added = True
+
+                        # Yield l'événement tool_result
+                        yield {
+                            "type": "tool_result",
+                            "tool_name": tool_name,
+                            "result": tool_result
+                        }
+
+                # Appel récursif pour obtenir la réponse finale
+                if tool_results_added:
+
+                    # Appel récursif pour obtenir la réponse finale
+                    async for event in self.moonshot_send_message_with_tools_streaming(
+                        content="",  # Contenu vide, continuer avec l'historique
+                        tools=tools,
+                        tool_mapping=tool_mapping,
+                        model_name=model_name,
+                        max_tokens=max_tokens,
+                        thinking=thinking,
+                        system_prompt=system_prompt
+                    ):
+                        yield event
+
+        except Exception as e:
+            logging.error(f"[MOONSHOT_STREAMING] Erreur: {e}", exc_info=True)
+            yield {
+                "type": "error",
+                "error": str(e)
+            }
+
+    def moonshot_agent(self, content, model_index=None, model_name=None,
+                       tools=None, tool_mapping=None, tool_choice="auto",
+                       thinking=True, thinking_budget=8192, raw_output=False,
+                       max_tokens=4096, **kwargs):
+        """
+        Point d'entrée principal pour l'agent Moonshot AI.
+        Wrapper autour de process_tool_use pour compatibilité.
+        """
+        if tools:
+            return self.process_tool_use(
+                content=content,
+                tools=tools,
+                model_index=model_index,
+                model_name=model_name,
+                tool_mapping=tool_mapping,
+                tool_choice=tool_choice,
+                thinking=thinking,
+                thinking_budget=thinking_budget,
+                raw_output=raw_output,
+                max_tokens=max_tokens,
+                **kwargs
+            )
+        else:
+            return self.process_text(
+                content=content,
+                model_index=model_index,
+                model_name=model_name,
+                thinking=thinking,
+                thinking_budget=thinking_budget,
+                max_tokens=max_tokens,
+                **kwargs
+            )
+
+    def final_handle_responses(self, input_data):
+        """Traite les réponses et les normalise."""
+        if isinstance(input_data, list):
+            if len(input_data) == 1:
+                return self.basic_handle_response(input_data[0])
+            else:
+                results = []
+                for item in input_data:
+                    result = self.basic_handle_response(item)
+                    results.append(result)
+                return results
+        else:
+            return self.basic_handle_response(input_data)
+
+    def basic_handle_response(self, response):
+        """Traite une réponse individuelle."""
+        data = {}
+
+        has_tool_output = 'tool_output' in response
+        has_text_output = 'text_output' in response
+
+        if has_tool_output and has_text_output:
+            text_content = response['text_output'].get('content', '')
+            tool_content = response['tool_output'].get('content', {})
+            data = {
+                'text_output': {'text': text_content},
+                'tool_output': tool_content
+            }
+        elif has_text_output:
+            text_content = response['text_output'].get('content', '')
+            if isinstance(text_content, dict) and 'answer_text' in text_content:
+                data = text_content['answer_text']
+            else:
+                data = text_content
+        elif has_tool_output:
+            tool_content = response['tool_output'].get('content', {})
+            if isinstance(tool_content, list):
+                data = []
+                for item in tool_content:
+                    if isinstance(item, dict) and 'text' in item:
+                        data.append(item['text'])
+            else:
+                data = tool_content
+        else:
+            print("Format de réponse non reconnu.")
+
+        return data
+
+
 class Anthropic_KDB_AGENT:
     def __init__(self,chroma_db_instance) -> None:
-        
+
         #self.api_key=get_secret('voyageai_api_anthropic')
         #self.vo=voyageai.Client(self.api_key)
-        anthropic=NEW_Anthropic_Agent()
+        moonshot=NEW_MOONSHOT_AIAgent()
         self.agent=BaseAIAgent()
-        self.agent.register_provider(ModelProvider.ANTHROPIC,anthropic)
+        self.agent.register_provider(ModelProvider.MOONSHOT_AI, moonshot)
         self.chroma_db_instance=chroma_db_instance
         self.models=['claude-3-5-sonnet-20240620', 'claude-3-sonnet-20240229', 'claude-3-haiku-20240307', 'claude-3-opus-20240229']
         self.AGENT_INIT()

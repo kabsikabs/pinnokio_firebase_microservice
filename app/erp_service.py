@@ -1323,7 +1323,7 @@ class ERPService:
             if unknown_types:
                 await send_progress("mapping_nature", 55, f"Agent: mapping de {len(unknown_types)} nouveaux account_type...")
 
-                from .llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_Anthropic_Agent
+                from .llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_MOONSHOT_AIAgent
 
                 def _extract_text(obj: Any) -> str:
                     if isinstance(obj, str):
@@ -1379,16 +1379,16 @@ class ERPService:
                         firebase_user_id=user_id,
                         job_id="coa_nature_mapping",
                     )
-                    anthropic_instance = NEW_Anthropic_Agent(collection_name=company_id, job_id="coa_nature_mapping")
-                    anthropic_instance.update_system_prompt(system_prompt)
-                    agent.register_provider(ModelProvider.ANTHROPIC, anthropic_instance, ModelSize.SMALL)
-                    agent.default_provider = ModelProvider.ANTHROPIC
+                    moonshot_instance = NEW_MOONSHOT_AIAgent(collection_name=company_id, job_id="coa_nature_mapping")
+                    moonshot_instance.update_system_prompt(system_prompt)
+                    agent.register_provider(ModelProvider.MOONSHOT_AI, moonshot_instance, ModelSize.MEDIUM)
+                    agent.default_provider = ModelProvider.MOONSHOT_AI
                     resp = agent.process_tool_use(
                         content=user_prompt,
                         tools=[],
                         tool_mapping={},
-                        size=ModelSize.SMALL,
-                        provider=ModelProvider.ANTHROPIC,
+                        size=ModelSize.MEDIUM,
+                        provider=ModelProvider.MOONSHOT_AI,
                         max_tokens=2048,
                         raw_output=True,
                     )
@@ -1442,7 +1442,7 @@ class ERPService:
                     nature = "PROFIT_AND_LOSS"
                 accounts_by_nature[nature].append(item)
 
-            from .llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_Anthropic_Agent
+            from .llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_MOONSHOT_AIAgent
 
             def _extract_text(obj: Any) -> str:
                 if isinstance(obj, str):
@@ -1512,17 +1512,17 @@ class ERPService:
                     firebase_user_id=user_id,
                     job_id=f"coa_function_mapping_{nature.lower()}",
                 )
-                anthropic_instance = NEW_Anthropic_Agent(collection_name=company_id, job_id=f"coa_function_mapping_{nature.lower()}")
-                anthropic_instance.update_system_prompt(system_prompt)
-                agent.register_provider(ModelProvider.ANTHROPIC, anthropic_instance, ModelSize.SMALL)
-                agent.default_provider = ModelProvider.ANTHROPIC
+                moonshot_instance = NEW_MOONSHOT_AIAgent(collection_name=company_id, job_id=f"coa_function_mapping_{nature.lower()}")
+                moonshot_instance.update_system_prompt(system_prompt)
+                agent.register_provider(ModelProvider.MOONSHOT_AI, moonshot_instance, ModelSize.MEDIUM)
+                agent.default_provider = ModelProvider.MOONSHOT_AI
 
                 resp = agent.process_tool_use(
                     content=user_prompt,
                     tools=[],
                     tool_mapping={},
-                    size=ModelSize.SMALL,
-                    provider=ModelProvider.ANTHROPIC,
+                    size=ModelSize.MEDIUM,
+                    provider=ModelProvider.MOONSHOT_AI,
                     max_tokens=4096,
                     raw_output=True,
                 )
@@ -1695,7 +1695,7 @@ class ERPService:
         import asyncio
         import json
         import re
-        from .llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_Anthropic_Agent
+        from .llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_MOONSHOT_AIAgent
         
         # Catégories disponibles pour l'enrichissement
         expense_function_list = [
@@ -1750,28 +1750,28 @@ Réponds au format JSON strict:
                 job_id=f"coa_enrichment"
             )
             
-            # ⭐ ENREGISTRER L'INSTANCE DU PROVIDER ANTHROPIC
-            anthropic_instance = NEW_Anthropic_Agent(
+            # ⭐ ENREGISTRER L'INSTANCE DU PROVIDER MOONSHOT_AI
+            moonshot_instance = NEW_MOONSHOT_AIAgent(
                 collection_name=company_id,
                 job_id="coa_enrichment"
             )
-            anthropic_instance.update_system_prompt(system_prompt)
-            agent.register_provider(ModelProvider.ANTHROPIC, anthropic_instance, ModelSize.SMALL)
-            agent.default_provider = ModelProvider.ANTHROPIC
-            
+            moonshot_instance.update_system_prompt(system_prompt)
+            agent.register_provider(ModelProvider.MOONSHOT_AI, moonshot_instance, ModelSize.MEDIUM)
+            agent.default_provider = ModelProvider.MOONSHOT_AI
+
             await send_progress("enriching_expenses", 55, "Traitement par l'IA...")
-            
+
             # ═══════════════════════════════════════════════════════════════
             # APPEL LLM VIA process_tool_use (méthode standard)
-            # Utilise size=ModelSize.SMALL (Claude Haiku) pour rapidité et coût
+            # Utilise size=ModelSize.MEDIUM (Kimi K2.5) pour rapidité et coût
             # ═══════════════════════════════════════════════════════════════
             def _sync_call():
                 return agent.process_tool_use(
                     content=user_prompt,
                     tools=[],  # Pas d'outils, juste génération de texte
                     tool_mapping={},
-                    size=ModelSize.SMALL,  # Claude Haiku pour rapidité
-                    provider=ModelProvider.ANTHROPIC,
+                    size=ModelSize.MEDIUM,  # Kimi K2.5 pour rapidité
+                    provider=ModelProvider.MOONSHOT_AI,
                     max_tokens=4096,
                     raw_output=True
                 )

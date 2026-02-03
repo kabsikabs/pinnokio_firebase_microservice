@@ -32,6 +32,10 @@ from .orchestration import (
     handle_session_delete,
     handle_session_rename,
     handle_mode_change,
+    handle_session_auto_name,
+    handle_workflow_checklist_set,
+    handle_workflow_step_update,
+    handle_card_clicked,
     CHAT_MODES,
 )
 
@@ -46,6 +50,13 @@ __all__ = [
     "handle_session_delete",
     "handle_session_rename",
     "handle_mode_change",
+    # Auto-naming
+    "handle_session_auto_name",
+    # Workflow checklist
+    "handle_workflow_checklist_set",
+    "handle_workflow_step_update",
+    # Interactive cards
+    "handle_card_clicked",
     # Constants
     "CHAT_MODES",
 ]

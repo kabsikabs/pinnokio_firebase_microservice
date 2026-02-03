@@ -357,7 +357,7 @@ class DashboardHandlers:
         return {
             "router": {"toProcess": 0, "inProcess": 0, "processed": 0},
             "ap": {"toProcess": 0, "inProcess": 0, "pending": 0, "processed": 0},
-            "bank": {"toProcess": 0, "inProcess": 0, "pending": 0, "matched": 0},
+            "bank": {"toProcess": 0, "inProcess": 0, "pending": 0},
             "expenses": {"open": 0, "closed": 0, "pendingApproval": 0},
             "summary": {
                 "totalDocumentsToProcess": 0,
@@ -584,17 +584,56 @@ class DashboardHandlers:
                     metrics["bank"]["toProcess"] = len(data.get("to_reconcile", []))
                     metrics["bank"]["inProcess"] = len(data.get("in_process", []))
                     metrics["bank"]["pending"] = len(data.get("pending", []))
-                    metrics["bank"]["matched"] = len(data.get("matched", []))
                     logger.info(f"_get_metrics: Bank from cache - toProcess={metrics['bank']['toProcess']}")
             except Exception as e:
                 logger.warning(f"_get_metrics: Bank cache error: {e}")
 
             # ═══════════════════════════════════════════════════════════════
-            # Expenses metrics from working_doc/expenses_details/items
+            # Expenses metrics from CENTRALIZED BUSINESS CACHE
             # (Notes de Frais - real expense reports, not job history)
+            #
+            # IMPORTANT: Read from business:{uid}:{cid}:expenses cache
+            # This cache is maintained by ListManager when actions are performed
+            # (close, reopen, delete, etc.) and ensures consistency across pages.
+            #
+            # Fallback to Firebase only if cache is empty (first load before
+            # visiting expenses page).
             # ═══════════════════════════════════════════════════════════════
             try:
-                if mandate_path:
+                from app.redis_client import get_redis
+                import json as json_module
+
+                redis_client = get_redis()
+                expenses_cache_key = f"business:{user_id}:{company_id}:expenses"
+
+                # 1. Try centralized business cache first
+                cached_expenses = redis_client.get(expenses_cache_key)
+
+                if cached_expenses:
+                    # Cache hit - use metrics from centralized cache
+                    expenses_data = json_module.loads(
+                        cached_expenses if isinstance(cached_expenses, str)
+                        else cached_expenses.decode()
+                    )
+                    cached_metrics = expenses_data.get("metrics", {})
+
+                    # Map to dashboard metrics format
+                    # Note: business cache has totalOpen, totalRunning, totalClosed
+                    # Dashboard metrics use: open, closed, pendingApproval
+                    open_count = cached_metrics.get("totalOpen", 0) + cached_metrics.get("totalRunning", 0)
+                    closed_count = cached_metrics.get("totalClosed", 0)
+
+                    metrics["expenses"]["open"] = open_count
+                    metrics["expenses"]["closed"] = closed_count
+                    metrics["expenses"]["pendingApproval"] = 0
+
+                    logger.info(
+                        f"_get_metrics: Expenses from CENTRALIZED CACHE {expenses_cache_key} - "
+                        f"open={open_count}, closed={closed_count}"
+                    )
+                elif mandate_path:
+                    # 2. Cache miss - fallback to Firebase (first load only)
+                    logger.info(f"_get_metrics: Expenses cache miss, falling back to Firebase")
                     firebase_mgmt = get_firebase_management()
 
                     # Fetch from {mandate_path}/working_doc/expenses_details/items
@@ -617,9 +656,9 @@ class DashboardHandlers:
                         metrics["expenses"]["open"] = open_count
                         metrics["expenses"]["closed"] = closed_count
                         metrics["expenses"]["pendingApproval"] = 0
-                        logger.info(f"_get_metrics: Expenses from working_doc - open={open_count}, closed={closed_count}")
+                        logger.info(f"_get_metrics: Expenses from Firebase (cache miss) - open={open_count}, closed={closed_count}")
                 else:
-                    logger.warning(f"_get_metrics: No mandate_path for expenses metrics")
+                    logger.warning(f"_get_metrics: No expenses cache and no mandate_path")
             except Exception as e:
                 logger.warning(f"_get_metrics: Expenses metrics error: {e}")
 
@@ -638,8 +677,8 @@ class DashboardHandlers:
             )
             total_completed = (
                 metrics["router"]["processed"] +
-                metrics["ap"]["processed"] +
-                metrics["bank"]["matched"]
+                metrics["ap"]["processed"]
+                # Bank has no "completed" status - transactions stay active or are reconciled in ERP
             )
             total_all = total_to_process + total_in_progress + total_completed
 

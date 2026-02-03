@@ -1,9 +1,64 @@
 import asyncio
 import json
 import logging
-from typing import Dict, Set
+import math
+from typing import Any, Dict, Set
 
 from starlette.websockets import WebSocket
+
+
+class SafeJSONEncoder(json.JSONEncoder):
+    """
+    Custom JSON encoder that handles non-JSON-compliant values.
+
+    - Converts NaN and Infinity to None (valid JSON null)
+    - Handles datetime objects
+    - Prevents JSON serialization errors from crashing WebSocket broadcast
+    """
+    def default(self, obj: Any) -> Any:
+        # Handle numpy types if present
+        try:
+            import numpy as np
+            if isinstance(obj, (np.integer, np.floating)):
+                if np.isnan(obj) or np.isinf(obj):
+                    return None
+                return obj.item()
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+        except ImportError:
+            pass
+
+        # Handle datetime
+        if hasattr(obj, 'isoformat'):
+            return obj.isoformat()
+
+        return super().default(obj)
+
+    def encode(self, obj: Any) -> str:
+        """Override encode to handle NaN/Infinity in nested structures."""
+        return super().encode(self._sanitize(obj))
+
+    def _sanitize(self, obj: Any) -> Any:
+        """Recursively sanitize values, converting NaN/Infinity to None."""
+        if isinstance(obj, float):
+            if math.isnan(obj) or math.isinf(obj):
+                return None
+            return obj
+        elif isinstance(obj, dict):
+            return {k: self._sanitize(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._sanitize(item) for item in obj]
+        return obj
+
+
+def safe_json_dumps(obj: Any) -> str:
+    """
+    Serialize object to JSON, safely handling NaN and Infinity values.
+
+    Python's float('nan') and float('inf') are not valid JSON.
+    This function converts them to null to prevent parse errors on the frontend.
+    """
+    return json.dumps(obj, cls=SafeJSONEncoder)
 
 # Event type normalization mapping (legacy underscore → standard dot notation)
 # This ensures compatibility between old backend event names and new frontend expectations
@@ -21,6 +76,11 @@ EVENT_TYPE_NORMALIZATION = {
     "tool_use_progress": "llm.tool_use_progress",
     "tool_use_complete": "llm.tool_use_complete",
     "tool_use_error": "llm.tool_use_error",
+    # Thinking events (reasoning phase)
+    "thinking_start": "llm.thinking_start",
+    "thinking_delta": "llm.thinking_delta",
+    "thinking_chunk": "llm.thinking_delta",  # chunk → delta
+    "thinking_end": "llm.thinking_end",
 }
 
 
@@ -50,6 +110,33 @@ class WebSocketHub:
                 if not conns:
                     self._uid_to_conns.pop(uid, None)
 
+    def is_user_connected(self, uid: str) -> bool:
+        """
+        Check if user has at least one active WebSocket connection.
+
+        Used by PubSub helpers to determine if notifications/messages
+        should be broadcast to the user.
+
+        Args:
+            uid: Firebase user ID
+
+        Returns:
+            True if user has at least one active connection
+        """
+        conns = self._uid_to_conns.get(uid)
+        return bool(conns and len(conns) > 0)
+
+    def get_connected_users(self) -> Set[str]:
+        """
+        Get set of all currently connected user IDs.
+
+        Used for periodic sync to determine which users need updates.
+
+        Returns:
+            Set of connected user UIDs
+        """
+        return set(self._uid_to_conns.keys())
+
     async def broadcast(self, uid: str, message: dict) -> None:
         # Normalize event type for frontend compatibility
         original_type = message.get("type", "unknown")
@@ -60,7 +147,8 @@ class WebSocketHub:
             message = {**message, "type": normalized_type}
 
         # Envoie le message JSON (texte) à toutes les connexions pour ce uid
-        data = json.dumps(message)
+        # Use safe_json_dumps to handle NaN/Infinity values from ERP data
+        data = safe_json_dumps(message)
         msg_type = normalized_type
         channel = message.get("channel", "")
         

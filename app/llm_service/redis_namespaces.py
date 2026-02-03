@@ -89,6 +89,7 @@ class BusinessDomain(Enum):
     EXPENSES = "expenses"   # Notes de frais
     COA = "coa"             # Plan comptable (Chart of Accounts)
     DASHBOARD = "dashboard" # Tasks, approvals, activity
+    TASKS = "tasks"         # Tâches planifiées (scheduled tasks)
     CHAT = "chat"           # Sessions et messages chat
     HR = "hr"               # Employés, contrats
 
@@ -151,6 +152,7 @@ class RedisTTL:
     BUSINESS_EXPENSES = 2400    # 40 minutes (dépenses)
     BUSINESS_COA = 3600         # 1 heure (plan comptable - stable)
     BUSINESS_DASHBOARD = 1800   # 30 minutes (tasks, approvals)
+    BUSINESS_TASKS = 2400       # 40 minutes (tâches planifiées)
     BUSINESS_CHAT = 86400       # 24 heures (sessions chat)
     BUSINESS_HR = 3600          # 1 heure (données RH)
 
@@ -247,7 +249,7 @@ def build_company_coa_key(uid: str, company_id: str) -> str:
 # HELPERS NIVEAU 3 - BUSINESS
 # ═══════════════════════════════════════════════════════════════
 
-def build_business_key(uid: str, company_id: str, domain: str) -> str:
+def build_business_key(uid: str, company_id: str, domain: str, item_key: str = None) -> str:
     """
     Clé pour les données métier d'un domaine.
 
@@ -255,11 +257,16 @@ def build_business_key(uid: str, company_id: str, domain: str) -> str:
         uid: User ID
         company_id: Company ID
         domain: Un des BusinessDomain (bank, routing, invoices, etc.)
+        item_key: Optional item-specific key (e.g., thread_key for chat history)
 
     Returns:
         Clé Redis: business:{uid}:{company_id}:{domain}
+        ou: business:{uid}:{company_id}:{domain}:{item_key} si item_key fourni
     """
-    return f"{RedisNamespace.BUSINESS}:{uid}:{company_id}:{domain}"
+    base_key = f"{RedisNamespace.BUSINESS}:{uid}:{company_id}:{domain}"
+    if item_key:
+        return f"{base_key}:{item_key}"
+    return base_key
 
 
 def build_bank_key(uid: str, company_id: str) -> str:
@@ -290,6 +297,11 @@ def build_coa_key(uid: str, company_id: str) -> str:
 def build_dashboard_key(uid: str, company_id: str) -> str:
     """Clé pour les données dashboard (tasks, approvals, activity)."""
     return build_business_key(uid, company_id, BusinessDomain.DASHBOARD.value)
+
+
+def build_tasks_key(uid: str, company_id: str) -> str:
+    """Clé pour les tâches planifiées."""
+    return build_business_key(uid, company_id, BusinessDomain.TASKS.value)
 
 
 def build_chat_business_key(uid: str, company_id: str) -> str:
@@ -408,6 +420,7 @@ def get_ttl_for_domain(domain: str) -> int:
         BusinessDomain.EXPENSES.value: RedisTTL.BUSINESS_EXPENSES,
         BusinessDomain.COA.value: RedisTTL.BUSINESS_COA,
         BusinessDomain.DASHBOARD.value: RedisTTL.BUSINESS_DASHBOARD,
+        BusinessDomain.TASKS.value: RedisTTL.BUSINESS_TASKS,
         BusinessDomain.CHAT.value: RedisTTL.BUSINESS_CHAT,
         BusinessDomain.HR.value: RedisTTL.BUSINESS_HR,
     }

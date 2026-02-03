@@ -7,10 +7,13 @@ Each subdirectory contains handlers specific to a frontend page.
 Structure:
     pages/
     ├── dashboard/     # Dashboard page - MIGRATED (85%)
-    ├── chat/          # Chat page - TODO
-    ├── invoices/      # Invoices page - TODO
-    ├── expenses/      # Expenses page - TODO
-    ├── banking/       # Banking page - TODO
+    ├── chat/          # Chat page - MIGRATED
+    ├── invoices/      # Invoices page - MIGRATED
+    ├── expenses/      # Expenses page - MIGRATED
+    ├── banking/       # Banking page - MIGRATED
+    ├── routing/       # Routing page - MIGRATED
+    ├── coa/           # Chart of Accounts page - MIGRATED
+    ├── company_settings/  # Company Settings page - MIGRATED
     └── hr/            # HR page - TODO
 
 Migration Pattern:
@@ -33,6 +36,18 @@ from .dashboard import (
     handle_switch_account,
 )
 
+# Expenses - Migrated
+from .expenses import (
+    get_expenses_handlers,
+    ExpensesHandlers,
+    handle_expenses_orchestrate_init,
+    handle_expenses_refresh,
+    handle_expenses_close,
+    handle_expenses_reopen,
+    handle_expenses_update,
+    handle_expenses_delete,
+)
+
 __all__ = [
     # Dashboard
     "DashboardHandlers",
@@ -42,4 +57,13 @@ __all__ = [
     "process_post_authentication",
     "handle_company_change",
     "handle_switch_account",
+    # Expenses
+    "get_expenses_handlers",
+    "ExpensesHandlers",
+    "handle_expenses_orchestrate_init",
+    "handle_expenses_refresh",
+    "handle_expenses_close",
+    "handle_expenses_reopen",
+    "handle_expenses_update",
+    "handle_expenses_delete",
 ]

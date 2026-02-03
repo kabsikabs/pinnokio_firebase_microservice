@@ -46,9 +46,7 @@ from .dashboard_orchestration_handlers import (
     handle_refresh,
     handle_switch_account,
     get_state_manager,
-    get_user_session_manager,
     OrchestrationStateManager,
-    UserSessionStateManager,
 )
 
 # Approval handlers
@@ -108,9 +106,7 @@ __all__ = [
     "handle_refresh",
     "handle_switch_account",
     "get_state_manager",
-    "get_user_session_manager",
     "OrchestrationStateManager",
-    "UserSessionStateManager",
     "process_post_authentication",
     # Approval handlers
     "ApprovalHandlers",

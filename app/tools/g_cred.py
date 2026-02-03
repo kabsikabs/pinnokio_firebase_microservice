@@ -12,9 +12,17 @@ _client_cache: Optional[secretmanager.SecretManagerServiceClient] = None
 def _resolve_version_path(secret_name: str) -> str:
     if secret_name.startswith("projects/"):
         return secret_name if "/versions/" in secret_name else f"{secret_name}/versions/latest"
-    project_id = os.getenv("GOOGLE_PROJECT_ID")
+    # Essayer GOOGLE_PROJECT_ID, puis les fallbacks standards (comme Firebase Admin SDK)
+    project_id = (
+        os.getenv("GOOGLE_PROJECT_ID") or 
+        os.getenv("GOOGLE_CLOUD_PROJECT") or 
+        os.getenv("GCLOUD_PROJECT")
+    )
     if not project_id:
-        raise RuntimeError("GOOGLE_PROJECT_ID manquant pour accéder aux secrets")
+        raise RuntimeError(
+            "GOOGLE_PROJECT_ID manquant pour accéder aux secrets. "
+            "Définissez GOOGLE_PROJECT_ID, GOOGLE_CLOUD_PROJECT ou GCLOUD_PROJECT"
+        )
     return f"projects/{project_id}/secrets/{secret_name}/versions/latest"
 
 
@@ -94,6 +102,42 @@ def create_secret(secret_data: str) -> str:
         request={"parent": secret.name, "payload": {"data": secret_data.encode("utf-8")}}
     )
     return secret.name
+
+
+def delete_secret(secret_name: str) -> bool:
+    """
+    Delete a secret from Google Secret Manager.
+
+    Args:
+        secret_name: Full path of the secret (e.g., projects/{project}/secrets/{id})
+                     or just the secret ID
+
+    Returns:
+        True if deleted successfully, False otherwise
+    """
+    if not secret_name or not secret_name.strip():
+        return False
+
+    project_id = os.getenv("GOOGLE_PROJECT_ID")
+    if not project_id:
+        raise RuntimeError("GOOGLE_PROJECT_ID requis")
+
+    client = _build_client_with_optional_sa()
+
+    # Handle both full path and just secret ID
+    if secret_name.startswith("projects/"):
+        secret_path = secret_name
+    else:
+        secret_path = f"projects/{project_id}/secrets/{secret_name}"
+
+    try:
+        client.delete_secret(request={"name": secret_path})
+        return True
+    except Exception as e:
+        # Log but don't fail if secret doesn't exist
+        import logging
+        logging.warning(f"Could not delete secret {secret_path}: {e}")
+        return False
 
 
 def get_aws_credentials_from_gsm() -> dict:

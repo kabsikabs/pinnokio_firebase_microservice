@@ -43,6 +43,7 @@ from .orchestration import (
     handle_update_asset_model,
     handle_delete_asset_model,
     handle_load_asset_accounts,
+    handle_delete_company,
 )
 from .telegram_handler import (
     handle_telegram_start_registration,
@@ -68,6 +69,8 @@ __all__ = [
     "handle_update_asset_model",
     "handle_delete_asset_model",
     "handle_load_asset_accounts",
+    # Company Deletion
+    "handle_delete_company",
     # Telegram
     "handle_telegram_start_registration",
     "handle_telegram_remove_user",

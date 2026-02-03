@@ -361,7 +361,7 @@ async def handle_invoices_stop(
     """
     Handle invoices.stop WebSocket event.
 
-    Stops processing of selected jobs.
+    Stops processing of selected jobs using centralized job_actions_handler.
     """
     job_ids = payload.get("job_ids", [])
     company_id = payload.get("company_id")
@@ -379,16 +379,39 @@ async def handle_invoices_stop(
         return
 
     try:
-        # TODO: Integrate with job management system
+        # Get company context
+        context = _get_company_context(uid, company_id)
 
-        await hub.broadcast(uid, {
-            "type": WS_EVENTS.INVOICES.STOPPED,
-            "payload": {
-                "success": True,
-                "job_ids": job_ids,
-                "message": f"{len(job_ids)} jobs stopped"
+        # Use centralized job actions handler
+        from app.wrappers.job_actions_handler import handle_job_stop
+
+        result = await handle_job_stop(
+            uid=uid,
+            job_type="apbookeeper",
+            payload=payload,
+            company_data={
+                "company_id": company_id,
+                "mandate_path": context.get("mandate_path", ""),
             }
-        })
+        )
+
+        if result.get("success"):
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.INVOICES.STOPPED,
+                "payload": {
+                    "success": True,
+                    "job_ids": job_ids,
+                    "message": result.get("message", f"{len(job_ids)} jobs stopped")
+                }
+            })
+        else:
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.INVOICES.ERROR,
+                "payload": {
+                    "error": result.get("error", "Stop failed"),
+                    "code": result.get("code", "STOP_ERROR")
+                }
+            })
 
     except Exception as e:
         logger.error(f"[INVOICES] Stop failed: {e}", exc_info=True)
@@ -409,7 +432,7 @@ async def handle_invoices_delete(
     """
     Handle invoices.delete WebSocket event.
 
-    Deletes completed/processed invoices.
+    Deletes completed/processed invoices using centralized job_actions_handler.
     """
     job_ids = payload.get("job_ids", [])
     company_id = payload.get("company_id")
@@ -427,16 +450,39 @@ async def handle_invoices_delete(
         return
 
     try:
-        # TODO: Integrate with document deletion logic
+        # Get company context
+        context = _get_company_context(uid, company_id)
 
-        await hub.broadcast(uid, {
-            "type": WS_EVENTS.INVOICES.DELETED,
-            "payload": {
-                "success": True,
-                "job_ids": job_ids,
-                "message": f"{len(job_ids)} documents deleted"
+        # Use centralized job actions handler
+        from app.wrappers.job_actions_handler import handle_job_delete
+
+        result = await handle_job_delete(
+            uid=uid,
+            job_type="apbookeeper",
+            payload=payload,
+            company_data={
+                "company_id": company_id,
+                "mandate_path": context.get("mandate_path", ""),
             }
-        })
+        )
+
+        if result.get("success"):
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.INVOICES.DELETED,
+                "payload": {
+                    "success": True,
+                    "job_ids": result.get("deleted_jobs", job_ids),
+                    "message": result.get("message", f"{len(job_ids)} documents deleted")
+                }
+            })
+        else:
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.INVOICES.ERROR,
+                "payload": {
+                    "error": result.get("error", "Delete failed"),
+                    "code": result.get("code", "DELETE_ERROR")
+                }
+            })
 
     except Exception as e:
         logger.error(f"[INVOICES] Delete failed: {e}", exc_info=True)
@@ -457,7 +503,7 @@ async def handle_invoices_restart(
     """
     Handle invoices.restart WebSocket event.
 
-    Restarts a job that is stuck or needs to be re-processed.
+    Restarts a job that is stuck or needs to be re-processed using centralized job_actions_handler.
     """
     job_id = payload.get("job_id")
     company_id = payload.get("company_id")
@@ -475,16 +521,39 @@ async def handle_invoices_restart(
         return
 
     try:
-        # TODO: Integrate with job management system
+        # Get company context
+        context = _get_company_context(uid, company_id)
 
-        await hub.broadcast(uid, {
-            "type": WS_EVENTS.INVOICES.RESTARTED,
-            "payload": {
-                "success": True,
-                "job_id": job_id,
-                "message": f"Job {job_id} has been successfully reset"
+        # Use centralized job actions handler
+        from app.wrappers.job_actions_handler import handle_job_restart
+
+        result = await handle_job_restart(
+            uid=uid,
+            job_type="apbookeeper",
+            payload=payload,
+            company_data={
+                "company_id": company_id,
+                "mandate_path": context.get("mandate_path", ""),
             }
-        })
+        )
+
+        if result.get("success"):
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.INVOICES.RESTARTED,
+                "payload": {
+                    "success": True,
+                    "job_id": job_id,
+                    "message": result.get("message", f"Job {job_id} has been successfully reset")
+                }
+            })
+        else:
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.INVOICES.ERROR,
+                "payload": {
+                    "error": result.get("error", "Restart failed"),
+                    "code": result.get("code", "RESTART_ERROR")
+                }
+            })
 
     except Exception as e:
         logger.error(f"[INVOICES] Restart failed: {e}", exc_info=True)

@@ -113,24 +113,26 @@ async def _resolve_mandate_path(db, user_id: str, company_id: str) -> Optional[s
     Resolve mandate_path from company_id.
 
     Searches in order:
-    1. Redis cache (company:{uid}:selected) - fastest, set during orchestration
+    1. Redis cache Niveau 2 (company:{uid}:{cid}:context) - fastest, set during orchestration
     2. Firestore mandates/{company_id}
     3. Firestore clients/{user_id}/companies/{company_id}
     """
     try:
-        # 1. Try Redis cache first (set during orchestration Phase 1)
+        # 1. Try Redis cache Niveau 2 first (set during orchestration Phase 1)
         try:
             from ...redis_client import get_redis
+            from ...llm_service.redis_namespaces import build_company_context_key
             import json
             redis_client = get_redis()
-            cached = redis_client.get(f"company:{user_id}:selected")
+            context_key = build_company_context_key(user_id, company_id)
+            cached = redis_client.get(context_key)
             if cached:
                 if isinstance(cached, bytes):
                     cached = cached.decode('utf-8')
                 data = json.loads(cached)
                 mandate_path = data.get("mandate_path", "")
                 if mandate_path:
-                    logger.info(f"[BILLING] mandate_path from Redis cache: {mandate_path[:50]}...")
+                    logger.info(f"[BILLING] mandate_path from Redis Niveau 2 cache: {mandate_path[:50]}...")
                     return mandate_path
         except Exception as redis_err:
             logger.warning(f"[BILLING] Redis lookup failed: {redis_err}")

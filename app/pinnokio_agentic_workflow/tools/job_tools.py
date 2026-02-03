@@ -1096,7 +1096,7 @@ class ContextTools:
         """Définition COURTE de l'outil UPDATE_CONTEXT (pour l'API)."""
         return {
             "name": "UPDATE_CONTEXT",
-            "description": "✏️ Mise à jour atomique d'un contexte (router/accounting/bank/company). Opérations: add, replace, delete. Demande approbation automatique. ⚠️ router=Règles de routage, bank=Contexte bancaire. Utilisez GET_TOOL_HELP pour plus de détails.",
+            "description": "✏️ Mise à jour atomique d'un contexte (router/accounting/bank/company). Utilise des ANCRES (12+ caractères avant/après) pour localiser précisément la zone à modifier. Opérations: add, replace, delete. Utilisez GET_TOOL_HELP pour plus de détails.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -1107,34 +1107,33 @@ class ContextTools:
                     },
                     "service_name": {
                         "type": "string",
-                        "description": "Nom du service (requis si context_type=router, ex: hr, banks_cash, etc.)"
+                        "description": "Nom du service (requis si context_type=router, ex: hr, banks_cash, letters, etc.)"
                     },
                     "operations": {
                         "type": "array",
-                        "description": "Liste des opérations de mise à jour à appliquer",
+                        "description": "Liste des opérations avec ancres. 🎯 Utilisez anchor_before/anchor_after (12+ caractères) pour localiser la zone.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "section_type": {
-                                    "type": "string",
-                                    "enum": ["beg", "mid", "end"],
-                                    "description": "Partie du texte : début (beg), milieu (mid), fin (end)"
-                                },
                                 "operation": {
                                     "type": "string",
                                     "enum": ["add", "replace", "delete"],
-                                    "description": "Type d'opération"
+                                    "description": "Type d'opération : add (ajouter), replace (remplacer), delete (supprimer)"
+                                },
+                                "anchor_before": {
+                                    "type": "string",
+                                    "description": "🔗 12+ caractères QUI PRÉCÈDENT la zone à modifier. La zone commence APRÈS cette ancre. Null = début du texte."
+                                },
+                                "anchor_after": {
+                                    "type": "string",
+                                    "description": "🔗 12+ caractères QUI SUIVENT la zone à modifier. La zone finit AVANT cette ancre. Null = fin du texte."
                                 },
                                 "new_content": {
                                     "type": "string",
-                                    "description": "Nouveau contenu (pour add/replace)"
-                                },
-                                "context": {
-                                    "type": "string",
-                                    "description": "Texte exact à trouver (requis pour mid, optionnel pour beg/end)"
+                                    "description": "Nouveau contenu (pour add/replace, vide pour delete)"
                                 }
                             },
-                            "required": ["section_type", "operation", "new_content"]
+                            "required": ["operation"]
                         }
                     },
                     "preview_only": {
@@ -1302,8 +1301,69 @@ class ContextTools:
                     "error": "Le paramètre 'operations' doit être une liste non vide"
                 }
             
-            # Appliquer les opérations avec TextUpdaterAgent
-            update_result = self.text_updater.apply_operations(
+            # 🆕 VALIDATION AVEC SYSTÈME D'ANCRES (anchor_before / anchor_after)
+            for i, op in enumerate(operations):
+                if not isinstance(op, dict):
+                    return {
+                        "success": False,
+                        "error": f"Opération {i+1} : doit être un dictionnaire"
+                    }
+                
+                operation = op.get("operation")
+                anchor_before = op.get("anchor_before")
+                anchor_after = op.get("anchor_after")
+                new_content = op.get("new_content", "")
+                
+                # Validation : 'operation' est requis
+                if not operation:
+                    return {
+                        "success": False,
+                        "error": f"Opération {i+1} : 'operation' est requis (add, replace, delete)"
+                    }
+                
+                if operation not in ["add", "replace", "delete"]:
+                    return {
+                        "success": False,
+                        "error": f"Opération {i+1} : operation='{operation}' invalide. Utilisez 'add', 'replace', ou 'delete'"
+                    }
+                
+                # Validation : Pour replace/delete, au moins une ancre est requise
+                if operation in ["replace", "delete"]:
+                    if anchor_before is None and anchor_after is None:
+                        return {
+                            "success": False,
+                            "error": (
+                                f"Opération {i+1} : Pour '{operation}', au moins une ancre est requise. "
+                                f"🎯 Fournissez 'anchor_before' (12+ caractères AVANT la zone) "
+                                f"et/ou 'anchor_after' (12+ caractères APRÈS la zone)."
+                            ),
+                            "operation_index": i,
+                            "operation": op
+                        }
+                
+                # Validation : new_content requis pour add/replace
+                if operation in ["add", "replace"]:
+                    if new_content is None:
+                        return {
+                            "success": False,
+                            "error": f"Opération {i+1} : 'new_content' est requis pour operation='{operation}'"
+                        }
+                
+                # Validation : Ancres doivent avoir une longueur minimale (recommandé 12+)
+                MIN_ANCHOR_LENGTH = 8  # Minimum 8 caractères
+                if anchor_before and len(anchor_before) < MIN_ANCHOR_LENGTH:
+                    logger.warning(
+                        f"[UPDATE_CONTEXT] Opération {i+1} : anchor_before trop court ({len(anchor_before)} chars). "
+                        f"Recommandé: 12+ caractères pour éviter les ambiguïtés."
+                    )
+                if anchor_after and len(anchor_after) < MIN_ANCHOR_LENGTH:
+                    logger.warning(
+                        f"[UPDATE_CONTEXT] Opération {i+1} : anchor_after trop court ({len(anchor_after)} chars). "
+                        f"Recommandé: 12+ caractères pour éviter les ambiguïtés."
+                    )
+            
+            # 🆕 Appliquer les opérations avec le NOUVEAU système d'ancres
+            update_result = self.text_updater.apply_operations_v2(
                 text_to_update=original_text,
                 operations_list=operations
             )

@@ -21,12 +21,14 @@ SYNC AFTER SAVE:
     After any save operation, re-broadcasts COMPANY.DETAILS to keep auth-store in sync.
 """
 
+import asyncio
 import logging
 from typing import Dict, Any
 
 from app.ws_hub import hub
 from app.ws_events import WS_EVENTS
 from app.wrappers.page_state_manager import get_page_state_manager
+from app.firebase_providers import FirebaseManagement
 from .handlers import get_company_settings_handlers
 
 logger = logging.getLogger("company_settings.orchestration")
@@ -832,4 +834,200 @@ async def handle_load_asset_accounts(
         await hub.broadcast(uid, {
             "type": WS_EVENTS.COMPANY_SETTINGS.ERROR,
             "payload": {"error": str(e)}
+        })
+
+
+# ============================================
+# COMPANY DELETION HANDLER
+# ============================================
+
+async def handle_delete_company(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """
+    Orchestrate company deletion with progress broadcasting.
+
+    Sends DELETION_PROGRESS events during the process and
+    COMPANY_DELETED (or ERROR) when complete.
+
+    Args:
+        uid: Firebase user ID
+        session_id: WebSocket session ID
+        payload: {
+            "company_id": str,
+            "mandate_path": str,
+            "confirmation_name": str
+        }
+    """
+    company_id = payload.get("company_id")
+    mandate_path = payload.get("mandate_path")
+    confirmation_name = payload.get("confirmation_name")
+
+    if not company_id or not mandate_path or not confirmation_name:
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.ERROR,
+            "payload": {
+                "error": "Missing required parameters: company_id, mandate_path, confirmation_name",
+                "code": "INVALID_PARAMS",
+            }
+        })
+        return
+
+    handlers = get_company_settings_handlers()
+
+    # Progress callback - broadcast each step to frontend
+    async def on_progress(step_name: str, step_index: int, total_steps: int):
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.DELETION_PROGRESS,
+            "payload": {
+                "step": step_name,
+                "current": step_index,
+                "total": total_steps,
+                "company_id": company_id,
+            }
+        })
+
+    try:
+        logger.info(f"[COMPANY_SETTINGS] Delete company started for company_id={company_id}")
+
+        # Run synchronous handler in thread to avoid blocking event loop
+        # (Firebase, Drive, ChromaDB, GCS, etc.)
+        result = await asyncio.to_thread(
+            handlers.delete_company,
+            user_id=uid,
+            company_id=company_id,
+            mandate_path=mandate_path,
+            confirmation_name=confirmation_name,
+            progress_callback=on_progress,
+        )
+
+        # ─────────────────────────────────────────────────
+        # NEON HR DATABASE DELETION (async, dans la boucle principale)
+        # Utilise le pool de connexions asyncpg correctement pour scalabilité
+        # ─────────────────────────────────────────────────
+        neon_report_entry = None
+        try:
+            from app.tools.neon_hr_manager import get_neon_hr_manager
+
+            neon_manager = get_neon_hr_manager()
+            neon_result = await neon_manager.delete_company(mandate_path, cascade=True)
+
+            if neon_result.get("success"):
+                counts = neon_result.get("deleted_counts", {})
+                if neon_result.get("company_id"):
+                    neon_report_entry = {
+                        "name": "HR Database (Neon)",
+                        "status": "success",
+                        "detail": (
+                            f"Deleted: {counts.get('employees', 0)} employees, "
+                            f"{counts.get('contracts', 0)} contracts, "
+                            f"{counts.get('payroll_results', 0)} payroll records"
+                        )
+                    }
+                    logger.info(
+                        f"[COMPANY_SETTINGS] Neon HR deleted for company_id={company_id}: "
+                        f"{counts}"
+                    )
+                else:
+                    neon_report_entry = {
+                        "name": "HR Database (Neon)",
+                        "status": "skipped",
+                        "detail": "Company not in Neon"
+                    }
+            else:
+                neon_report_entry = {
+                    "name": "HR Database (Neon)",
+                    "status": "failed",
+                    "detail": neon_result.get("error", "Unknown error")
+                }
+                logger.warning(
+                    f"[COMPANY_SETTINGS] Neon HR delete failed for company_id={company_id}: "
+                    f"{neon_result.get('error')}"
+                )
+        except Exception as neon_e:
+            logger.warning(f"[COMPANY_SETTINGS] Neon HR cleanup failed: {neon_e}")
+            neon_report_entry = {
+                "name": "HR Database (Neon)",
+                "status": "failed",
+                "detail": str(neon_e)
+            }
+
+        # Ajouter le rapport Neon au résultat global
+        report = result.get("report", [])
+        if neon_report_entry:
+            report.append(neon_report_entry)
+
+        # Broadcast final result with report
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.COMPANY_DELETED,
+            "payload": {
+                "success": result.get("success", False),
+                "message": result.get("message", ""),
+                "report": report,
+                "company_id": company_id,
+            }
+        })
+
+        logger.info(
+            f"[COMPANY_SETTINGS] Delete company completed for company_id={company_id} "
+            f"success={result.get('success')}"
+        )
+
+        # ─────────────────────────────────────────────────
+        # POST-DELETION ACTION: Check remaining companies
+        # ─────────────────────────────────────────────────
+        if result.get("success"):
+            try:
+                firebase_mgmt = FirebaseManagement()
+                
+                # Fetch remaining mandates for this user
+                remaining_mandates = await asyncio.to_thread(
+                    firebase_mgmt.fetch_all_mandates_light,
+                    uid
+                )
+                
+                if remaining_mandates and len(remaining_mandates) > 0:
+                    # Other companies exist - send switch_company action
+                    first_mandate = remaining_mandates[0]
+                    next_company_id = first_mandate.get("contact_space_id") or first_mandate.get("id")
+                    
+                    logger.info(
+                        f"[COMPANY_SETTINGS] Post-deletion: {len(remaining_mandates)} companies remaining, "
+                        f"switching to {next_company_id}"
+                    )
+                    
+                    await hub.broadcast(uid, {
+                        "type": WS_EVENTS.COMPANY_SETTINGS.POST_DELETION_ACTION,
+                        "payload": {
+                            "action": "switch_company",
+                            "next_company_id": next_company_id,
+                            "company_id": company_id,
+                        }
+                    })
+                else:
+                    # No companies left - send logout action
+                    logger.info(
+                        f"[COMPANY_SETTINGS] Post-deletion: No companies remaining for uid={uid}, "
+                        "sending logout action"
+                    )
+                    
+                    await hub.broadcast(uid, {
+                        "type": WS_EVENTS.COMPANY_SETTINGS.POST_DELETION_ACTION,
+                        "payload": {
+                            "action": "logout",
+                            "company_id": company_id,
+                        }
+                    })
+                    
+            except Exception as post_e:
+                logger.error(f"[COMPANY_SETTINGS] Post-deletion action failed: {post_e}")
+                # Don't fail the whole operation, just log the error
+
+    except Exception as e:
+        logger.error(f"[COMPANY_SETTINGS] Delete company failed: {e}")
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.ERROR,
+            "payload": {"error": str(e), "code": "DELETE_COMPANY_ERROR"}
         })

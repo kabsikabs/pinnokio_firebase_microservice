@@ -30,7 +30,7 @@ from typing import Any, Dict, Optional
 from app.redis_client import get_redis
 from app.ws_events import WS_EVENTS
 from app.ws_hub import hub
-from app.frontend.core.page_state_manager import get_page_state_manager
+from app.wrappers.page_state_manager import get_page_state_manager
 
 from .handlers import get_chat_handlers
 
@@ -140,7 +140,8 @@ async def _run_chat_orchestration(
 
     try:
         # ─────────────────────────────────────────────────
-        # Step 1: Load chat sessions
+        # Step 1: Load chat sessions (only from 'chats' compartment)
+        # Note: 'active_chats' compartment is no longer used (Phase 10 simplification)
         # ─────────────────────────────────────────────────
         logger.info(f"[CHAT] Step 1: Loading sessions for {company_id}")
 
@@ -148,11 +149,11 @@ async def _run_chat_orchestration(
             uid=uid,
             company_id=company_id,
             space_code=company_id,  # Usually same as company_id
-            mode="chats"
+            mode="chats",  # Only load from chats compartment
         )
 
         sessions = sessions_result.get("sessions", [])
-        logger.info(f"[CHAT] Loaded {len(sessions)} sessions")
+        logger.info(f"[CHAT] Loaded {len(sessions)} sessions from chats compartment")
 
         # ─────────────────────────────────────────────────
         # Step 2: Load tasks
@@ -232,17 +233,9 @@ async def _run_chat_orchestration(
 
         logger.info(f"[CHAT] Orchestration complete: uid={uid}")
 
-        # ─────────────────────────────────────────────────
-        # Step 7: Update LLM session state (mark as on chat page)
-        # ─────────────────────────────────────────────────
-        asyncio.create_task(
-            _update_llm_session_for_chat(
-                uid=uid,
-                company_id=company_id,
-                mandate_path=mandate_path,
-                thread_key=selected_session_id,
-            )
-        )
+        # NOTE: is_on_chat_page est mis à jour par enter_chat() lors de la sélection
+        # d'un thread (handle_session_select), ce qui évite les duplications et
+        # garantit un thread_key toujours défini.
 
     except Exception as e:
         logger.error(f"[CHAT] Orchestration error: {e}", exc_info=True)
@@ -250,53 +243,6 @@ async def _run_chat_orchestration(
             "type": WS_EVENTS.CHAT.ERROR,
             "payload": {"error": str(e), "code": "ORCHESTRATION_ERROR"}
         })
-
-
-# ============================================
-# LLM SESSION HELPERS
-# ============================================
-
-async def _update_llm_session_for_chat(
-    uid: str,
-    company_id: str,
-    mandate_path: str,
-    thread_key: Optional[str] = None,
-):
-    """
-    Update LLM session state to indicate user is on chat page.
-
-    This allows the LLM service to:
-    - Enable real-time streaming to the chat interface
-    - Track the active thread for context
-    - Adjust tool availability based on chat mode
-    """
-    try:
-        from app.llm_service.session_state_manager import get_session_state_manager
-
-        session_manager = get_session_state_manager()
-
-        # Build updates dict with fields to update
-        updates = {
-            "is_on_chat_page": True,
-            "current_active_thread": thread_key,
-            "mandate_path": mandate_path,
-        }
-
-        # Update session state to mark user as on chat page
-        session_manager.update_session_state(
-            user_id=uid,  # SessionStateManager uses user_id, not uid
-            company_id=company_id,
-            updates=updates
-        )
-
-        logger.info(
-            f"[CHAT] LLM session updated: uid={uid} company={company_id} "
-            f"thread={thread_key} is_on_chat_page=True"
-        )
-
-    except Exception as e:
-        # Non-critical - log but don't fail orchestration
-        logger.warning(f"[CHAT] Failed to update LLM session state: {e}")
 
 
 # ============================================
@@ -311,18 +257,27 @@ async def handle_session_select(
     """
     Handle chat.session_select WebSocket event.
 
-    Loads message history for the selected session.
+    Loads message history for the selected session AND connects to the LLM context.
+
+    ⚠️ IMPORTANT: This handler MUST call llm_manager.enter_chat() to:
+    1. Initialize/retrieve the LLM session
+    2. Mark user presence on the thread
+    3. Create the Brain with history loaded from RTDB
+    4. Activate listeners for onboarding-like modes
+
+    Without enter_chat(), the messages are displayed but the LLM agent has no context.
 
     Args:
         uid: Firebase user ID
         session_id: WebSocket session ID
-        payload: Must contain thread_key, company_id
+        payload: Must contain thread_key, company_id, optionally chat_mode
 
     Returns:
         Response dict
     """
     thread_key = payload.get("thread_key")
     company_id = payload.get("company_id")
+    chat_mode = payload.get("chat_mode", DEFAULT_CHAT_MODE)
 
     if not thread_key or not company_id:
         return {
@@ -330,21 +285,55 @@ async def handle_session_select(
             "payload": {"success": False, "error": "Missing thread_key or company_id"}
         }
 
-    logger.info(f"[CHAT] Session select: {thread_key}")
+    logger.info(f"[CHAT] Session select: {thread_key} (mode={chat_mode})")
 
     try:
+        # ─────────────────────────────────────────────────
+        # STEP 1: Connect to LLM context via enter_chat
+        # This is CRITICAL - same as LLM.enter_chat in _resolve_method
+        # ─────────────────────────────────────────────────
+        from app.llm_service.llm_manager import get_llm_manager
+
+        llm_manager = get_llm_manager()
+
+        enter_result = await llm_manager.enter_chat(
+            user_id=uid,
+            collection_name=company_id,
+            thread_key=thread_key,
+            chat_mode=chat_mode,
+        )
+
+        if not enter_result.get("success", False):
+            logger.warning(
+                f"[CHAT] enter_chat returned non-success: {enter_result}. "
+                f"Continuing with history load anyway."
+            )
+
+        logger.info(f"[CHAT] LLM context connected for thread={thread_key}")
+
+        # ─────────────────────────────────────────────────
+        # STEP 2: Load formatted history for frontend display
+        # ─────────────────────────────────────────────────
         chat_handlers = get_chat_handlers()
 
-        # Load history for selected session
+        # Get mode from payload (defaults to "chats" for backwards compatibility)
+        mode = payload.get("mode", "chats")
+
         history_result = await chat_handlers.load_history(
             uid=uid,
             company_id=company_id,
             space_code=company_id,
             thread_key=thread_key,
-            mode="chats"
+            mode=mode
         )
 
-        # Broadcast history loaded
+        # NOTE: job_data for specialized chat modes (apbookeeper, banker, router)
+        # has been removed in Phase 10 simplification. The frontend no longer
+        # uses this data as the specialized sidebars have been removed.
+
+        # ─────────────────────────────────────────────────
+        # STEP 3: Broadcast to frontend
+        # ─────────────────────────────────────────────────
         await hub.broadcast(uid, {
             "type": WS_EVENTS.CHAT.HISTORY_LOADED,
             "payload": {
@@ -352,6 +341,7 @@ async def handle_session_select(
                 "thread_key": thread_key,
                 "messages": history_result.get("messages", []),
                 "total": history_result.get("total", 0),
+                "pending_card": history_result.get("pending_card"),
             }
         })
 
@@ -361,7 +351,7 @@ async def handle_session_select(
         }
 
     except Exception as e:
-        logger.error(f"[CHAT] Session select error: {e}")
+        logger.error(f"[CHAT] Session select error: {e}", exc_info=True)
         return {
             "type": "chat.session_select",
             "payload": {"success": False, "error": str(e)}
@@ -628,6 +618,305 @@ async def handle_mode_change(
 
 
 # ============================================
+# SESSION AUTO-NAMING HANDLER
+# ============================================
+
+async def handle_session_auto_name(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Handle chat.session_auto_name WebSocket event.
+
+    Automatically generates a name for a virgin chat session based on
+    the first message content. Uses LLM for intelligent naming with
+    heuristic fallback.
+
+    Args:
+        uid: Firebase user ID
+        session_id: WebSocket session ID
+        payload: Must contain thread_key, first_message, company_id
+
+    Returns:
+        Response dict with generated name
+    """
+    thread_key = payload.get("thread_key")
+    first_message = payload.get("first_message")
+    company_id = payload.get("company_id")
+    use_llm = payload.get("use_llm", True)  # Default to LLM
+
+    if not thread_key or not first_message or not company_id:
+        return {
+            "type": "chat.session_auto_name",
+            "payload": {"success": False, "error": "Missing required fields"}
+        }
+
+    logger.info(f"[CHAT] Auto-naming session {thread_key} with LLM={use_llm}")
+
+    try:
+        chat_handlers = get_chat_handlers()
+
+        if use_llm:
+            result = await chat_handlers.auto_name_session_llm(
+                uid=uid,
+                company_id=company_id,
+                space_code=company_id,
+                thread_key=thread_key,
+                first_message=first_message,
+            )
+        else:
+            result = await chat_handlers.auto_name_session(
+                uid=uid,
+                company_id=company_id,
+                space_code=company_id,
+                thread_key=thread_key,
+                first_message=first_message,
+            )
+
+        if result.get("success"):
+            # Broadcast the renamed session
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.CHAT.SESSIONS_LIST,
+                "payload": {
+                    "action": "renamed",
+                    "thread_key": thread_key,
+                    "new_name": result.get("new_name"),
+                    "method": result.get("method", "unknown"),
+                }
+            })
+
+        return {
+            "type": "chat.session_auto_name",
+            "payload": result
+        }
+
+    except Exception as e:
+        logger.error(f"[CHAT] Auto-naming error: {e}")
+        return {
+            "type": "chat.session_auto_name",
+            "payload": {"success": False, "error": str(e)}
+        }
+
+
+# ============================================
+# WORKFLOW CHECKLIST HANDLERS
+# ============================================
+
+async def handle_workflow_checklist_set(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Handle chat.workflow_set WebSocket event.
+
+    Sets the workflow checklist for the current chat session.
+    This is typically called by the microservice when starting
+    an onboarding or multi-step workflow.
+
+    Args:
+        uid: Firebase user ID
+        session_id: WebSocket session ID
+        payload: Must contain checklist data
+
+    Returns:
+        Response dict
+    """
+    checklist = payload.get("checklist", {})
+    thread_key = payload.get("thread_key")
+    company_id = payload.get("company_id")
+
+    if not checklist:
+        return {
+            "type": "chat.workflow_set",
+            "payload": {"success": False, "error": "Missing checklist data"}
+        }
+
+    logger.info(f"[CHAT] Setting workflow checklist with {checklist.get('total_steps', 0)} steps")
+
+    try:
+        # Broadcast the checklist to the frontend
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.CHAT.WORKFLOW_SET,
+            "payload": {
+                "success": True,
+                "checklist": checklist,
+                "thread_key": thread_key,
+                "company_id": company_id,
+            }
+        })
+
+        return {
+            "type": "chat.workflow_set",
+            "payload": {"success": True}
+        }
+
+    except Exception as e:
+        logger.error(f"[CHAT] Workflow set error: {e}")
+        return {
+            "type": "chat.workflow_set",
+            "payload": {"success": False, "error": str(e)}
+        }
+
+
+async def handle_workflow_step_update(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Handle chat.workflow_step_update WebSocket event.
+
+    Updates the status of a specific step in the workflow checklist.
+
+    Args:
+        uid: Firebase user ID
+        session_id: WebSocket session ID
+        payload: Must contain step_id, status
+
+    Returns:
+        Response dict
+    """
+    step_id = payload.get("step_id")
+    status = payload.get("status")  # pending, in_progress, completed, error
+    message = payload.get("message", "")
+    timestamp = payload.get("timestamp")
+
+    if not step_id or not status:
+        return {
+            "type": "chat.workflow_step_update",
+            "payload": {"success": False, "error": "Missing step_id or status"}
+        }
+
+    logger.info(f"[CHAT] Workflow step update: {step_id} -> {status}")
+
+    try:
+        from datetime import datetime, timezone
+
+        if not timestamp:
+            timestamp = datetime.now(timezone.utc).isoformat()
+
+        # Broadcast the step update to the frontend
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.CHAT.WORKFLOW_STEP_UPDATE,
+            "payload": {
+                "success": True,
+                "step_id": step_id,
+                "status": status,
+                "message": message,
+                "timestamp": timestamp,
+            }
+        })
+
+        return {
+            "type": "chat.workflow_step_update",
+            "payload": {"success": True, "step_id": step_id, "status": status}
+        }
+
+    except Exception as e:
+        logger.error(f"[CHAT] Workflow step update error: {e}")
+        return {
+            "type": "chat.workflow_step_update",
+            "payload": {"success": False, "error": str(e)}
+        }
+
+
+# ============================================
+# INTERACTIVE CARD HANDLERS
+# ============================================
+
+async def handle_card_clicked(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Handle chat.card_clicked WebSocket event.
+
+    Bridge between Next.js frontend and send_card_response().
+    Routes the card click to the LLM manager for processing.
+
+    Args:
+        uid: Firebase user ID
+        session_id: WebSocket session ID
+        payload: Must contain card_id, action, params, company_id, thread_key
+
+    Returns:
+        Response dict with result
+    """
+    card_id = payload.get("card_id")
+    action = payload.get("action")
+    params = payload.get("params", {})
+    company_id = payload.get("company_id")
+    thread_key = payload.get("thread_key")
+    message_id = payload.get("message_id")
+
+    # Validation
+    if not card_id or not action:
+        return {
+            "type": "chat.card_clicked",
+            "payload": {"success": False, "error": "Missing card_id or action"}
+        }
+
+    if not company_id or not thread_key:
+        return {
+            "type": "chat.card_clicked",
+            "payload": {"success": False, "error": "Missing company_id or thread_key"}
+        }
+
+    logger.info(
+        f"[CHAT] Card clicked: card={card_id} action={action} "
+        f"thread={thread_key} message_id={message_id}"
+    )
+
+    try:
+        from app.llm_service.llm_manager import get_llm_manager
+
+        llm_manager = get_llm_manager()
+
+        # Extract comment from params
+        user_message = params.get("comment", "")
+
+        # Call the existing send_card_response method
+        result = await llm_manager.send_card_response(
+            user_id=uid,
+            collection_name=company_id,
+            thread_key=thread_key,
+            card_name=card_id,
+            card_message_id=message_id or "",
+            action=action,
+            user_message=user_message,
+            message_data=params,  # Pass all params for intermediation mode
+        )
+
+        # Broadcast result to frontend
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.CHAT.CARD_RECEIVED,  # Reuse existing event to clear card
+            "payload": {
+                "success": result.get("success", False),
+                "action": action,
+                "card_id": card_id,
+                "responded": True,
+            }
+        })
+
+        logger.info(f"[CHAT] Card response sent: success={result.get('success')}")
+
+        return {
+            "type": "chat.card_clicked",
+            "payload": result
+        }
+
+    except Exception as e:
+        logger.error(f"[CHAT] Card click error: {e}", exc_info=True)
+        return {
+            "type": "chat.card_clicked",
+            "payload": {"success": False, "error": str(e)}
+        }
+
+
+# ============================================
 # EXPORTS
 # ============================================
 
@@ -638,5 +927,9 @@ __all__ = [
     "handle_session_delete",
     "handle_session_rename",
     "handle_mode_change",
+    "handle_session_auto_name",
+    "handle_workflow_checklist_set",
+    "handle_workflow_step_update",
+    "handle_card_clicked",
     "CHAT_MODES",
 ]

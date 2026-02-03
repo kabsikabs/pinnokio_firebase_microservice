@@ -30,7 +30,7 @@ from typing import Any, Dict, Optional
 from app.firebase_providers import get_firebase_management
 from app.ws_hub import hub
 from app.ws_events import WS_EVENTS
-from app.frontend.core.pending_action_manager import get_pending_action_manager
+from app.wrappers.pending_action_manager import get_pending_action_manager
 
 logger = logging.getLogger("balance.handlers")
 

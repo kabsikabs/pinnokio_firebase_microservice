@@ -17,6 +17,7 @@ from .tools.g_cred import get_secret
 from .firebase_client import get_firestore
 from .listeners_manager import ListenersManager
 from .ws_hub import hub
+from .ws_events import WS_EVENTS
 from . import runtime as runtime_state
 from google.cloud.firestore_v1 import SERVER_TIMESTAMP
 from .redis_client import get_redis
@@ -254,27 +255,38 @@ async def google_auth_callback(request: Request):
     5. Notifie l'agent en attente via le système de chat
     """
     try:
+        logger.info("═" * 70)
+        logger.info("[GOOGLE_AUTH_CALLBACK] 🚀 DÉBUT callback OAuth")
+        logger.info("═" * 70)
+        
         params = request.query_params
         code = params.get('code')
         state_str = params.get('state')
         error = params.get('error')
         
+        logger.info(f"[GOOGLE_AUTH_CALLBACK] 📥 Paramètres reçus - code={'présent' if code else 'MANQUANT'} state={'présent' if state_str else 'MANQUANT'} error={error}")
+        
         if error:
-            logger.error(f"google_auth_callback_error error={error}")
+            logger.error(f"[GOOGLE_AUTH_CALLBACK] ❌ Erreur OAuth: {error}")
             return HTMLResponse(content=f"<h1>Erreur d'authentification</h1><p>{error}</p>", status_code=400)
             
         if not code or not state_str:
+            logger.error(f"[GOOGLE_AUTH_CALLBACK] ❌ Paramètres manquants - code={bool(code)} state={bool(state_str)}")
             return HTMLResponse(content="<h1>Paramètres manquants</h1><p>Code ou State manquant.</p>", status_code=400)
             
         # 1. Décoder le state
+        logger.info("[GOOGLE_AUTH_CALLBACK] 📊 ÉTAPE 1: Décodage du state")
         try:
             try:
                 decoded_state = base64.b64decode(state_str).decode('utf-8')
                 state = _json.loads(decoded_state)
-            except:
+                logger.info("[GOOGLE_AUTH_CALLBACK] ✅ State décodé via base64")
+            except Exception as decode_err:
+                logger.info(f"[GOOGLE_AUTH_CALLBACK] ⚠️ Décodage base64 échoué, tentative JSON direct: {decode_err}")
                 state = _json.loads(state_str)
+                logger.info("[GOOGLE_AUTH_CALLBACK] ✅ State décodé via JSON direct")
                 
-            logger.info(f"google_auth_callback state={state}")
+            logger.info(f"[GOOGLE_AUTH_CALLBACK] 📋 State décodé: {state}")
             
             user_id = state.get('user_id')
             job_id = state.get('job_id')
@@ -283,40 +295,58 @@ async def google_auth_callback(request: Request):
             redirect_uri = state.get('redirect_uri')
             chat_id = state.get('chat_id')  # ✅ RÉCUPÉRATION DU CHAT_ID du state OAuth
             
+            logger.info(f"[GOOGLE_AUTH_CALLBACK] 📋 Extractions - user_id={user_id} source={source} mode={communication_mode} redirect_uri={redirect_uri}")
+            
             if not user_id:
                 raise ValueError("user_id manquant dans le state")
                 
         except Exception as e:
-            logger.error(f"google_auth_callback_state_error error={e}")
+            logger.error(f"[GOOGLE_AUTH_CALLBACK] ❌ Erreur décodage state: {e}", exc_info=True)
             return HTMLResponse(content=f"<h1>Erreur de contexte</h1><p>State invalide: {e}</p>", status_code=400)
             
         # 2. Récupérer la configuration client depuis Firebase
+        logger.info("[GOOGLE_AUTH_CALLBACK] 📊 ÉTAPE 2: Récupération credentials")
         # On récupère le token actuel pour extraire client_id/secret
         fb_user = get_firebase_management()
-        fb_user.user_id = user_id
         
         try:
-            creds_info = fb_user.user_app_permission_token()
-        except:
+            # ⭐ CORRECTION: user_app_permission_token nécessite user_id comme argument
+            creds_info = fb_user.user_app_permission_token(user_id)
+            if creds_info:
+                logger.info(f"[GOOGLE_AUTH_CALLBACK] ✅ Credentials récupérés depuis Firebase - client_id={'présent' if creds_info.get('client_id') else 'MANQUANT'}")
+            else:
+                logger.info("[GOOGLE_AUTH_CALLBACK] ⚠️ Aucun credential trouvé dans Firebase pour cet utilisateur")
+                creds_info = {}
+        except Exception as fb_err:
+            logger.warning(f"[GOOGLE_AUTH_CALLBACK] ⚠️ Erreur récupération Firebase: {fb_err}")
             creds_info = {}
         
-        client_id = creds_info.get('client_id')
-        client_secret = creds_info.get('client_secret')
-        token_uri = creds_info.get('token_uri', 'https://oauth2.googleapis.com/token')
+        client_id = creds_info.get('client_id') if creds_info else None
+        client_secret = creds_info.get('client_secret') if creds_info else None
+        token_uri = creds_info.get('token_uri', 'https://oauth2.googleapis.com/token') if creds_info else 'https://oauth2.googleapis.com/token'
         
         if not client_id or not client_secret:
-             # Fallback: Essayer de récupérer depuis les secrets globaux
+             logger.info("[GOOGLE_AUTH_CALLBACK] ⚠️ Credentials manquants, tentative fallback depuis secrets globaux")
+             # Fallback: Essayer de récupérer depuis les secrets globaux (GOOGLE_AUTH2_KEY)
              try:
-                app_creds = _json.loads(get_secret("pinnokio_google_client_secret"))
+                # ⭐ CORRECTION: Utiliser GOOGLE_AUTH2_KEY au lieu de pinnokio_google_client_secret
+                google_auth_key = os.getenv('GOOGLE_AUTH2_KEY', 'GOOGLE_AUTH2_KEY')
+                app_creds = _json.loads(get_secret(google_auth_key))
                 client_id = app_creds.get('web', {}).get('client_id')
                 client_secret = app_creds.get('web', {}).get('client_secret')
-             except:
+                logger.info(f"[GOOGLE_AUTH_CALLBACK] ✅ Credentials récupérés depuis secrets ({google_auth_key}) - client_id={'présent' if client_id else 'MANQUANT'}")
+             except Exception as secret_err:
+                logger.error(f"[GOOGLE_AUTH_CALLBACK] ❌ Erreur récupération secrets: {secret_err}")
                 pass
                 
         if not client_id or not client_secret:
+            logger.error(f"[GOOGLE_AUTH_CALLBACK] ❌ CRITIQUE: Client ID ou Secret introuvable - client_id={bool(client_id)} client_secret={bool(client_secret)}")
             return HTMLResponse(content="<h1>Erreur Configuration</h1><p>Client ID ou Secret introuvable.</p>", status_code=500)
+        
+        logger.info(f"[GOOGLE_AUTH_CALLBACK] ✅ Credentials disponibles - token_uri={token_uri}")
 
         # 3. Échanger le code contre les tokens
+        logger.info("[GOOGLE_AUTH_CALLBACK] 📊 ÉTAPE 3: Échange code contre tokens")
         token_data = {
             'code': code,
             'client_id': client_id,
@@ -325,45 +355,67 @@ async def google_auth_callback(request: Request):
             'grant_type': 'authorization_code'
         }
         
-        logger.info(f"google_auth_exchange uri={redirect_uri}")
+        logger.info(f"[GOOGLE_AUTH_CALLBACK] 📤 Requête token - uri={token_uri} redirect_uri={redirect_uri} code_length={len(code) if code else 0}")
         
-        response = requests.post(token_uri, data=token_data)
+        try:
+            response = requests.post(token_uri, data=token_data, timeout=30)
+            logger.info(f"[GOOGLE_AUTH_CALLBACK] 📥 Réponse reçue - status={response.status_code}")
+        except Exception as req_err:
+            logger.error(f"[GOOGLE_AUTH_CALLBACK] ❌ Erreur requête token: {req_err}", exc_info=True)
+            return HTMLResponse(content=f"<h1>Erreur Réseau</h1><p>Impossible d'échanger le code: {req_err}</p>", status_code=500)
         
         if response.status_code != 200:
-            logger.error(f"google_auth_exchange_failed status={response.status_code} body={response.text}")
+            logger.error(f"[GOOGLE_AUTH_CALLBACK] ❌ Échange token échoué - status={response.status_code} body={response.text[:500]}")
             return HTMLResponse(content=f"<h1>Erreur Échange Token</h1><p>{response.text}</p>", status_code=400)
             
-        tokens = response.json()
+        try:
+            tokens = response.json()
+            logger.info(f"[GOOGLE_AUTH_CALLBACK] ✅ Tokens reçus - access_token={'présent' if tokens.get('access_token') else 'MANQUANT'} refresh_token={'présent' if tokens.get('refresh_token') else 'MANQUANT'}")
+        except Exception as json_err:
+            logger.error(f"[GOOGLE_AUTH_CALLBACK] ❌ Erreur parsing JSON tokens: {json_err} response={response.text[:500]}")
+            return HTMLResponse(content=f"<h1>Erreur Parsing</h1><p>Réponse invalide: {json_err}</p>", status_code=500)
         
         # 4. Mettre à jour Firebase
+        logger.info("[GOOGLE_AUTH_CALLBACK] 📊 ÉTAPE 4: Sauvegarde dans Firebase")
         from datetime import datetime, timedelta
         
-        update_payload = {
+        # ⭐ Structure complète attendue par user_app_permission_token
+        token_data = {
             'token': tokens.get('access_token'),
+            'token_uri': token_uri,
+            'client_id': client_id,
+            'client_secret': client_secret,
             'expiry': (datetime.now() + timedelta(seconds=tokens.get('expires_in', 3600))).isoformat(),
         }
         
         if 'refresh_token' in tokens:
-            update_payload['refresh_token'] = tokens['refresh_token']
+            token_data['refresh_token'] = tokens['refresh_token']
+            logger.info("[GOOGLE_AUTH_CALLBACK] ✅ Refresh token inclus dans le payload")
+        else:
+            logger.warning("[GOOGLE_AUTH_CALLBACK] ⚠️ Pas de refresh_token dans la réponse")
             
-        # Sauvegarder via Firestore
-        db = get_firestore()
+        logger.info(f"[GOOGLE_AUTH_CALLBACK] 📦 Payload préparé - token={'présent' if token_data.get('token') else 'MANQUANT'} expiry={token_data.get('expiry')} client_id={'présent' if token_data.get('client_id') else 'MANQUANT'}")
+            
+        # ⭐ Utiliser FirebaseManagement.set_document() comme dans GoogleAuthManager
+        # Chemin: clients/{user_id}/cred_tokens/google_authcred_token
         try:
-            # Essayer d'abord de mettre à jour via user_param (structure probable)
-            user_param_ref = db.collection('users_param').document(user_id)
-            user_param_ref.set({'token_data': update_payload}, merge=True)
-            logger.info(f"google_auth_firebase_update success user={user_id}")
+            tokens_path = f'clients/{user_id}/cred_tokens/google_authcred_token'
+            logger.info(f"[GOOGLE_AUTH_CALLBACK] 💾 Sauvegarde via FirebaseManagement.set_document() - path={tokens_path}")
+            fb_management = get_firebase_management()
+            fb_management.set_document(tokens_path, token_data, merge=True)
+            logger.info(f"[GOOGLE_AUTH_CALLBACK] ✅ Firebase mis à jour avec succès - user={user_id} path={tokens_path}")
         except Exception as e:
-            logger.error(f"google_auth_firebase_update_error {e}")
+            logger.error(f"[GOOGLE_AUTH_CALLBACK] ❌ Erreur sauvegarde Firebase: {e}", exc_info=True)
             return HTMLResponse(content=f"<h1>Erreur Sauvegarde</h1><p>{e}</p>", status_code=500)
             
         # 5. Notifier l'agent en attente via le canal approprié
+        logger.info("[GOOGLE_AUTH_CALLBACK] 📊 ÉTAPE 5: Notification")
         if communication_mode:
             try:
                 context_params = state.get('context_params', {})
                 message_text = "✅ Authentification Google Drive réussie ! Les accès sont à jour. TERMINATE"
                 
-                logger.info(f"google_auth_notify mode={communication_mode} params={context_params.keys()}")
+                logger.info(f"[GOOGLE_AUTH_CALLBACK] 📢 Notification - mode={communication_mode} params={list(context_params.keys()) if context_params else 'aucun'}")
                 
                 # --- TELEGRAM (ROUTAGE INTERNE) ---
                 if communication_mode == 'telegram':
@@ -425,17 +477,100 @@ async def google_auth_callback(request: Request):
 
                 # --- PINNOKIO (WEB) ---
                 elif communication_mode == 'pinnokio':
+                    logger.info(f"[GOOGLE_AUTH_CALLBACK] 📢 Mode PINNOKIO - user_id={user_id} source={source}")
                     # Notification via WebSocket Hub si l'utilisateur est connecté
                     if user_id:
-                        # Message système simulé
+                        # ⭐ FALLBACK: Message système générique (toujours envoyé)
                         payload = {
                             "type": "chat_message",
                             "content": message_text,
                             "role": "system",
                             "timestamp": datetime.now().isoformat()
                         }
-                        await hub.broadcast(user_id, payload)
-                        logger.info(f"google_auth_notify_pinnokio broadcast to {user_id}")
+                        logger.info(f"[GOOGLE_AUTH_CALLBACK] 📤 Broadcast WebSocket (fallback) - payload={payload}")
+                        try:
+                            await hub.broadcast(user_id, payload)
+                            logger.info(f"[GOOGLE_AUTH_CALLBACK] ✅ Broadcast WebSocket (fallback) réussi - user_id={user_id}")
+                        except Exception as broadcast_err:
+                            logger.error(f"[GOOGLE_AUTH_CALLBACK] ❌ Erreur broadcast WebSocket (fallback): {broadcast_err}", exc_info=True)
+                            # Ne pas bloquer le flow si le broadcast échoue
+                        
+                        # ⭐ ONBOARDING: Si source == 'onboarding', déclencher directement handle_oauth_complete
+                        if source == 'onboarding':
+                            logger.info("[GOOGLE_AUTH_CALLBACK] 🎯 Détection OAuth ONBOARDING - Appel direct handle_oauth_complete")
+                            mandate_path = context_params.get('mandate_path', '')
+                            dms_type = context_params.get('dms_type', 'google_drive')
+                            chat_type = context_params.get('chat_type', 'pinnokio')
+                            session_id = context_params.get('session_id', '')
+                            
+                            if mandate_path:
+                                # ⭐ Appel direct au handler EN BACKGROUND (non-bloquant pour la popup)
+                                from .frontend.pages.onboarding.orchestration import handle_oauth_complete
+                                import asyncio
+
+                                handler_payload = {
+                                    "success": True,
+                                    "mandate_path": mandate_path,
+                                    "context": {
+                                        "dms_type": dms_type,
+                                        "chat_type": chat_type,
+                                        "session_id": session_id,
+                                        "state_token": context_params.get('state_token', '')
+                                    }
+                                }
+
+                                # ⭐ ENVOYER oauth_success IMMÉDIATEMENT pour mettre à jour le frontend
+                                # Cela permet au modal de passer à l'étape suivante sans attendre
+                                logger.info(f"[GOOGLE_AUTH_CALLBACK] 📤 Envoi IMMÉDIAT oauth_success + progress google_auth=completed")
+                                try:
+                                    await hub.broadcast(user_id, {
+                                        "type": WS_EVENTS.ONBOARDING.OAUTH_SUCCESS,
+                                        "payload": {
+                                            "success": True,
+                                            "provider": "google_drive"
+                                        }
+                                    })
+                                    await hub.broadcast(user_id, {
+                                        "type": WS_EVENTS.ONBOARDING.PROGRESS,
+                                        "payload": {
+                                            "step": "google_auth",
+                                            "status": "completed",
+                                            "message": "Google authorization complete"
+                                        }
+                                    })
+                                    await hub.broadcast(user_id, {
+                                        "type": WS_EVENTS.ONBOARDING.PROGRESS,
+                                        "payload": {
+                                            "step": "dms_creation",
+                                            "status": "in_progress",
+                                            "message": "Creating folder structure..."
+                                        }
+                                    })
+                                    logger.info(f"[GOOGLE_AUTH_CALLBACK] ✅ Events envoyés au frontend")
+                                except Exception as broadcast_err:
+                                    logger.error(f"[GOOGLE_AUTH_CALLBACK] ❌ Erreur broadcast: {broadcast_err}")
+
+                                logger.info(f"[GOOGLE_AUTH_CALLBACK] 🔄 Lancement handle_oauth_complete EN BACKGROUND - mandate_path={mandate_path}")
+
+                                # ⭐ CORRECTION: Lancer en background pour ne pas bloquer la réponse HTTP
+                                # La popup se fermera immédiatement, le workflow continue en arrière-plan
+                                async def run_oauth_complete():
+                                    try:
+                                        await handle_oauth_complete(
+                                            uid=user_id,
+                                            session_id=session_id,
+                                            payload=handler_payload
+                                        )
+                                        logger.info(f"[GOOGLE_AUTH_CALLBACK] ✅ handle_oauth_complete terminé avec succès - user_id={user_id}")
+                                    except Exception as handler_err:
+                                        logger.error(f"[GOOGLE_AUTH_CALLBACK] ❌ Erreur handle_oauth_complete: {handler_err}", exc_info=True)
+
+                                asyncio.create_task(run_oauth_complete())
+                                logger.info(f"[GOOGLE_AUTH_CALLBACK] 🚀 Tâche background lancée - réponse HTTP immédiate")
+                            else:
+                                logger.warning(f"[GOOGLE_AUTH_CALLBACK] ⚠️ mandate_path manquant dans context_params - impossible de déclencher handle_oauth_complete")
+                    else:
+                        logger.warning(f"[GOOGLE_AUTH_CALLBACK] ⚠️ user_id manquant pour broadcast")
 
                 # --- GOOGLE CHAT ---
                 elif communication_mode == 'google_chat':
@@ -450,9 +585,82 @@ async def google_auth_callback(request: Request):
                         pass
 
             except Exception as notify_err:
-                logger.error(f"google_auth_notify_global_error {notify_err}")
+                logger.error(f"[GOOGLE_AUTH_CALLBACK] ❌ Erreur notification globale: {notify_err}", exc_info=True)
+                # Ne pas bloquer le flow si la notification échoue
 
-        # 6. Réponse UI (HTML)
+        # 6. Réponse UI (HTML) - Différenciée selon la source
+        logger.info("[GOOGLE_AUTH_CALLBACK] 📊 ÉTAPE 6: Génération réponse HTML")
+        logger.info("═" * 70)
+        logger.info("[GOOGLE_AUTH_CALLBACK] ✅ CALLBACK TERMINÉ AVEC SUCCÈS")
+        logger.info(f"[GOOGLE_AUTH_CALLBACK] source={source} (type={type(source).__name__})")
+        logger.info(f"[GOOGLE_AUTH_CALLBACK] source == 'onboarding' => {source == 'onboarding'}")
+        logger.info("═" * 70)
+
+        # ⭐ ONBOARDING: Fermeture immédiate de la popup
+        if source == 'onboarding':
+            logger.info("[GOOGLE_AUTH_CALLBACK] 🎯 RETURNING ONBOARDING HTML (auto-close popup)")
+            return HTMLResponse(content="""
+            <html>
+                <head>
+                    <title>Authorization Complete</title>
+                    <style>
+                        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                               display: flex; justify-content: center; align-items: center;
+                               height: 100vh; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); margin: 0; }
+                        .card { background: white; padding: 2.5rem; border-radius: 16px;
+                                box-shadow: 0 20px 60px rgba(0,0,0,0.3); text-align: center; max-width: 380px; }
+                        .success-icon { width: 64px; height: 64px; background: #10b981; border-radius: 50%;
+                                        display: flex; align-items: center; justify-content: center; margin: 0 auto 1.5rem; }
+                        .success-icon svg { width: 32px; height: 32px; color: white; }
+                        h1 { color: #1f2937; font-size: 1.5rem; margin: 0 0 0.5rem; font-weight: 600; }
+                        p { color: #6b7280; margin: 0; font-size: 0.95rem; }
+                        .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #e5e7eb;
+                                   border-top-color: #667eea; border-radius: 50%; animation: spin 0.8s linear infinite;
+                                   margin-right: 8px; vertical-align: middle; }
+                        @keyframes spin { to { transform: rotate(360deg); } }
+                        .closing { margin-top: 1rem; color: #9ca3af; font-size: 0.85rem; }
+                    </style>
+                </head>
+                <body>
+                    <div class="card">
+                        <div class="success-icon">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/>
+                            </svg>
+                        </div>
+                        <h1>Authorization Successful!</h1>
+                        <p>Google Drive access has been granted.</p>
+                        <p class="closing"><span class="spinner"></span>Closing automatically...</p>
+                    </div>
+                    <script>
+                        // Tenter la fermeture immédiate
+                        var closed = false;
+                        try {
+                            window.close();
+                            // Si on arrive ici après 100ms, c'est que window.close() a échoué
+                            setTimeout(function() {
+                                if (!document.hidden) {
+                                    closed = false;
+                                    document.querySelector('.closing').innerHTML =
+                                        '✅ You can now close this window safely.';
+                                    document.querySelector('.closing').style.color = '#059669';
+                                    document.querySelector('.closing').style.fontWeight = '500';
+                                }
+                            }, 100);
+                        } catch(e) {
+                            // Erreur lors de window.close(), afficher le message immédiatement
+                            document.querySelector('.closing').innerHTML =
+                                '✅ You can now close this window safely.';
+                            document.querySelector('.closing').style.color = '#059669';
+                            document.querySelector('.closing').style.fontWeight = '500';
+                        }
+                    </script>
+                </body>
+            </html>
+            """, status_code=200)
+
+        # Autres sources: page standard avec fermeture après 3s
+        logger.info(f"[GOOGLE_AUTH_CALLBACK] 🔄 RETURNING DEFAULT HTML (source={source} is not 'onboarding')")
         return HTMLResponse(content="""
         <html>
             <head>
@@ -478,7 +686,9 @@ async def google_auth_callback(request: Request):
         """, status_code=200)
         
     except Exception as e:
-        logger.error(f"google_auth_callback_fatal_error {e}", exc_info=True)
+        logger.error("═" * 70)
+        logger.error(f"[GOOGLE_AUTH_CALLBACK] ❌ ERREUR FATALE: {e}")
+        logger.error("═" * 70, exc_info=True)
         return HTMLResponse(content=f"<h1>Erreur Serveur</h1><p>{str(e)}</p>", status_code=500)
 
 
@@ -2118,6 +2328,42 @@ async def websocket_endpoint(ws: WebSocket):
                         await ws.send_text(_json.dumps(response))
                         logger.info(f"[WS] Chat card_clicked response sent - uid={uid}")
 
+                    elif msg_type == "chat.start_onboarding":
+                        # Start onboarding chat after company creation
+                        # Triggered when user lands on /chat/{thread_key}?action=create
+                        from .frontend.pages.chat.handlers import get_chat_handlers
+                        # Note: hub and WS_EVENTS are already imported at module level
+
+                        thread_key = msg_payload.get("thread_key")
+                        company_id = msg_payload.get("company_id")
+
+                        logger.info(f"[WS] Chat start_onboarding - uid={uid} thread={thread_key} company={company_id}")
+
+                        try:
+                            handlers = get_chat_handlers()
+                            result = await handlers.start_onboarding_chat(
+                                uid=uid,
+                                company_id=company_id,
+                                thread_key=thread_key,
+                            )
+
+                            # Broadcast onboarding_started event
+                            await hub.broadcast(uid, {
+                                "type": WS_EVENTS.CHAT.ONBOARDING_STARTED,
+                                "payload": result
+                            })
+                            logger.info(f"[WS] Chat start_onboarding completed - uid={uid} success={result.get('success')}")
+
+                        except Exception as e:
+                            logger.error(f"[WS] Chat start_onboarding error: {e}")
+                            await hub.broadcast(uid, {
+                                "type": WS_EVENTS.CHAT.ERROR,
+                                "payload": {
+                                    "error": str(e),
+                                    "source": "start_onboarding"
+                                }
+                            })
+
                     # ============================================
                     # ROUTING EVENTS (document routing management)
                     # ============================================
@@ -2263,6 +2509,51 @@ async def websocket_endpoint(ws: WebSocket):
                         )
                         logger.info(f"[WS] Company settings fetch_additional handled - uid={uid}")
 
+                    elif msg_type == "company_settings.delete_company":
+                        from .frontend.pages.company_settings import handle_delete_company
+                        await handle_delete_company(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings delete_company handled - uid={uid}")
+
+                    elif msg_type == "company_settings.save_company_info":
+                        from .frontend.pages.company_settings import handle_save_company_info
+                        await handle_save_company_info(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings save_company_info handled - uid={uid}")
+
+                    elif msg_type == "company_settings.save_settings":
+                        from .frontend.pages.company_settings import handle_save_settings
+                        await handle_save_settings(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings save_settings handled - uid={uid}")
+
+                    elif msg_type == "company_settings.save_workflow":
+                        from .frontend.pages.company_settings import handle_save_workflow
+                        await handle_save_workflow(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings save_workflow handled - uid={uid}")
+
+                    elif msg_type == "company_settings.save_context":
+                        from .frontend.pages.company_settings import handle_save_context
+                        await handle_save_context(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings save_context handled - uid={uid}")
+
                     elif msg_type == "company_settings.save_asset_config":
                         from .frontend.pages.company_settings import handle_save_asset_config
                         await handle_save_asset_config(
@@ -2316,6 +2607,33 @@ async def websocket_endpoint(ws: WebSocket):
                             payload=msg_payload
                         )
                         logger.info(f"[WS] Company settings load_asset_accounts handled - uid={uid}")
+
+                    elif msg_type == "company_settings.telegram_start_registration":
+                        from .frontend.pages.company_settings.telegram_handler import handle_telegram_start_registration
+                        await handle_telegram_start_registration(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings telegram_start_registration handled - uid={uid}")
+
+                    elif msg_type == "company_settings.telegram_remove_user":
+                        from .frontend.pages.company_settings.telegram_handler import handle_telegram_remove_user
+                        await handle_telegram_remove_user(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings telegram_remove_user handled - uid={uid}")
+
+                    elif msg_type == "company_settings.telegram_reset_room":
+                        from .frontend.pages.company_settings.telegram_handler import handle_telegram_reset_room
+                        await handle_telegram_reset_room(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings telegram_reset_room handled - uid={uid}")
 
                     # ============================================
                     # COA EVENTS (Chart of Accounts)
@@ -2505,6 +2823,90 @@ async def websocket_endpoint(ws: WebSocket):
                             payload=msg_payload
                         )
                         logger.info(f"[WS] Banking delete handled - uid={uid}")
+
+                    # ============================================
+                    # HR EVENTS (Human Resources - PostgreSQL Neon)
+                    # ============================================
+                    elif msg_type == "hr.orchestrate_init":
+                        from .frontend.pages.hr.orchestration import handle_orchestrate_init as handle_hr_orchestrate_init
+                        await handle_hr_orchestrate_init(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] HR orchestrate_init handled - uid={uid}")
+
+                    elif msg_type == "hr.refresh":
+                        from .frontend.pages.hr.orchestration import handle_refresh as handle_hr_refresh
+                        await handle_hr_refresh(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] HR refresh handled - uid={uid}")
+
+                    elif msg_type == "hr.employees_list":
+                        from .frontend.pages.hr.orchestration import handle_employees_list
+                        await handle_employees_list(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] HR employees_list handled - uid={uid}")
+
+                    elif msg_type == "hr.employee_get":
+                        from .frontend.pages.hr.orchestration import handle_employee_get
+                        await handle_employee_get(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] HR employee_get handled - uid={uid}")
+
+                    elif msg_type == "hr.employee_create":
+                        from .frontend.pages.hr.orchestration import handle_employee_create
+                        await handle_employee_create(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] HR employee_create handled - uid={uid}")
+
+                    elif msg_type == "hr.employee_update":
+                        from .frontend.pages.hr.orchestration import handle_employee_update
+                        await handle_employee_update(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] HR employee_update handled - uid={uid}")
+
+                    elif msg_type == "hr.employee_delete":
+                        from .frontend.pages.hr.orchestration import handle_employee_delete
+                        await handle_employee_delete(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] HR employee_delete handled - uid={uid}")
+
+                    elif msg_type == "hr.payroll_calculate":
+                        from .frontend.pages.hr.orchestration import handle_payroll_calculate
+                        await handle_payroll_calculate(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] HR payroll_calculate handled - uid={uid}")
+
+                    elif msg_type == "hr.settings_update":
+                        from .frontend.pages.hr.orchestration import handle_settings_update
+                        await handle_settings_update(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] HR settings_update handled - uid={uid}")
 
                     # ============================================
                     # LLM STREAMING EVENTS
@@ -2774,6 +3176,72 @@ async def websocket_endpoint(ws: WebSocket):
                             payload=msg_payload
                         )
                         logger.info(f"[WS] Metrics refresh_module handled - uid={uid}")
+
+                    # ============================================
+                    # ONBOARDING EVENTS (Company onboarding and setup)
+                    # ============================================
+                    elif msg_type == "onboarding.test_erp_connection":
+                        from .frontend.pages.onboarding.orchestration import handle_test_erp_connection
+                        await handle_test_erp_connection(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Onboarding test_erp_connection handled - uid={uid}")
+
+                    elif msg_type == "onboarding.load_clients":
+                        from .frontend.pages.onboarding.orchestration import handle_load_clients
+                        await handle_load_clients(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Onboarding load_clients handled - uid={uid}")
+
+                    elif msg_type == "onboarding.save_client":
+                        from .frontend.pages.onboarding.orchestration import handle_save_client
+                        await handle_save_client(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Onboarding save_client handled - uid={uid}")
+
+                    elif msg_type == "onboarding.update_client":
+                        from .frontend.pages.onboarding.orchestration import handle_update_client
+                        await handle_update_client(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Onboarding update_client handled - uid={uid}")
+
+                    elif msg_type == "onboarding.delete_client":
+                        from .frontend.pages.onboarding.orchestration import handle_delete_client
+                        await handle_delete_client(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Onboarding delete_client handled - uid={uid}")
+
+                    elif msg_type == "onboarding.submit":
+                        from .frontend.pages.onboarding.orchestration import handle_submit
+                        await handle_submit(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Onboarding submit handled - uid={uid}")
+
+                    elif msg_type == "onboarding.oauth_complete":
+                        from .frontend.pages.onboarding.orchestration import handle_oauth_complete
+                        await handle_oauth_complete(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Onboarding oauth_complete handled - uid={uid}")
 
                     else:
                         # Messages non gérés (pour future extension)

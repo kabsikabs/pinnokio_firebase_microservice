@@ -14,7 +14,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timezone
 import json
 
-from ...llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_Anthropic_Agent, NEW_OpenAiAgent
+from ...llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_MOONSHOT_AIAgent
 from ...llm_service.chat_history_manager import get_chat_history_manager, ChatHistoryManager
 from .agent_modes import get_agent_mode_config
 
@@ -57,8 +57,8 @@ class PinnokioBrain:
         self.pinnokio_agent: Optional[BaseAIAgent] = None
         
         # Configuration du provider (modèle de raisonnement)
-        self.default_provider = ModelProvider.OPENAI
-        self.default_size = ModelSize.MEDIUM  # Kimi K2 pour raisonnement + streaming + tools
+        self.default_provider = ModelProvider.MOONSHOT_AI
+        self.default_size = ModelSize.MEDIUM  # Kimi K2.5 pour raisonnement + streaming + tools
         
         # ⭐ NOUVELLE ARCHITECTURE: L'historique est géré par self.pinnokio_agent
         # Plus de duplication d'historique au niveau du brain
@@ -138,18 +138,18 @@ class PinnokioBrain:
             self.pinnokio_agent.default_model_size = self.default_size
             
             # ═══ 2. Créer et enregistrer l'instance du provider ═══
-            # Créer l'instance OpenAI (sans arguments)
-            openai_instance = NEW_OpenAiAgent()
-            
+            # Créer l'instance Moonshot AI (Kimi K2.5)
+            moonshot_instance = NEW_MOONSHOT_AIAgent()
+
             # Enregistrer le provider dans BaseAIAgent
             # BaseAIAgent a déjà collection_name, dms_system, dms_mode, firebase_user_id
             self.pinnokio_agent.register_provider(
                 provider=self.default_provider,
-                instance=openai_instance,
+                instance=moonshot_instance,
                 default_model_size=self.default_size
             )
-            
-            logger.info(f"[BRAIN] ✅ Agent principal créé (provider={self.default_provider.value}, size={self.default_size.value}, model=Kimi K2)")
+
+            logger.info(f"[BRAIN] ✅ Agent principal créé (provider={self.default_provider.value}, size={self.default_size.value}, model=Kimi K2.5)")
             
             # ═══ 3. Créer les agents SPT ═══
             

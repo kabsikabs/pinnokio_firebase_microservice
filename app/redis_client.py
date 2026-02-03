@@ -20,6 +20,7 @@ def get_redis() -> redis.Redis:
         "db": settings.redis_db,
         "socket_connect_timeout": 5,
         "health_check_interval": 30,
+        "decode_responses": True,  # 🆕 Décode automatiquement bytes → str
     }
 
     if settings.redis_tls:

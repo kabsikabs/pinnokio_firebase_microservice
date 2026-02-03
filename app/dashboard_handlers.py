@@ -355,9 +355,9 @@ class DashboardHandlers:
     def _default_metrics(self) -> Dict[str, Any]:
         """Retourne les métriques par défaut."""
         return {
-            "router": {"toProcess": 0, "inProcess": 0, "processed": 0},
+            "router": {"toProcess": 0, "inProcess": 0, "pending": 0, "processed": 0},
             "ap": {"toProcess": 0, "inProcess": 0, "pending": 0, "processed": 0},
-            "bank": {"toProcess": 0, "inProcess": 0, "pending": 0, "matched": 0},
+            "bank": {"toProcess": 0, "inProcess": 0, "pending": 0},
             "expenses": {"open": 0, "closed": 0, "pendingApproval": 0},
             "summary": {
                 "totalDocumentsToProcess": 0,
@@ -538,9 +538,13 @@ class DashboardHandlers:
 
             # ═══════════════════════════════════════════════════════════════
             # Router metrics from drive/documents cache
+            # Note: Use drive_cache_manager (same as drive_cache_handlers)
             # ═══════════════════════════════════════════════════════════════
             try:
-                router_data = await cache.get_cached_data(
+                from .cache.unified_cache_manager import get_drive_cache_manager
+                drive_cache = get_drive_cache_manager()
+
+                router_data = await drive_cache.get_cached_data(
                     user_id, company_id, "drive", "documents",
                     ttl_seconds=300
                 )
@@ -548,8 +552,29 @@ class DashboardHandlers:
                     data = router_data["data"]
                     metrics["router"]["toProcess"] = len(data.get("to_process", []))
                     metrics["router"]["inProcess"] = len(data.get("in_process", []))
-                    metrics["router"]["processed"] = len(data.get("processed", []))
-                    logger.info(f"_get_metrics: Router from cache - toProcess={metrics['router']['toProcess']}")
+                    metrics["router"]["pending"] = len(data.get("pending", []))
+                    logger.info(
+                        f"_get_metrics: Router from cache - "
+                        f"toProcess={metrics['router']['toProcess']}, "
+                        f"inProcess={metrics['router']['inProcess']}, "
+                        f"pending={metrics['router']['pending']}"
+                    )
+
+                # Fetch processed count from Firebase journal (not in drive cache)
+                try:
+                    firebase_mgmt = get_firebase_management()
+                    processed_docs = await asyncio.to_thread(
+                        firebase_mgmt.fetch_journal_entries_by_mandat_id_without_source,
+                        user_id,
+                        company_id,
+                        'Router'
+                    )
+                    if processed_docs and isinstance(processed_docs, list):
+                        metrics["router"]["processed"] = len(processed_docs)
+                        logger.info(f"_get_metrics: Router processed from Firebase - count={len(processed_docs)}")
+                except Exception as fb_err:
+                    logger.warning(f"_get_metrics: Router processed fetch error: {fb_err}")
+
             except Exception as e:
                 logger.warning(f"_get_metrics: Router cache error: {e}")
 
@@ -584,7 +609,6 @@ class DashboardHandlers:
                     metrics["bank"]["toProcess"] = len(data.get("to_reconcile", []))
                     metrics["bank"]["inProcess"] = len(data.get("in_process", []))
                     metrics["bank"]["pending"] = len(data.get("pending", []))
-                    metrics["bank"]["matched"] = len(data.get("matched", []))
                     logger.info(f"_get_metrics: Bank from cache - toProcess={metrics['bank']['toProcess']}")
             except Exception as e:
                 logger.warning(f"_get_metrics: Bank cache error: {e}")
@@ -638,8 +662,8 @@ class DashboardHandlers:
             )
             total_completed = (
                 metrics["router"]["processed"] +
-                metrics["ap"]["processed"] +
-                metrics["bank"]["matched"]
+                metrics["ap"]["processed"]
+                # Bank has no "completed" status - transactions stay active or are reconciled in ERP
             )
             total_all = total_to_process + total_in_progress + total_completed
 
@@ -775,49 +799,63 @@ class DashboardHandlers:
 
     async def _get_tasks(self, user_id: str, company_id: str, mandate_path: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Récupère les tâches planifiées depuis {mandate_path}/tasks.
+        Récupère les tâches planifiées depuis le cache Redis.
 
-        Uses FirebaseManagement.list_tasks_for_mandate() which queries the correct collection.
+        Utilise le cache séparé tasks/list (même pattern que Router/AP/Bank).
+        Si le cache est vide, délègue à firebase_cache_handlers.get_tasks() qui gère le cache automatiquement.
         """
         try:
             logger.info(f"_get_tasks called with: user_id={user_id}, company_id={company_id}, mandate_path={mandate_path}")
 
+            # 1. Tentative de lecture depuis le cache séparé
+            from .cache.unified_cache_manager import get_firebase_cache_manager
+            cache = get_firebase_cache_manager()
+
+            try:
+                cached = await cache.get_cached_data(
+                    user_id,
+                    company_id,
+                    "tasks",
+                    "list",
+                    ttl_seconds=300
+                )
+
+                if cached and cached.get("data"):
+                    tasks = cached["data"]
+                    if isinstance(tasks, list):
+                        logger.info(
+                            f"_get_tasks: Tasks from cache - count={len(tasks)}"
+                        )
+                        return tasks
+                    else:
+                        logger.warning(f"_get_tasks: Cached data is not a list, type={type(tasks)}")
+            except Exception as cache_err:
+                logger.warning(f"_get_tasks: Cache read error: {cache_err}")
+
+            # 2. Cache MISS ou erreur : utiliser firebase_cache_handlers qui gère le cache automatiquement
             if not mandate_path:
                 logger.warning("_get_tasks: No mandate_path provided, returning empty list")
                 return []
 
-            # Use the correct method that queries {mandate_path}/tasks
-            firebase_mgmt = get_firebase_management()
-            raw_tasks = await asyncio.to_thread(
-                firebase_mgmt.list_tasks_for_mandate,
-                mandate_path
+            from .firebase_cache_handlers import get_firebase_cache_handlers
+            firebase_handlers = get_firebase_cache_handlers()
+
+            result = await firebase_handlers.get_tasks(
+                user_id,
+                company_id,
+                mandate_path=mandate_path
             )
 
-            if not raw_tasks:
-                return []
+            tasks = result.get("data", [])
+            if not isinstance(tasks, list):
+                tasks = []
 
-            tasks = []
-            for task in raw_tasks:
-                mission = task.get("mission", {})
-                schedule = task.get("schedule", {})
-
-                tasks.append({
-                    "id": task.get("task_id", task.get("id", "")),
-                    "title": mission.get("title", ""),
-                    "description": mission.get("description"),
-                    "status": task.get("status", "inactive"),
-                    "priority": task.get("priority", "medium"),
-                    "executionPlan": task.get("execution_plan", "ON_DEMAND"),
-                    "enabled": task.get("enabled", False),
-                    "nextExecution": schedule.get("next_execution_utc", ""),
-                    "frequency": schedule.get("frequency", ""),
-                    "createdAt": task.get("created_at", ""),
-                    "updatedAt": task.get("updated_at", ""),
-                    "category": "accounting",
-                })
-
-            logger.info(f"_get_tasks: Found {len(tasks)} tasks for mandate_path={mandate_path}")
+            logger.info(
+                f"_get_tasks: Tasks from firebase_cache_handlers - count={len(tasks)}, "
+                f"source={result.get('source', 'unknown')}"
+            )
             return tasks
+
         except Exception as e:
             logger.error(f"_get_tasks error: {e}", exc_info=True)
             return []
@@ -885,11 +923,14 @@ class DashboardHandlers:
             from .firebase_providers import get_firebase_management
 
             # 1. Tentative de récupération depuis le cache Redis
+            # NOTE: Using "billing_history" category to avoid collision with
+            # the Notes de Frais module which uses business:{uid}:{cid}:expenses
+            # This data comes from task_manager (billing/tokens), NOT expenses_details
             cache = get_firebase_cache_manager()
             cached = await cache.get_cached_data(
                 user_id,
                 company_id,
-                "expenses",
+                "billing_history",
                 "details",
                 ttl_seconds=300  # 5 minutes TTL
             )
@@ -1055,12 +1096,12 @@ class DashboardHandlers:
                 f"source=firebase"
             )
 
-            # 5. Sauvegarder dans le cache
+            # 5. Sauvegarder dans le cache (billing_history, NOT expenses)
             try:
                 await cache.set_cached_data(
                     user_id,
                     company_id,
-                    "expenses",
+                    "billing_history",
                     "details",
                     expenses_result,
                     ttl_seconds=300  # 5 minutes TTL

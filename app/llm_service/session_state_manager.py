@@ -356,6 +356,10 @@ class SessionStateManager:
         Met à jour uniquement les informations de présence.
         
         Utilisé par enter_chat(), leave_chat(), switch_thread().
+        
+        ⚠️ DEPRECATED: Utiliser update_presence_multi_tab() pour le support multi-onglet.
+        Cette méthode est conservée pour rétrocompatibilité mais écrase current_active_thread
+        pour tous les onglets.
         """
         updates = {
             "is_on_chat_page": is_on_chat_page,
@@ -363,6 +367,229 @@ class SessionStateManager:
         }
         
         return self.update_session_state(user_id, company_id, updates)
+    
+    # ═══════════════════════════════════════════════════════════════
+    # MULTI-ONGLET PRESENCE (NOUVEAU)
+    # ═══════════════════════════════════════════════════════════════
+    
+    def update_presence_multi_tab(
+        self,
+        user_id: str,
+        company_id: str,
+        session_id: str,
+        thread_key: str,
+        is_on_chat_page: bool = True
+    ) -> bool:
+        """
+        Met à jour la présence pour un onglet spécifique (identifié par session_id).
+        
+        Permet à plusieurs onglets d'avoir différents threads ouverts simultanément.
+        
+        Args:
+            user_id: ID Firebase de l'utilisateur
+            company_id: ID de la société
+            session_id: ID unique de l'onglet/connexion WebSocket
+            thread_key: Thread sur lequel l'utilisateur entre
+            is_on_chat_page: True si sur la page chat
+            
+        Returns:
+            True si mise à jour réussie
+        """
+        try:
+            state = self.load_session_state(user_id, company_id)
+            
+            if state is None:
+                logger.warning(
+                    f"[SESSION_STATE] ⚠️ Session inexistante pour update_presence_multi_tab: "
+                    f"{user_id}:{company_id}"
+                )
+                return False
+            
+            # Récupérer ou initialiser le dictionnaire des threads actifs par session
+            active_threads_by_session = state.get("active_threads_by_session", {})
+            
+            # Mettre à jour le thread pour cette session/onglet
+            active_threads_by_session[session_id] = thread_key
+            
+            # Mettre à jour l'état
+            updates = {
+                "active_threads_by_session": active_threads_by_session,
+                "is_on_chat_page": True,  # Au moins un onglet est sur le chat
+                # Conserver current_active_thread pour rétrocompatibilité (dernier thread actif)
+                "current_active_thread": thread_key
+            }
+            
+            success = self.update_session_state(user_id, company_id, updates)
+            
+            if success:
+                logger.info(
+                    f"[SESSION_STATE] 📍 Multi-tab presence updated: "
+                    f"user={user_id}, session={session_id[:8]}..., thread={thread_key}"
+                )
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"[SESSION_STATE] ❌ Erreur update_presence_multi_tab: {e}", exc_info=True)
+            return False
+    
+    def remove_tab_presence(
+        self,
+        user_id: str,
+        company_id: str,
+        session_id: str
+    ) -> bool:
+        """
+        Supprime la présence d'un onglet spécifique (appelé lors de la déconnexion WebSocket).
+        
+        Args:
+            user_id: ID Firebase de l'utilisateur
+            company_id: ID de la société
+            session_id: ID unique de l'onglet qui se déconnecte
+            
+        Returns:
+            True si mise à jour réussie
+        """
+        try:
+            state = self.load_session_state(user_id, company_id)
+            
+            if state is None:
+                return True  # Session déjà supprimée, c'est OK
+            
+            active_threads_by_session = state.get("active_threads_by_session", {})
+            
+            # Supprimer cette session du dictionnaire
+            removed_thread = active_threads_by_session.pop(session_id, None)
+            
+            # Déterminer le nouvel état
+            has_active_tabs = len(active_threads_by_session) > 0
+            
+            updates = {
+                "active_threads_by_session": active_threads_by_session,
+                "is_on_chat_page": has_active_tabs
+            }
+            
+            # Si plus aucun onglet actif, effacer current_active_thread
+            if not has_active_tabs:
+                updates["current_active_thread"] = None
+            
+            success = self.update_session_state(user_id, company_id, updates)
+            
+            if success:
+                logger.info(
+                    f"[SESSION_STATE] 🚪 Tab presence removed: "
+                    f"user={user_id}, session={session_id[:8]}..., "
+                    f"removed_thread={removed_thread}, remaining_tabs={len(active_threads_by_session)}"
+                )
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"[SESSION_STATE] ❌ Erreur remove_tab_presence: {e}", exc_info=True)
+            return False
+    
+    def is_user_on_thread_multi_tab(
+        self,
+        user_id: str,
+        company_id: str,
+        thread_key: str
+    ) -> bool:
+        """
+        Vérifie si AU MOINS UN onglet a ce thread ouvert.
+        
+        À utiliser à la place de is_user_on_thread() pour le support multi-onglet.
+        
+        Args:
+            user_id: ID de l'utilisateur
+            company_id: ID de la société
+            thread_key: Thread à vérifier
+            
+        Returns:
+            True si au moins un onglet a ce thread ouvert
+        """
+        try:
+            state = self.load_session_state(user_id, company_id)
+            
+            if not state:
+                return False
+            
+            # Vérifier dans le nouveau dictionnaire multi-tab
+            active_threads_by_session = state.get("active_threads_by_session", {})
+            
+            if active_threads_by_session:
+                return thread_key in active_threads_by_session.values()
+            
+            # Fallback: utiliser l'ancien champ pour rétrocompatibilité
+            is_on_chat = state.get("is_on_chat_page", False)
+            current_thread = state.get("current_active_thread")
+            
+            return is_on_chat and current_thread == thread_key
+            
+        except Exception as e:
+            logger.error(f"[SESSION_STATE] ❌ Erreur is_user_on_thread_multi_tab: {e}")
+            return False
+    
+    def get_active_tabs_for_thread(
+        self,
+        user_id: str,
+        company_id: str,
+        thread_key: str
+    ) -> list:
+        """
+        Retourne la liste des session_ids qui ont ce thread ouvert.
+        
+        Args:
+            user_id: ID de l'utilisateur
+            company_id: ID de la société
+            thread_key: Thread à vérifier
+            
+        Returns:
+            Liste des session_ids avec ce thread ouvert
+        """
+        try:
+            state = self.load_session_state(user_id, company_id)
+            
+            if not state:
+                return []
+            
+            active_threads_by_session = state.get("active_threads_by_session", {})
+            
+            return [
+                session_id 
+                for session_id, thread in active_threads_by_session.items() 
+                if thread == thread_key
+            ]
+            
+        except Exception as e:
+            logger.error(f"[SESSION_STATE] ❌ Erreur get_active_tabs_for_thread: {e}")
+            return []
+    
+    def get_all_active_tabs(
+        self,
+        user_id: str,
+        company_id: str
+    ) -> Dict[str, str]:
+        """
+        Retourne tous les onglets actifs et leurs threads.
+        
+        Args:
+            user_id: ID de l'utilisateur
+            company_id: ID de la société
+            
+        Returns:
+            Dict {session_id: thread_key}
+        """
+        try:
+            state = self.load_session_state(user_id, company_id)
+            
+            if not state:
+                return {}
+            
+            return state.get("active_threads_by_session", {})
+            
+        except Exception as e:
+            logger.error(f"[SESSION_STATE] ❌ Erreur get_all_active_tabs: {e}")
+            return {}
     
     def update_thread_activity(
         self,
