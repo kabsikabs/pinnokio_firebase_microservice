@@ -54,6 +54,12 @@ from .contextual_publisher import (
     publish_page_event,
     update_page_context,
 )
+from .worker_broadcast_listener import (
+    WorkerBroadcastListener,
+    get_worker_broadcast_listener,
+    start_worker_broadcast_listener,
+    stop_worker_broadcast_listener,
+)
 
 __all__ = [
     # PubSub helpers (pour les jobbeurs - niveau USER)
@@ -77,4 +83,9 @@ __all__ = [
     "publish_company_event",
     "publish_page_event",
     "update_page_context",
+    # Worker Broadcast Listener (for worker -> API -> WebSocket)
+    "WorkerBroadcastListener",
+    "get_worker_broadcast_listener",
+    "start_worker_broadcast_listener",
+    "stop_worker_broadcast_listener",
 ]
