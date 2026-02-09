@@ -42,6 +42,7 @@ logger = logging.getLogger("chat.orchestration")
 
 ORCHESTRATION_TTL = 3600  # 1 hour
 DEFAULT_CHAT_MODE = "general_chat"
+ACTIVE_CHAT_MODES = {"apbookeeper_chat", "router_chat", "banker_chat"}
 
 
 # ============================================
@@ -259,13 +260,14 @@ async def handle_session_select(
 
     Loads message history for the selected session AND connects to the LLM context.
 
-    ⚠️ IMPORTANT: This handler MUST call llm_manager.enter_chat() to:
-    1. Initialize/retrieve the LLM session
-    2. Mark user presence on the thread
-    3. Create the Brain with history loaded from RTDB
-    4. Activate listeners for onboarding-like modes
+    ⚠️ ARCHITECTURE: LLM context initialization via Redis Queue
+    This handler enqueues enter_chat to the worker via LLMGateway:
+    1. Enqueue enter_chat job -> Worker initializes LLM session
+    2. Worker marks user presence on the thread
+    3. Worker creates the Brain with history loaded from RTDB
+    4. Worker publishes result via Redis PubSub -> Frontend receives confirmation
 
-    Without enter_chat(), the messages are displayed but the LLM agent has no context.
+    The history is loaded in parallel from this handler for immediate display.
 
     Args:
         uid: Firebase user ID
@@ -289,27 +291,24 @@ async def handle_session_select(
 
     try:
         # ─────────────────────────────────────────────────
-        # STEP 1: Connect to LLM context via enter_chat
-        # This is CRITICAL - same as LLM.enter_chat in _resolve_method
+        # STEP 1: Enqueue LLM context initialization via queue
+        # The worker will process enter_chat asynchronously
         # ─────────────────────────────────────────────────
-        from app.llm_service.llm_manager import get_llm_manager
+        from app.llm_service.llm_gateway import get_llm_gateway
 
-        llm_manager = get_llm_manager()
+        gateway = get_llm_gateway()
 
-        enter_result = await llm_manager.enter_chat(
+        queue_result = await gateway.enqueue_enter_chat(
             user_id=uid,
             collection_name=company_id,
             thread_key=thread_key,
             chat_mode=chat_mode,
         )
 
-        if not enter_result.get("success", False):
-            logger.warning(
-                f"[CHAT] enter_chat returned non-success: {enter_result}. "
-                f"Continuing with history load anyway."
-            )
-
-        logger.info(f"[CHAT] LLM context connected for thread={thread_key}")
+        logger.info(
+            f"[CHAT] enter_chat enqueued: job_id={queue_result.get('job_id', 'unknown')[:8]}... "
+            f"thread={thread_key}"
+        )
 
         # ─────────────────────────────────────────────────
         # STEP 2: Load formatted history for frontend display
@@ -369,16 +368,31 @@ async def handle_session_create(
 ) -> Dict[str, Any]:
     """
     Handle chat.session_create WebSocket event.
+
+    For job-monitoring modes (apbookeeper_chat, router_chat, banker_chat):
+    - thread_key = job_id (shared with job_chats canal)
+    - mode = "active_chats" (visible in UI)
+    - thread_name resolved from cache if not provided
     """
     company_id = payload.get("company_id")
     chat_mode = payload.get("chat_mode", DEFAULT_CHAT_MODE)
     thread_name = payload.get("thread_name")
+    job_id = payload.get("job_id")
 
     if not company_id:
         return {
             "type": "chat.session_create",
             "payload": {"success": False, "error": "Missing company_id"}
         }
+
+    # For job-monitoring modes: resolve thread_name from cache if needed
+    if job_id and not thread_name:
+        thread_name = await _resolve_job_thread_name(uid, job_id, chat_mode, company_id)
+
+    # Determine storage mode and thread_key
+    is_job_chat = job_id and chat_mode in ACTIVE_CHAT_MODES
+    mode = "active_chats" if is_job_chat else "chats"
+    thread_key = job_id if is_job_chat else None  # None = auto-generate
 
     chat_handlers = get_chat_handlers()
 
@@ -388,6 +402,8 @@ async def handle_session_create(
         space_code=company_id,
         chat_mode=chat_mode,
         thread_name=thread_name,
+        mode=mode,
+        thread_key=thread_key,
     )
 
     if result.get("success"):
@@ -404,6 +420,54 @@ async def handle_session_create(
         "type": "chat.session_create",
         "payload": result
     }
+
+
+async def _resolve_job_thread_name(
+    uid: str, job_id: str, chat_mode: str, company_id: str
+) -> str:
+    """
+    Resolve a human-readable thread name for a job-chat session.
+
+    Prefixes: router_, apbookeeper_, bank_batch_
+    Tries to find the file_name in the business Redis cache.
+    Falls back to the job_id if not found.
+    """
+    prefix_map = {
+        "router_chat": "router",
+        "apbookeeper_chat": "apbookeeper",
+        "banker_chat": "bank_batch",
+    }
+    prefix = prefix_map.get(chat_mode, "job")
+
+    try:
+        redis = get_redis()
+        # Try to find job info in business cache (routing, invoices, bank)
+        cache_domains = {
+            "router_chat": f"business:{company_id}:routing",
+            "apbookeeper_chat": f"business:{company_id}:invoices",
+            "banker_chat": f"business:{company_id}:bank",
+        }
+        cache_key = cache_domains.get(chat_mode)
+        if cache_key and redis:
+            import json
+            cached_raw = redis.get(cache_key)
+            if cached_raw:
+                cached_data = json.loads(cached_raw) if isinstance(cached_raw, (str, bytes)) else cached_raw
+                # Search all lists for the job_id
+                for category_name, items in cached_data.items():
+                    if not isinstance(items, list):
+                        continue
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("job_id") == job_id or item.get("file_id") == job_id:
+                            file_name = item.get("file_name") or item.get("name") or item.get("document_name")
+                            if file_name:
+                                return f"{prefix}_{file_name}"
+    except Exception as e:
+        logger.warning(f"[SESSION_CREATE] Could not resolve job name: {e}")
+
+    return f"{prefix}_{job_id}"
 
 
 async def handle_session_delete(
@@ -835,7 +899,12 @@ async def handle_card_clicked(
     Handle chat.card_clicked WebSocket event.
 
     Bridge between Next.js frontend and send_card_response().
-    Routes the card click to the LLM manager for processing.
+    Enqueues the card response to the worker via LLMGateway.
+
+    ⚠️ ARCHITECTURE: Card response via Redis Queue
+    1. Enqueue send_card_response job -> Worker processes the response
+    2. Worker executes the card action (approve/reject logic)
+    3. Worker publishes result via Redis PubSub -> Frontend receives confirmation
 
     Args:
         uid: Firebase user ID
@@ -843,7 +912,7 @@ async def handle_card_clicked(
         payload: Must contain card_id, action, params, company_id, thread_key
 
     Returns:
-        Response dict with result
+        Response dict with queued status
     """
     card_id = payload.get("card_id")
     action = payload.get("action")
@@ -871,15 +940,15 @@ async def handle_card_clicked(
     )
 
     try:
-        from app.llm_service.llm_manager import get_llm_manager
+        from app.llm_service.llm_gateway import get_llm_gateway
 
-        llm_manager = get_llm_manager()
+        gateway = get_llm_gateway()
 
         # Extract comment from params
         user_message = params.get("comment", "")
 
-        # Call the existing send_card_response method
-        result = await llm_manager.send_card_response(
+        # Enqueue the card response for worker processing
+        queue_result = await gateway.enqueue_card_response(
             user_id=uid,
             collection_name=company_id,
             thread_key=thread_key,
@@ -887,25 +956,32 @@ async def handle_card_clicked(
             card_message_id=message_id or "",
             action=action,
             user_message=user_message,
-            message_data=params,  # Pass all params for intermediation mode
+            message_data=params,  # Pass all params for agent proxy mode
         )
 
-        # Broadcast result to frontend
+        # Immediately broadcast that card is being processed
         await hub.broadcast(uid, {
-            "type": WS_EVENTS.CHAT.CARD_RECEIVED,  # Reuse existing event to clear card
+            "type": WS_EVENTS.CHAT.CARD_RECEIVED,
             "payload": {
-                "success": result.get("success", False),
+                "success": True,
                 "action": action,
                 "card_id": card_id,
-                "responded": True,
+                "processing": True,  # Card is being processed
+                "job_id": queue_result.get("job_id"),
             }
         })
 
-        logger.info(f"[CHAT] Card response sent: success={result.get('success')}")
+        logger.info(
+            f"[CHAT] Card response enqueued: job_id={queue_result.get('job_id', 'unknown')[:8]}..."
+        )
 
         return {
             "type": "chat.card_clicked",
-            "payload": result
+            "payload": {
+                "success": True,
+                "status": "queued",
+                "job_id": queue_result.get("job_id"),
+            }
         }
 
     except Exception as e:

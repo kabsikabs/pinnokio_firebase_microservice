@@ -16,7 +16,6 @@ Données externalisées:
     - presence: Tracking présence (is_on_chat_page, current_active_thread)
     - thread_states: État par thread
     - active_tasks: Tâches actives par thread
-    - intermediation_mode: Mode intermédiation par thread
 """
 
 import json
@@ -142,7 +141,6 @@ class SessionStateManager:
         current_active_thread: Optional[str] = None,
         thread_states: Optional[Dict[str, str]] = None,
         active_tasks: Optional[Dict[str, list]] = None,
-        intermediation_mode: Optional[Dict[str, bool]] = None,
         last_activity: Optional[Dict[str, datetime]] = None,
         thread_contexts: Optional[Dict[str, Tuple[Dict, float]]] = None,
         active_threads: Optional[list] = None,
@@ -161,7 +159,6 @@ class SessionStateManager:
             current_active_thread: Thread actuellement actif
             thread_states: État par thread
             active_tasks: Tâches actives par thread
-            intermediation_mode: Mode intermédiation par thread
             last_activity: Dernière activité par thread
             thread_contexts: Cache contexte LPT par thread
             active_threads: Liste des threads actifs
@@ -187,7 +184,6 @@ class SessionStateManager:
                 "current_active_thread": current_active_thread,
                 "thread_states": thread_states or {},
                 "active_tasks": active_tasks or {},
-                "intermediation_mode": intermediation_mode or {},
                 "last_activity": last_activity_serialized,
                 "thread_contexts": thread_contexts or {},
                 "active_threads": active_threads or [],

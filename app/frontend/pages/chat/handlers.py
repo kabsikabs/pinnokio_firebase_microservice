@@ -230,6 +230,8 @@ class ChatHandlers:
         space_code: str,
         chat_mode: str = "general_chat",
         thread_name: Optional[str] = None,
+        mode: str = "chats",
+        thread_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         CHAT.session_create - Create a new chat session.
@@ -240,6 +242,8 @@ class ChatHandlers:
             space_code: Firebase space code
             chat_mode: Chat mode (general_chat, onboarding_chat, etc.)
             thread_name: Optional initial name (will be auto-generated if not provided)
+            mode: Storage mode ("chats" or "active_chats")
+            thread_key: Optional explicit thread key (e.g., job_id for job-monitoring)
 
         Returns:
             {"success": True, "session": {...}}
@@ -249,8 +253,9 @@ class ChatHandlers:
             import uuid
             from datetime import datetime, timezone
 
-            # Generate thread key
-            thread_key = f"{int(datetime.now().timestamp())}_{space_code}_{uuid.uuid4().hex[:8]}"
+            # Generate thread key if not provided
+            if not thread_key:
+                thread_key = f"{int(datetime.now().timestamp())}_{space_code}_{uuid.uuid4().hex[:8]}"
 
             # Default name if not provided
             if not thread_name:
@@ -261,7 +266,7 @@ class ChatHandlers:
                 user_id=uid,
                 space_code=space_code,
                 thread_name=thread_name,
-                mode="chats",
+                mode=mode,
                 chat_mode=chat_mode,
                 thread_key=thread_key
             )
@@ -1278,7 +1283,12 @@ class ChatHandlers:
         CHAT.start_onboarding - Start onboarding chat session.
 
         Triggered after company creation when user lands on /chat/{thread_key}?action=create.
-        Creates the brain, loads onboarding data, and launches the LPT job.
+        Enqueues the onboarding job to the worker via LLMGateway.
+
+        ⚠️ ARCHITECTURE: Onboarding chat via Redis Queue
+        1. Enqueue start_onboarding_chat job -> Worker creates brain
+        2. Worker loads onboarding data and launches LPT job
+        3. Worker publishes result via Redis PubSub -> Frontend receives confirmation
 
         Args:
             uid: User ID
@@ -1286,37 +1296,33 @@ class ChatHandlers:
             thread_key: Thread key (job_id from onboarding)
 
         Returns:
-            {"success": True, "thread_key": str, "message": str}
+            {"success": True, "thread_key": str, "message": str, "status": "queued"}
         """
         try:
-            from app.llm_service import get_llm_manager
+            from app.llm_service.llm_gateway import get_llm_gateway
 
             logger.info(f"[CHAT] start_onboarding_chat - uid={uid} company={company_id} thread={thread_key}")
 
-            llm_manager = get_llm_manager()
-            result = await llm_manager.start_onboarding_chat(
+            gateway = get_llm_gateway()
+            queue_result = await gateway.enqueue_onboarding_chat(
                 user_id=uid,
                 collection_name=company_id,
                 thread_key=thread_key,
                 chat_mode="onboarding_chat"
             )
 
-            if result.get("success"):
-                logger.info(f"[CHAT] Onboarding chat started successfully for thread={thread_key}")
-                return {
-                    "success": True,
-                    "thread_key": thread_key,
-                    "message": "Onboarding chat started",
-                    "job_id": result.get("job_id"),
-                    "lpt_status": result.get("lpt_status"),
-                }
-            else:
-                logger.error(f"[CHAT] Failed to start onboarding chat: {result.get('error')}")
-                return {
-                    "success": False,
-                    "error": result.get("error", "Failed to start onboarding chat"),
-                    "details": result,
-                }
+            logger.info(
+                f"[CHAT] Onboarding chat enqueued: job_id={queue_result.get('job_id', 'unknown')[:8]}... "
+                f"thread={thread_key}"
+            )
+
+            return {
+                "success": True,
+                "thread_key": thread_key,
+                "message": "Onboarding chat enqueued",
+                "status": "queued",
+                "job_id": queue_result.get("job_id"),
+            }
 
         except Exception as e:
             logger.error(f"[CHAT] Error starting onboarding chat: {e}")
