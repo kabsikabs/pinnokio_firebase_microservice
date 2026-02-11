@@ -459,6 +459,39 @@ async def handle_job_process(
             logger.warning(f"[JOB_ACTIONS] → Step 1.5: active_jobs registration failed: {reg_err}")
             # Non-blocking: continue with HTTP dispatch
 
+        # ═══════════════════════════════════════════════════════════════════
+        # Step 1.6: Ensure worker is running (ECS auto-start)
+        # ═══════════════════════════════════════════════════════════════════
+        ecs_starting = False
+        try:
+            from ..ecs_manager import ECSManager
+            ecs_status = ECSManager.ensure_worker_running(job_type)
+            logger.info(f"[JOB_ACTIONS] → Step 1.6: ECS status={ecs_status.get('status')}")
+
+            if ecs_status.get("status") in ("starting", "provisioning"):
+                ecs_starting = True
+        except Exception as ecs_err:
+            logger.warning(f"[JOB_ACTIONS] → Step 1.6: ECS check failed: {ecs_err}")
+            # Non-blocking: continue with HTTP dispatch attempt
+
+        # ═══════════════════════════════════════════════════════════════════
+        # Step 1.7: Check worker heartbeat (fast check before HTTP)
+        # ═══════════════════════════════════════════════════════════════════
+        skip_http = False
+        if ecs_starting:
+            logger.info("[JOB_ACTIONS] → Step 1.7: Worker starting up, skipping HTTP dispatch")
+            skip_http = True
+        else:
+            try:
+                redis = get_redis()
+                hb_key = f"worker:{ACTIVE_JOB_TYPE_MAP.get(job_type, job_type)}:heartbeat"
+                heartbeat = redis.get(hb_key)
+                if not heartbeat:
+                    logger.info(f"[JOB_ACTIONS] → Step 1.7: No heartbeat ({hb_key}), skipping HTTP dispatch")
+                    skip_http = True
+            except Exception as hb_err:
+                logger.warning(f"[JOB_ACTIONS] → Step 1.7: Heartbeat check failed: {hb_err}")
+
         logger.info(f"[JOB_ACTIONS] → Step 2: Calling HTTP endpoint: {process_url}")
 
         # ═══════════════════════════════════════════════════════════════════
@@ -467,36 +500,40 @@ async def handle_job_process(
         dispatch_method = "http"
         job_id = batch_id
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    process_url, json=jobbeur_payload, timeout=aiohttp.ClientTimeout(total=30)
-                ) as response:
-                    status = response.status
-                    try:
-                        result = await response.json()
-                    except Exception:
-                        result = {"message": await response.text()}
+        if skip_http:
+            dispatch_method = "ecs_starting" if ecs_starting else "active_jobs_pending"
+            logger.info(f"[JOB_ACTIONS] → Step 2: HTTP dispatch SKIPPED (dispatch_method={dispatch_method})")
+        else:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        process_url, json=jobbeur_payload, timeout=aiohttp.ClientTimeout(total=30)
+                    ) as response:
+                        status = response.status
+                        try:
+                            result = await response.json()
+                        except Exception:
+                            result = {"message": await response.text()}
 
-            logger.info(f"[JOB_ACTIONS] → Step 3: HTTP response status={status}")
+                logger.info(f"[JOB_ACTIONS] → Step 3: HTTP response status={status}")
 
-            if status in [200, 202]:
-                job_id = result.get("job_id", batch_id)
-                logger.info(f"[JOB_ACTIONS] → Step 3: HTTP success - job_id={job_id}")
-            else:
-                # Non-2xx response: job is already in active_jobs, worker will pick up
+                if status in [200, 202]:
+                    job_id = result.get("job_id", batch_id)
+                    logger.info(f"[JOB_ACTIONS] → Step 3: HTTP success - job_id={job_id}")
+                else:
+                    # Non-2xx response: job is already in active_jobs, worker will pick up
+                    logger.warning(
+                        f"[JOB_ACTIONS] HTTP dispatch returned {status}. "
+                        f"Job is in active_jobs, worker will pick up on next poll."
+                    )
+                    dispatch_method = "active_jobs_pending"
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 logger.warning(
-                    f"[JOB_ACTIONS] HTTP dispatch returned {status}. "
+                    f"[JOB_ACTIONS] HTTP dispatch failed: {e}. "
                     f"Job is in active_jobs, worker will pick up on next poll."
                 )
                 dispatch_method = "active_jobs_pending"
-
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logger.warning(
-                f"[JOB_ACTIONS] HTTP dispatch failed: {e}. "
-                f"Job is in active_jobs, worker will pick up on next poll."
-            )
-            dispatch_method = "active_jobs_pending"
 
         # ═══════════════════════════════════════════════════════════════════
         # Post-dispatch: notifications + cache (always, regardless of dispatch method)
