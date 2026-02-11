@@ -184,19 +184,22 @@ class FirebaseCacheHandlers:
     async def get_expenses(
         self,
         user_id: str,
-        company_id: str
+        company_id: str,
+        mandate_path: str = None
     ) -> Dict[str, Any]:
         """
-        Récupère les dépenses depuis Firebase avec cache.
+        Récupère les dépenses depuis task_manager (source unique de vérité) avec cache.
+        Fallback vers l'ancienne collection mandates/{company_id}/expenses si task_manager vide.
 
         RPC: FIREBASE_CACHE.get_expenses
 
         Args:
             user_id (str): Firebase UID (injecté auto)
             company_id (str): Company ID
+            mandate_path (str, optional): Chemin du mandat pour filtre task_manager
 
         Returns:
-            {"data": [...], "source": "cache"|"firebase"}
+            {"data": [...], "source": "cache"|"firebase"|"task_manager"}
         """
         try:
             # 1. Tentative cache
@@ -220,23 +223,55 @@ class FirebaseCacheHandlers:
                     "source": "cache"
                 }
 
-            # 2. Fallback Firebase
+            # 2. Source: task_manager (EXbookeeper)
             db = get_firestore()
+            expenses = []
+
+            try:
+                task_mgr_ref = db.collection(f"clients/{user_id}/task_manager")
+                query = task_mgr_ref.where("department", "in", ["EXbookeeper", "exbookeeper"])
+                if mandate_path:
+                    clean_path = mandate_path[1:] if mandate_path.startswith("/") else mandate_path
+                    query = query.where("mandate_path", "==", clean_path)
+
+                for doc in query.stream():
+                    data = doc.to_dict() or {}
+                    expense_entry = data.get("department_data", {}).get("EXbookeeper", {})
+                    expense_entry["id"] = doc.id
+                    expense_entry["job_id"] = data.get("job_id", doc.id)
+                    expense_entry["status"] = data.get("status", "")
+                    expense_entry["file_name"] = data.get("file_name", expense_entry.get("file_name", ""))
+                    expense_entry["mandate_path"] = data.get("mandate_path", "")
+                    expenses.append(_convert_timestamps(expense_entry))
+
+                if expenses:
+                    logger.info(
+                        f"FIREBASE_CACHE.get_expenses company_id={company_id} "
+                        f"count={len(expenses)} source=task_manager"
+                    )
+                    await cache.set_cached_data(
+                        user_id, company_id, "expenses", "details",
+                        expenses, ttl_seconds=TTL_EXPENSES
+                    )
+                    return {"data": expenses, "source": "task_manager"}
+            except Exception as e:
+                logger.warning(f"FIREBASE_CACHE.get_expenses task_manager fallback: {e}")
+
+            # 3. Fallback: ancienne collection mandates/{company_id}/expenses
             expenses_ref = db.collection("mandates").document(company_id).collection("expenses")
             expenses_docs = expenses_ref.stream()
 
-            expenses = []
             for doc in expenses_docs:
                 expense_data = doc.to_dict()
                 expense_data["id"] = doc.id
-                expenses.append(expense_data)
+                expenses.append(_convert_timestamps(expense_data))
 
             logger.info(
                 f"FIREBASE_CACHE.get_expenses company_id={company_id} "
                 f"count={len(expenses)} source=firebase"
             )
 
-            # 3. Sync vers Redis
+            # 4. Sync vers Redis
             if expenses:
                 await cache.set_cached_data(
                     user_id,
@@ -267,21 +302,27 @@ class FirebaseCacheHandlers:
         mandate_path: str = None
     ) -> Dict[str, Any]:
         """
-        Récupère les documents APBookkeeper depuis Firebase avec cache.
+        Récupère les documents APBookkeeper depuis task_manager (Source de Vérité) avec cache.
 
         RPC: FIREBASE_CACHE.get_ap_documents
 
-        Uses FireBaseManagement.fetch_journal_entries_by_mandat_id() which queries:
-        - clients/{user_id}/klk_vision/{departement_doc}/journal
-        - Filtered by mandat_id (company_id) and source
+        Source de Vérité:
+        - task_manager (Firebase): clients/{user_id}/task_manager filtré par department APbookeeper
+        - Mapping étapes: {mandate_path}/setup/ap_approval_list (original_term → translated_term)
+
+        Classification par statut:
+        - completed/close/closed → processed
+        - pending → pending
+        - on_process/in_queue/running/stopping → in_process
+        - error/to_process/autre → to_do
 
         Args:
             user_id (str): Firebase UID (injecté auto)
-            company_id (str): Company/Mandate ID (used as mandat_id filter)
-            mandate_path (str): Unused - kept for API compatibility
+            company_id (str): Company/Mandate ID
+            mandate_path (str): Chemin Firestore du mandat
 
         Returns:
-            {"data": {"to_do": [...], "in_process": [...], "pending": [...], "processed": [...]}, "source": "cache"|"firebase"}
+            {"data": {"to_process": [...], "in_process": [...], "pending": [...], "processed": [...], "step_mapping": {...}}, "source": "cache"|"task_manager"}
         """
         import asyncio
 
@@ -311,101 +352,36 @@ class FirebaseCacheHandlers:
                     "source": "cache"
                 }
 
-            # 2. Fallback Firebase - use FireBaseManagement like Reflex does
+            # 2. Fetch depuis task_manager (Source de Vérité)
             from .firebase_providers import get_firebase_management
             firebase_mgmt = get_firebase_management()
-            departement = 'APbookeeper'
 
-            # Fetch TO_DO documents
-            todo_docs = await asyncio.to_thread(
-                firebase_mgmt.fetch_journal_entries_by_mandat_id,
+            fb_jobs = await asyncio.to_thread(
+                firebase_mgmt.get_apbookeeper_jobs_from_task_manager,
                 user_id,
-                company_id,  # mandat_id
-                'documents/accounting/invoices/doc_to_do',  # source
-                departement
+                mandate_path or ""
             )
-
-            # Fetch PROCESSED/BOOKED documents
-            booked_docs = await asyncio.to_thread(
-                firebase_mgmt.fetch_journal_entries_by_mandat_id,
-                user_id,
-                company_id,  # mandat_id
-                'documents/invoices/doc_booked',  # source
-                departement
-            )
-
-            # Fetch PENDING documents
-            pending_docs = []
-            try:
-                pending_docs = await asyncio.to_thread(
-                    firebase_mgmt.fetch_pending_journal_entries_by_mandat_id,
-                    user_id,
-                    company_id,  # mandat_id
-                    'documents/accounting/invoices/doc_to_do',  # source
-                    departement
-                )
-            except Exception as e:
-                logger.debug(f"FIREBASE_CACHE.get_ap_documents pending_fetch_error={e}")
-
-            # Process documents and check job status
-            items_to_do = []
-            items_in_process = []
-            items_pending = []
-            items_processed = []
-
-            # Process TO_DO documents
-            for doc in todo_docs:
-                doc_data = doc.get('data', {}) if isinstance(doc, dict) else {}
-                doc_data['id'] = doc.get('id', '') if isinstance(doc, dict) else ''
-
-                job_id = doc_data.get('job_id', '')
-                if job_id:
-                    notification = firebase_mgmt.check_job_status(user_id, job_id)
-                    if notification and notification.get('function_name') == 'APbookeeper':
-                        status = notification.get('status', '')
-                        if status in ['running', 'in queue', 'stopping']:
-                            doc_data['status'] = status
-                            items_in_process.append(doc_data)
-                            continue
-                        elif status == 'pending':
-                            doc_data['status'] = 'pending'
-                            items_pending.append(doc_data)
-                            continue
-
-                items_to_do.append(doc_data)
-
-            # Process PENDING documents
-            for doc in pending_docs:
-                doc_data = doc.get('data', {}) if isinstance(doc, dict) else {}
-                doc_data['id'] = doc.get('id', '') if isinstance(doc, dict) else ''
-
-                job_id = doc_data.get('job_id', '')
-                if job_id:
-                    notification = firebase_mgmt.check_job_status(user_id, job_id)
-                    if notification and notification.get('function_name') == 'APbookeeper':
-                        if notification.get('status') == 'pending':
-                            doc_data['status'] = 'pending'
-                            items_pending.append(doc_data)
-
-            # Process BOOKED documents
-            for doc in booked_docs:
-                doc_data = doc.get('data', {}) if isinstance(doc, dict) else {}
-                doc_data['id'] = doc.get('id', '') if isinstance(doc, dict) else ''
-                doc_data['status'] = 'completed'
-                items_processed.append(doc_data)
 
             organized = {
-                "to_do": items_to_do,
-                "in_process": items_in_process,
-                "pending": items_pending,
-                "processed": items_processed
+                "to_process": fb_jobs.get("to_process", []),
+                "in_process": fb_jobs.get("in_process", []),
+                "pending": fb_jobs.get("pending", []),
+                "processed": fb_jobs.get("processed", []),
+                "step_mapping": fb_jobs.get("step_mapping", {})
             }
 
-            total_count = len(items_to_do) + len(items_in_process) + len(items_pending) + len(items_processed)
+            total_count = (
+                len(organized["to_process"]) +
+                len(organized["in_process"]) +
+                len(organized["pending"]) +
+                len(organized["processed"])
+            )
             logger.info(
                 f"FIREBASE_CACHE.get_ap_documents company_id={company_id} "
-                f"count={total_count} (to_do={len(items_to_do)}, in_process={len(items_in_process)}, "
-                f"pending={len(items_pending)}, processed={len(items_processed)}) source=firebase"
+                f"count={total_count} (to_process={len(organized['to_process'])}, "
+                f"in_process={len(organized['in_process'])}, "
+                f"pending={len(organized['pending'])}, "
+                f"processed={len(organized['processed'])}) source=task_manager"
             )
 
             # Convert timestamps to JSON-serializable format
@@ -424,19 +400,19 @@ class FirebaseCacheHandlers:
 
             return {
                 "data": organized,
-                "source": "firebase"
+                "source": "task_manager"
             }
 
         except Exception as e:
             logger.error(f"FIREBASE_CACHE.get_ap_documents error={e}")
             import traceback
             traceback.print_exc()
-            return {"data": {"to_do": [], "in_process": [], "pending": [], "processed": []}, "error": str(e)}
+            return {"data": {"to_process": [], "in_process": [], "pending": [], "processed": [], "step_mapping": {}}, "error": str(e)}
 
     def _organize_ap_documents_by_status(self, documents: List[Dict]) -> Dict[str, List]:
         """Organize AP documents by status for metrics widget."""
         organized = {
-            "to_do": [],
+            "to_process": [],
             "in_process": [],
             "pending": [],
             "processed": []
@@ -444,8 +420,8 @@ class FirebaseCacheHandlers:
 
         for doc in documents:
             status = doc.get("status", "").lower()
-            if status in ["to_do", "todo", "new", "unprocessed"]:
-                organized["to_do"].append(doc)
+            if status in ["to_do", "todo", "new", "unprocessed", "to_process"]:
+                organized["to_process"].append(doc)
             elif status in ["in_process", "processing", "in_progress"]:
                 organized["in_process"].append(doc)
             elif status in ["pending", "waiting", "approval"]:
@@ -453,8 +429,8 @@ class FirebaseCacheHandlers:
             elif status in ["processed", "done", "completed", "booked"]:
                 organized["processed"].append(doc)
             else:
-                # Default to to_do for unknown status
-                organized["to_do"].append(doc)
+                # Default to to_process for unknown status
+                organized["to_process"].append(doc)
 
         return organized
 
@@ -471,22 +447,23 @@ class FirebaseCacheHandlers:
         mandate_path: str = None  # Kept for backward compatibility
     ) -> Dict[str, Any]:
         """
-        Récupère les transactions bancaires depuis ERP (Odoo) avec cache.
+        Récupère les transactions bancaires avec réconciliation (ERP + Task Manager).
 
         RPC: FIREBASE_CACHE.get_bank_transactions
 
-        Bank transactions come from ERP (Odoo), NOT from Firebase.
-        Uses ERPService.get_odoo_bank_statement_move_line_not_rec()
+        Source de Vérité:
+        1. ERP (Odoo): Transactions brutes
+        2. Task Manager (Firebase): État des traitements (In Process, Pending)
 
         Args:
             user_id (str): Firebase UID (injecté auto)
             company_id (str): Company/Mandate ID
             client_uuid (str): Client UUID for ERP connection
             bank_erp (str): ERP type (e.g., "odoo")
-            mandate_path (str): Unused - kept for API compatibility
+            mandate_path (str): Full Firestore path to mandate
 
         Returns:
-            {"data": {"to_reconcile": [...], "in_process": [...], "pending": [...]}, "source": "cache"|"erp"}
+            {"data": {"to_process": [...], "in_process": [...], "pending": [...], "processed": [...]}, "source": "cache"|"erp"}
         """
         import asyncio
 
@@ -516,91 +493,220 @@ class FirebaseCacheHandlers:
                     "source": "cache"
                 }
 
-            # 2. Fallback ERP - bank transactions come from Odoo, not Firebase
+            # 2. Validation des paramètres
             bank_erp_type = (bank_erp or "").lower()
-
-            # Check if we have ERP configuration
-            if not bank_erp_type:
+            if not bank_erp_type or bank_erp_type != "odoo":
                 logger.warning(
-                    f"FIREBASE_CACHE.get_bank_transactions company_id={company_id} "
-                    f"no_bank_erp_configured"
-                )
-                return {
-                    "data": {"to_reconcile": [], "in_process": [], "pending": []},
-                    "source": "none",
-                    "warning": "No bank ERP configured"
-                }
-
-            # Only Odoo is supported for now
-            if bank_erp_type != "odoo":
-                logger.info(
                     f"FIREBASE_CACHE.get_bank_transactions company_id={company_id} "
                     f"unsupported_erp={bank_erp_type}"
                 )
                 return {
-                    "data": {"to_reconcile": [], "in_process": [], "pending": []},
+                    "data": {"to_process": [], "in_process": [], "pending": [], "processed": []},
                     "source": "none",
-                    "warning": f"ERP type '{bank_erp_type}' not yet supported. Only Odoo is available."
+                    "warning": f"ERP type '{bank_erp_type}' not supported"
                 }
 
             if not client_uuid:
-                logger.warning(
-                    f"FIREBASE_CACHE.get_bank_transactions company_id={company_id} "
-                    f"no_client_uuid"
-                )
                 return {
-                    "data": {"to_reconcile": [], "in_process": [], "pending": []},
+                    "data": {"to_process": [], "in_process": [], "pending": [], "processed": []},
                     "source": "none",
-                    "warning": "No client UUID for ERP connection"
+                    "warning": "No client UUID"
                 }
 
-            # Fetch from Odoo ERP using singleton
-            try:
-                from .erp_service import ERPService
+            # 3. Chargement parallèle des sources (ERP + Task Manager)
+            from .erp_service import ERPService
+            from .firebase_providers import get_firebase_management
+            firebase_mgmt = get_firebase_management()
 
-                # Call ERP service to get unreconciled bank transactions
-                # This uses cached ERP connections (30 min TTL)
-                bank_transactions = await asyncio.to_thread(
-                    ERPService.get_odoo_bank_statement_move_line_not_rec,
-                    user_id,
-                    company_id,
-                    client_uuid,
-                    None,  # journal_id - None = all bank accounts
-                    False  # reconciled - False = unreconciled only
-                )
-
-                logger.info(
-                    f"FIREBASE_CACHE.get_bank_transactions company_id={company_id} "
-                    f"count={len(bank_transactions)} source=erp"
-                )
-
-            except Exception as erp_error:
-                logger.error(
-                    f"FIREBASE_CACHE.get_bank_transactions erp_error={erp_error}"
-                )
-                return {
-                    "data": {"to_reconcile": [], "in_process": [], "pending": []},
-                    "source": "none",
-                    "error": str(erp_error)
-                }
-
-            # Organize transactions by reconciliation status with business logic
-            organized = await self._organize_bank_transactions_by_status(
-                bank_transactions,
+            # Task 1: ERP Transactions (to_reconcile raw)
+            task_erp = asyncio.to_thread(
+                ERPService.get_odoo_bank_statement_move_line_not_rec,
                 user_id,
                 company_id,
-                mandate_path
+                client_uuid,
+                None,  # All journals
+                False  # Unreconciled only
             )
 
-            total_count = sum(len(v) for v in organized.values() if isinstance(v, list))
+            # Task 2: Firebase Task Manager (Status)
+            task_firebase = asyncio.to_thread(
+                firebase_mgmt.get_banker_jobs_from_task_manager,
+                user_id,
+                mandate_path or ""
+            )
+
+            results = await asyncio.gather(task_erp, task_firebase, return_exceptions=True)
+            
+            erp_transactions = results[0] if not isinstance(results[0], Exception) else []
+            fb_jobs = results[1] if not isinstance(results[1], Exception) else {"processed": [], "pending": [], "in_process": {}}
+
+            if isinstance(results[0], Exception):
+                logger.error(f"[BANK] ERP Error: {results[0]}")
+            if isinstance(results[1], Exception):
+                logger.error(f"[BANK] Firebase Error: {results[1]}")
+
+            # 4. Réconciliation / Croisement + Normalisation BankTransaction
+
+            # Helper: normaliser un item vers le format BankTransaction attendu par le frontend
+            def _normalize_from_erp(erp_tx, status="to_process"):
+                """Normalise une transaction ERP brute vers BankTransaction."""
+                move_id = str(erp_tx.get("move_id") or erp_tx.get("id") or "")
+                amount = float(erp_tx.get("amount", 0) or 0)
+                return {
+                    "id": move_id,
+                    "transaction_id": move_id,
+                    "account_id": str(erp_tx.get("journal_id") or ""),
+                    "account_name": erp_tx.get("journal_name", ""),
+                    "date": erp_tx.get("date", ""),
+                    "reference": erp_tx.get("ref") or erp_tx.get("name") or "",
+                    "description": erp_tx.get("payment_ref") or erp_tx.get("display_name") or "",
+                    "partner_name": erp_tx.get("partner_name", ""),
+                    "payment_ref": erp_tx.get("payment_ref", ""),
+                    "amount": amount,
+                    "currency": erp_tx.get("currency_name") or "CHF",
+                    "transaction_type": "credit" if amount >= 0 else "debit",
+                    "status": status,
+                    "created_at": erp_tx.get("date", ""),
+                    "updated_at": erp_tx.get("date", ""),
+                }
+
+            def _normalize_from_task_manager(item, erp_tx=None, status="pending"):
+                """Normalise un item task_manager vers BankTransaction, enrichi par ERP si dispo."""
+                banker = item if "transaction_id" in item else item.get("department_data", {}).get("banker", {}) or item.get("department_data", {}).get("Banker", {})
+                tx_id = str(banker.get("transaction_id") or item.get("task_id", ""))
+
+                if erp_tx:
+                    amount = float(erp_tx.get("amount", 0) or 0)
+                    return {
+                        "id": tx_id,
+                        "transaction_id": tx_id,
+                        "account_id": str(banker.get("bank_account_id") or erp_tx.get("journal_id") or ""),
+                        "account_name": erp_tx.get("journal_name", "") or banker.get("bank_account", ""),
+                        "date": erp_tx.get("date", ""),
+                        "reference": erp_tx.get("ref") or erp_tx.get("name") or "",
+                        "description": erp_tx.get("payment_ref") or erp_tx.get("display_name") or "",
+                        "partner_name": erp_tx.get("partner_name", ""),
+                        "payment_ref": erp_tx.get("payment_ref", ""),
+                        "amount": amount,
+                        "currency": erp_tx.get("currency_name") or banker.get("txn_currency") or "CHF",
+                        "transaction_type": "credit" if amount >= 0 else "debit",
+                        "status": item.get("status", status),
+                        "batch_id": banker.get("batch_id", ""),
+                        "current_step": item.get("current_step", ""),
+                        "job_id": item.get("task_id", ""),
+                        "created_at": erp_tx.get("date", ""),
+                        "updated_at": erp_tx.get("date", ""),
+                    }
+                else:
+                    amount = float(banker.get("txn_amount", 0) or 0)
+                    return {
+                        "id": tx_id,
+                        "transaction_id": tx_id,
+                        "account_id": str(banker.get("bank_account_id") or ""),
+                        "account_name": banker.get("bank_account", ""),
+                        "date": banker.get("transaction_date", ""),
+                        "reference": banker.get("reference", ""),
+                        "description": "",
+                        "partner_name": "",
+                        "payment_ref": "",
+                        "amount": amount,
+                        "currency": banker.get("txn_currency") or "CHF",
+                        "transaction_type": "credit" if amount >= 0 else "debit",
+                        "status": item.get("status", status),
+                        "batch_id": banker.get("batch_id", ""),
+                        "current_step": item.get("current_step", ""),
+                        "job_id": item.get("task_id", ""),
+                        "created_at": banker.get("transaction_date", ""),
+                        "updated_at": banker.get("transaction_date", ""),
+                    }
+
+            # Indexer les transactions ERP par ID pour recherche rapide
+            erp_map = {str(tx.get("move_id") or tx.get("id")): tx for tx in erp_transactions}
+
+            # A. In Process (cross-ref ERP, flat list avec batch_id sur chaque item)
+            # Note: si absent de l'ERP, on garde quand même en in_process.
+            # Le process en cours détectera que la transaction est déjà réconciliée.
+            # Les batches sont calculés à la volée par l'orchestration (pas stockés dans le cache).
+            in_process_list = []
+
+            for batch_id, items in fb_jobs.get("in_process", {}).items():
+                for item in items:
+                    tx_id = str(item.get("transaction_id") or "")
+                    erp_tx = erp_map.pop(tx_id, None)
+                    normalized = _normalize_from_task_manager(item, erp_tx=erp_tx, status="on_process")
+                    normalized["batch_id"] = batch_id
+                    in_process_list.append(normalized)
+
+            # B. Pending (cross-ref ERP)
+            # Si une transaction pending n'existe plus dans l'ERP non-réconcilié,
+            # elle a été réconciliée manuellement en dehors du flow →
+            # supprimer le doc task_manager (nettoyage) et ne pas l'afficher.
+            pending_list = []
+            pending_to_delete = []  # task_ids à supprimer de task_manager
+            for item in fb_jobs.get("pending", []):
+                tx_id = str(item.get("transaction_id") or "")
+                erp_tx = erp_map.pop(tx_id, None)
+                if erp_tx is None:
+                    # Transaction réconciliée manuellement → marquer pour suppression
+                    task_id = item.get("task_id", "")
+                    if task_id:
+                        pending_to_delete.append(task_id)
+                    logger.info(
+                        f"[BANK] Pending tx_id={tx_id} task_id={task_id} "
+                        f"no longer in ERP → delete from task_manager"
+                    )
+                else:
+                    normalized = _normalize_from_task_manager(item, erp_tx=erp_tx, status="pending")
+                    pending_list.append(normalized)
+
+            # Suppression asynchrone des docs pending obsolètes
+            if pending_to_delete:
+                try:
+                    db = get_firestore()
+                    task_mgr_ref = db.collection("clients").document(user_id).collection("task_manager")
+                    for task_id in pending_to_delete:
+                        await asyncio.to_thread(
+                            task_mgr_ref.document(task_id).delete
+                        )
+                    logger.info(
+                        f"[BANK] Deleted {len(pending_to_delete)} obsolete pending docs "
+                        f"from task_manager for company_id={company_id}"
+                    )
+                except Exception as del_err:
+                    logger.warning(f"[BANK] Failed to delete pending docs: {del_err}")
+
+            # C. Processed (full Firestore docs, extract department_data.banker)
+            processed_list = []
+            for item in fb_jobs.get("processed", []):
+                tx_id_check = ""
+                dept_data = item.get("department_data", {})
+                banker = dept_data.get("banker", {}) or dept_data.get("Banker", {})
+                if banker:
+                    tx_id_check = str(banker.get("transaction_id") or "")
+                erp_tx = erp_map.pop(tx_id_check, None) if tx_id_check else None
+                normalized = _normalize_from_task_manager(item, erp_tx=erp_tx, status="processed")
+                processed_list.append(normalized)
+
+            # D. Ce qui reste dans erp_map = vraiment "À traiter"
+            to_process_list = [_normalize_from_erp(tx) for tx in erp_map.values()]
+
+            # 5. Construction du résultat final (flat lists uniquement, pas de dict de batches)
+            organized = {
+                "to_process": to_process_list,
+                "in_process": in_process_list,
+                "pending": pending_list,
+                "processed": processed_list
+            }
+
+            total_count = len(to_process_list) + len(in_process_list) + len(pending_list)
             logger.info(
                 f"FIREBASE_CACHE.get_bank_transactions company_id={company_id} "
-                f"total={total_count} (to_reconcile={len(organized.get('to_reconcile', []))}, "
-                f"in_process={len(organized.get('in_process', []))}, "
-                f"pending={len(organized.get('pending', []))}) source=erp"
+                f"total={total_count} (to_process={len(to_process_list)}, "
+                f"in_process={len(in_process_list)}, "
+                f"pending={len(pending_list)}) source=erp+firebase"
             )
 
-            # 3. Sync vers Redis
+            # 6. Sync vers Redis
             if total_count > 0:
                 await cache.set_cached_data(
                     user_id,
@@ -620,154 +726,7 @@ class FirebaseCacheHandlers:
             logger.error(f"FIREBASE_CACHE.get_bank_transactions error={e}")
             import traceback
             traceback.print_exc()
-            return {"data": {"to_reconcile": [], "in_process": [], "pending": []}, "error": str(e)}
-
-    async def _organize_bank_transactions_by_status(
-        self, 
-        transactions: List[Dict],
-        user_id: str,
-        company_id: str,
-        mandate_path: str = None
-    ) -> Dict[str, List]:
-        """
-        Organize bank transactions by status using Firebase data.
-        
-        Applies business logic to determine transaction status:
-        1. Start with all transactions in to_reconcile
-        2. Remove transactions in active batches -> in_process
-        3. Remove transactions in pending sheet -> pending
-        
-        Args:
-            transactions: List of transactions from Odoo ERP
-            user_id: Firebase user ID
-            company_id: Company/mandate ID
-            mandate_path: Path to mandate in Firebase
-            
-        Returns:
-            Dict with 3 categories: to_reconcile, in_process, pending
-        """
-        import asyncio
-        
-        # Initialize all transactions in to_reconcile
-        organized = {
-            "to_reconcile": [],
-            "in_process": [],
-            "pending": []
-        }
-        
-        # Build a dict for quick lookup by move_id
-        tx_by_id = {}
-        for tx in transactions:
-            move_id = tx.get("move_id")
-            if move_id is not None:
-                tx_by_id[str(move_id)] = tx
-                organized["to_reconcile"].append(tx)
-        
-        # Track IDs to remove from to_reconcile
-        in_process_ids = set()
-        pending_ids = set()
-        
-        # Parallel fetch of batches and pending transactions
-        tasks = []
-        
-        # Task 1: Get active batches (in_process transactions)
-        async def fetch_batches():
-            try:
-                from .firebase_providers import FirebaseManagement
-                firebase = FirebaseManagement()
-                notifications_path = f"clients/{user_id}/notifications"
-                
-                batches = await asyncio.to_thread(
-                    firebase.get_banker_batches,
-                    user_id,
-                    notifications_path,
-                    company_id
-                )
-                
-                batch_tx_ids = set()
-                if batches and isinstance(batches, list):
-                    for batch in batches:
-                        batch_transactions = batch.get('transactions', [])
-                        if isinstance(batch_transactions, list):
-                            for tx_item in batch_transactions:
-                                if isinstance(tx_item, dict):
-                                    # Try different possible ID fields
-                                    tx_id = tx_item.get('move_id') or tx_item.get('transaction_id') or tx_item.get('Id')
-                                    if tx_id:
-                                        batch_tx_ids.add(str(tx_id))
-                
-                logger.info(f"[BANK_ORGANIZE] Found {len(batch_tx_ids)} transactions in active batches")
-                return batch_tx_ids
-                
-            except Exception as e:
-                logger.warning(f"[BANK_ORGANIZE] Failed to fetch batches: {e}")
-                return set()
-        
-        # Task 2: Get pending transactions
-        async def fetch_pending():
-            try:
-                if not mandate_path:
-                    logger.debug("[BANK_ORGANIZE] No mandate_path, skipping pending transactions")
-                    return set()
-                    
-                from .firebase_providers import FirebaseManagement
-                firebase = FirebaseManagement()
-                
-                pending_doc = await asyncio.to_thread(
-                    firebase.download_pending_item_docsheet,
-                    mandate_path
-                )
-                
-                pending_tx_ids = set()
-                if pending_doc and isinstance(pending_doc, dict):
-                    items = pending_doc.get('items', {})
-                    if isinstance(items, dict):
-                        for key, item in items.items():
-                            if isinstance(item, dict):
-                                # Try to get ID from item
-                                tx_id = item.get('Id') or item.get('move_id') or item.get('transaction_id')
-                                if tx_id:
-                                    pending_tx_ids.add(str(tx_id))
-                
-                logger.info(f"[BANK_ORGANIZE] Found {len(pending_tx_ids)} transactions in pending")
-                return pending_tx_ids
-                
-            except Exception as e:
-                logger.warning(f"[BANK_ORGANIZE] Failed to fetch pending transactions: {e}")
-                return set()
-        
-        # Execute both tasks in parallel
-        batch_ids, pending_ids = await asyncio.gather(
-            fetch_batches(),
-            fetch_pending(),
-            return_exceptions=False
-        )
-        
-        # Move transactions from to_reconcile to appropriate categories
-        to_remove_from_reconcile = []
-        
-        for tx in organized["to_reconcile"]:
-            move_id = str(tx.get("move_id", ""))
-            
-            if move_id in batch_ids:
-                organized["in_process"].append(tx)
-                to_remove_from_reconcile.append(tx)
-            elif move_id in pending_ids:
-                organized["pending"].append(tx)
-                to_remove_from_reconcile.append(tx)
-        
-        # Remove transactions that were moved to other categories
-        for tx in to_remove_from_reconcile:
-            organized["to_reconcile"].remove(tx)
-        
-        logger.info(
-            f"[BANK_ORGANIZE] Final counts - "
-            f"to_reconcile={len(organized['to_reconcile'])}, "
-            f"in_process={len(organized['in_process'])}, "
-            f"pending={len(organized['pending'])}"
-        )
-        
-        return organized
+            return {"data": {"to_process": [], "in_process": [], "pending": [], "processed": []}, "error": str(e)}
 
     # ═══════════════════════════════════════════════════════════════
     # TASKS

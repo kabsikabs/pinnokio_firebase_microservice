@@ -127,7 +127,8 @@ class DashboardEvents:
     EXPENSES_UPDATE = "dashboard.expenses_update"  # Expenses data updated
     TASKS_UPDATE = "dashboard.tasks_update"  # Tasks data updated
     APPROVALS_UPDATE = "dashboard.approvals_update"  # Approvals data updated
-    # Real-time updates from jobbeurs (via Redis PubSub)
+    # Real-time delta updates from jobbeurs (via Redis PubSub)
+    BILLING_ITEM_UPDATE = "dashboard.billing_item_update"  # Single billing_history item changed (delta)
     PENDING_APPROVAL_UPDATE = "dashboard.pending_approval_update"  # Pending approval list update from jobbeurs
 
 
@@ -194,8 +195,8 @@ class InvoiceEvents:
     - Instructions par document
 
     NOTE Invoices Specificites:
-    - 4 onglets: to_do, in_process, pending, processed
-    - AAA/AW colonnes uniquement sur to_do
+    - 4 onglets: to_process, in_process, pending, processed
+    - AAA/AW colonnes uniquement sur to_process
     - Boutons conditionnels par onglet
     """
     # Orchestration events
@@ -686,7 +687,7 @@ class BankingEvents:
     - Instructions par transaction
 
     NOTE Banking Specificites:
-    - PAS d'onglet "completed" - utilise "matched"
+    - 4 onglets: to_process, in_process, pending, processed
     - Selecteur de compte bancaire comme filtre principal
     - Affichage balance avec couleur
     - Gestion des batches dans in_process
@@ -702,6 +703,7 @@ class BankingEvents:
     # Transaction operations
     LIST = "banking.list"
     PROCESS = "banking.process"
+    PROCESSING_STARTED = "banking.processing_started"  # Processing started (optimistic)
     PROCESSED = "banking.processed"
     STOP = "banking.stop"
     STOPPED = "banking.stopped"

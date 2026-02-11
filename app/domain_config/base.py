@@ -61,9 +61,9 @@ class BaseDomainConfig(ABC):
     # Domain identifier (must be set by subclasses)
     DOMAIN: str = ""
 
-    # Default list names (can be overridden by subclasses)
+    # Default list names (universal across all domains)
     LIST_NAMES = {
-        "to_process": "unprocessed",  # UI tab name
+        "to_process": "to_process",
         "in_process": "in_process",
         "pending": "pending",
         "processed": "processed",
@@ -160,7 +160,7 @@ class BaseDomainConfig(ABC):
             status: Normalized status string
 
         Returns:
-            List name (e.g., "unprocessed", "in_process", "pending", "processed")
+            List name (e.g., "to_process", "in_process", "pending", "processed")
         """
         # Check domain-specific override first
         if status in cls.STATUS_TO_LIST_OVERRIDE:

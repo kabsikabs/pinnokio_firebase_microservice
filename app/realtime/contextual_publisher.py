@@ -703,31 +703,37 @@ async def publish_metrics_update(
         True si publié avec succès
     """
     try:
-        from app.cache.metrics_calculator import AsyncMetricsCalculator
+        from app.cache.metrics_calculator import MetricsCalculator
 
-        calculator = AsyncMetricsCalculator()
+        redis = get_redis()
+        calculator = MetricsCalculator(redis)
 
-        # Calculer les métriques selon les domaines demandés
+        # Calculer les métriques selon les domaines demandés (sync car MetricsCalculator sync)
         if domains:
             metrics = {}
             for domain in domains:
                 if domain == BusinessDomain.ROUTING.value:
-                    metrics["routing"] = await calculator.get_routing_metrics(uid, company_id)
+                    metrics["routing"] = calculator.get_routing_metrics(uid, company_id).to_dict()
                 elif domain == BusinessDomain.INVOICES.value:
-                    metrics["ap"] = await calculator.get_ap_metrics(uid, company_id)
+                    metrics["ap"] = calculator.get_ap_metrics(uid, company_id).to_dict()
                 elif domain == BusinessDomain.BANK.value:
-                    metrics["bank"] = await calculator.get_bank_metrics(uid, company_id)
+                    metrics["bank"] = calculator.get_bank_metrics(uid, company_id).to_dict()
                 elif domain == BusinessDomain.EXPENSES.value:
-                    metrics["expenses"] = await calculator.get_expenses_metrics(uid, company_id)
+                    metrics["expenses"] = calculator.get_expenses_metrics(uid, company_id).to_dict()
         else:
-            metrics = await calculator.get_all_metrics(uid, company_id)
+            metrics = calculator.get_all_metrics(uid, company_id)
+
+        # Construire le payload avec metrics seulement (compteurs légers ~200 bytes)
+        # NOTE: billing_history n'est PLUS inclus ici - envoyé en delta via
+        # BILLING_ITEM_UPDATE depuis redis_subscriber._handle_task_manager_message()
+        payload = {"metrics": metrics, "action": "full"}
 
         # Publier vers le dashboard
         return await publish_dashboard_event(
             uid=uid,
             company_id=company_id,
             event_type=WS_EVENTS.DASHBOARD.METRICS_UPDATE if hasattr(WS_EVENTS, 'DASHBOARD') else "dashboard.metrics_update",
-            payload={"metrics": metrics, "action": "full"},
+            payload=payload,
             session_id=session_id
         )
 

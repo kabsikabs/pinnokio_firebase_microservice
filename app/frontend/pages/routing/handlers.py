@@ -91,7 +91,7 @@ class RoutingHandlers:
             company_id: Company ID
             mandate_path: Firebase mandate path
             input_drive_id: Google Drive folder ID for documents
-            category: "unprocessed", "in_process", "pending", "processed", or "all"
+            category: "to_process", "in_process", "pending", "processed", or "all"
             page: Current page number (1-indexed)
             page_size: Items per page
             search: Search filter
@@ -103,12 +103,12 @@ class RoutingHandlers:
             {
                 "success": True,
                 "data": {
-                    "unprocessed": [...],
+                    "to_process": [...],
                     "in_process": [...],
                     "pending": [...],
                     "processed": [...],
                     "counts": {
-                        "unprocessed": 10,
+                        "to_process": 10,
                         "in_process": 5,
                         "pending": 3,
                         "processed": 25
@@ -152,54 +152,29 @@ class RoutingHandlers:
             logger.info(f"[ROUTING] Fetching documents for company={company_id}, category={category}")
 
             # Fetch all document categories from Drive with Firebase status sorting
-            unprocessed = []
+            to_process = []
             in_process = []
             pending = []
             processed = []
 
-            if category == "all" or category in ("unprocessed", "in_process", "pending"):
-                # Use drive_cache_handlers which now does correct sorting via check_job_status
-                drive_docs = await self._fetch_drive_documents_with_status(
-                    user_id, company_id, input_drive_id
-                )
-                if drive_docs:
-                    unprocessed = drive_docs.get("to_process", [])
-                    in_process = drive_docs.get("in_process", [])
-                    pending = drive_docs.get("pending", [])
-
-            if category == "all" or category == "processed":
-                # Fetch processed documents from Firebase journal (like Router.py)
-                firebase_mgmt = get_firebase_management()
-                processed_docs = await asyncio.to_thread(
-                    firebase_mgmt.fetch_journal_entries_by_mandat_id_without_source,
-                    user_id,
-                    company_id,  # mandat_id
-                    'Router'  # departement
-                )
-                if processed_docs and isinstance(processed_docs, list):
-                    for doc in processed_docs:
-                        doc_data = doc.get('data', {}) if isinstance(doc, dict) else {}
-                        # Filtrer uniquement les statuts de succès: completed, routed, success, close
-                        # (comme dans l'ancien code g_cred.py ligne 6615)
-                        status = doc_data.get('status', '')
-                        if status in ['completed', 'routed', 'success', 'close']:
-                            processed.append({
-                                "id": doc.get('firebase_doc_id', ''),
-                                "job_id": doc_data.get('job_id', ''),
-                                "file_name": doc_data.get('file_name', ''),
-                                "status": status,
-                                "timestamp": str(doc_data.get('timestamp', '')),
-                                "source": doc_data.get('source', ''),
-                            })
+            # Drive + task_manager cross-reference (source de vérité)
+            drive_docs = await self._fetch_drive_documents_with_status(
+                user_id, company_id, input_drive_id, mandate_path
+            )
+            if drive_docs:
+                to_process = drive_docs.get("to_process", [])
+                in_process = drive_docs.get("in_process", [])
+                pending = drive_docs.get("pending", [])
+                processed = drive_docs.get("processed", [])
 
             # Build result
             data = {
-                "unprocessed": unprocessed,
+                "to_process": to_process,
                 "in_process": in_process,
                 "pending": pending,
                 "processed": processed,
                 "counts": {
-                    "unprocessed": len(unprocessed),
+                    "to_process": len(to_process),
                     "in_process": len(in_process),
                     "pending": len(pending),
                     "processed": len(processed),
@@ -239,18 +214,19 @@ class RoutingHandlers:
         self,
         user_id: str,
         company_id: str,
-        input_drive_id: Optional[str]
+        input_drive_id: Optional[str],
+        mandate_path: str = ""
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Fetch documents from Google Drive with Firebase status sorting.
+        Fetch documents from Google Drive croisés avec task_manager (Source de Vérité).
 
         Uses drive_cache_handlers.get_documents() which:
         - Checks Redis cache first
-        - On cache miss: fetches from Drive API + checks Firebase notifications
-        - Returns correctly sorted: to_process, in_process, pending
+        - On cache miss: fetches from Drive API + crosses with task_manager
+        - Returns correctly sorted: to_process, in_process, pending, processed
         """
         if not input_drive_id:
-            return {"to_process": [], "in_process": [], "pending": []}
+            return {"to_process": [], "in_process": [], "pending": [], "processed": []}
 
         try:
             from app.drive_cache_handlers import get_drive_cache_handlers
@@ -259,15 +235,16 @@ class RoutingHandlers:
             result = await drive_handlers.get_documents(
                 user_id=user_id,
                 company_id=company_id,
-                input_drive_id=input_drive_id
+                input_drive_id=input_drive_id,
+                mandate_path=mandate_path
             )
 
             if result and result.get("data"):
                 return result["data"]
-            return {"to_process": [], "in_process": [], "pending": []}
+            return {"to_process": [], "in_process": [], "pending": [], "processed": []}
         except Exception as e:
             logger.error(f"[ROUTING] Drive fetch error: {e}")
-            return {"to_process": [], "in_process": [], "pending": []}
+            return {"to_process": [], "in_process": [], "pending": [], "processed": []}
 
     def _apply_filters(
         self,
@@ -557,55 +534,29 @@ class RoutingHandlers:
                 drive_result = await drive_handlers.refresh_documents(
                     user_id=user_id,
                     company_id=company_id,
-                    input_drive_id=input_drive_id
+                    input_drive_id=input_drive_id,
+                    mandate_path=mandate_path
                 )
             else:
-                drive_result = {"data": {"to_process": [], "in_process": [], "pending": []}}
+                drive_result = {"data": {"to_process": [], "in_process": [], "pending": [], "processed": []}}
 
             # 2. Invalidate routing cache
             await self.invalidate_cache(user_id, company_id)
 
-            # 3. Fetch processed documents fresh from Firebase
-            processed = []
-            try:
-                firebase_mgmt = get_firebase_management()
-                processed_docs = await asyncio.to_thread(
-                    firebase_mgmt.fetch_journal_entries_by_mandat_id_without_source,
-                    user_id,
-                    company_id,
-                    'Router'
-                )
-                if processed_docs and isinstance(processed_docs, list):
-                    for doc in processed_docs:
-                        doc_data = doc.get('data', {}) if isinstance(doc, dict) else {}
-                        # Filtrer uniquement les statuts de succès: completed, routed, success, close
-                        # (comme dans l'ancien code g_cred.py ligne 6615)
-                        status = doc_data.get('status', '')
-                        if status in ['completed', 'routed', 'success', 'close']:
-                            processed.append({
-                                "id": doc.get('firebase_doc_id', ''),
-                                "job_id": doc_data.get('job_id', ''),
-                                "file_name": doc_data.get('file_name', ''),
-                                "status": status,
-                                "timestamp": str(doc_data.get('timestamp', '')),
-                                "source": doc_data.get('source', ''),
-                            })
-            except Exception as fb_err:
-                logger.warning(f"[ROUTING] Failed to fetch processed docs: {fb_err}")
-
-            # 4. Build response with fresh data
+            # 3. Build response with fresh data (processed vient du Drive+task_manager)
             drive_data = drive_result.get("data", {}) if drive_result else {}
-            unprocessed = drive_data.get("to_process", [])
+            to_process = drive_data.get("to_process", [])
             in_process = drive_data.get("in_process", [])
             pending = drive_data.get("pending", [])
+            processed = drive_data.get("processed", [])
 
             data = {
-                "unprocessed": unprocessed,
+                "to_process": to_process,
                 "in_process": in_process,
                 "pending": pending,
                 "processed": processed,
                 "counts": {
-                    "unprocessed": len(unprocessed),
+                    "to_process": len(to_process),
                     "in_process": len(in_process),
                     "pending": len(pending),
                     "processed": len(processed),
@@ -614,7 +565,7 @@ class RoutingHandlers:
 
             logger.info(
                 f"[ROUTING] Refresh complete: "
-                f"unprocessed={len(unprocessed)}, in_process={len(in_process)}, "
+                f"to_process={len(to_process)}, in_process={len(in_process)}, "
                 f"pending={len(pending)}, processed={len(processed)}"
             )
 
@@ -655,7 +606,7 @@ class RoutingHandlers:
 
             keys_to_invalidate = [
                 ("routing", "list_all"),
-                ("routing", "list_unprocessed"),
+                ("routing", "list_to_process"),
                 ("routing", "list_in_process"),
                 ("routing", "list_pending"),
                 ("routing", "list_processed"),

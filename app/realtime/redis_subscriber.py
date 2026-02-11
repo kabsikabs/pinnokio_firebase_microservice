@@ -51,11 +51,18 @@ from app.ws_events import WS_EVENTS
 from app.realtime.contextual_publisher import (
     publish_user_event,
     publish_business_event,
+    publish_dashboard_event,
+    publish_metrics_update,
     CacheLevel,
     _get_user_context,
     _update_cache,
     _get_cache_key,
     _get_ttl_for_cache,
+)
+from app.status_normalization import StatusNormalizer
+from app.llm_service.redis_namespaces import (
+    build_business_key,
+    get_ttl_for_domain,
 )
 
 logger = logging.getLogger(__name__)
@@ -106,8 +113,11 @@ def _extract_department_to_domain(department: str) -> str:
     """
     department_map = {
         "accounting": "invoices",
+        "apbookeeper": "invoices",  # Workers envoient "APbookeeper"
         "banking": "bank",
+        "banker": "bank",           # Workers envoient "Banker"
         "routing": "routing",
+        "router": "routing",
         "hr": "hr",
         "expenses": "expenses",
         "coa": "coa",
@@ -391,6 +401,16 @@ class RedisSubscriber:
             logger.info("[REDIS_SUBSCRIBER] handle_notification START - uid=%s channel=%s", uid, channel)
             logger.info("[REDIS_SUBSCRIBER] → notification_type=%s job_id=%s", msg_type, job_id)
 
+            # Normalisation du status (si présent)
+            raw_status = message_data.get("status")
+            if raw_status:
+                function_name = message_data.get("functionName", "")
+                normalized_status = StatusNormalizer.normalize_for_function(function_name, raw_status)
+                category = StatusNormalizer.get_category(normalized_status)
+                message_data["status"] = normalized_status
+                message_data["status_category"] = category
+                logger.debug("[REDIS_SUBSCRIBER] → status normalized: %s → %s (category=%s)", raw_status, normalized_status, category)
+
             # Vérification connexion
             is_connected = hub.is_user_connected(uid)
             logger.debug("[REDIS_SUBSCRIBER] → user_connected=%s", is_connected)
@@ -533,6 +553,333 @@ class RedisSubscriber:
         except Exception as e:
             logger.error("[REDIS_SUBSCRIBER] unexpected_error channel=%s uid=%s error=%s", channel, uid, str(e), exc_info=True)
 
+    # Clés de listes universelles (identiques pour tous les domaines)
+    DOMAIN_CATEGORY_KEYS = {
+        "routing": ["to_process", "in_process", "pending", "processed"],
+        "invoices": ["to_process", "in_process", "pending", "processed"],
+        "bank": ["to_process", "in_process", "pending", "processed"],
+    }
+
+    # Mapping status → catégorie universelle (to_process, in_process, pending, processed)
+    STATUS_TO_ABSTRACT_CATEGORY = {
+        # → to_process
+        "to_process": "to_process", "to_do": "to_process", "new": "to_process",
+        "error": "to_process", "stopped": "to_process", "unprocessed": "to_process",
+        "to_reconcile": "to_process",
+        # → in_process
+        "in_process": "in_process", "on_process": "in_process", "processing": "in_process",
+        "in_progress": "in_process", "in_queue": "in_process", "running": "in_process",
+        "stopping": "in_process",
+        # → pending
+        "pending": "pending", "pending_approval": "pending", "awaiting_approval": "pending",
+        # → processed
+        "processed": "processed", "completed": "processed", "done": "processed",
+        "close": "processed", "closed": "processed", "matched": "processed",
+        "reconciled": "processed", "approved": "processed",
+    }
+
+    # Mapping catégorie abstraite → clé concrète (identique pour tous les domaines)
+    _UNIVERSAL_KEY = {"to_process": "to_process", "in_process": "in_process", "pending": "pending", "processed": "processed"}
+    ABSTRACT_TO_DOMAIN_KEY = {
+        "routing": _UNIVERSAL_KEY,
+        "invoices": _UNIVERSAL_KEY,
+        "bank": _UNIVERSAL_KEY,
+    }
+
+    def _get_target_category_key(self, domain: str, status: str) -> str:
+        """Convertit un status en clé de catégorie pour le domaine donné."""
+        abstract = self.STATUS_TO_ABSTRACT_CATEGORY.get(status, "to_process")
+        return self._UNIVERSAL_KEY.get(abstract, "to_process")
+
+    def _update_business_cache_item(
+        self,
+        uid: str,
+        company_id: str,
+        domain: str,
+        job_id: str,
+        item_data: Dict[str, Any],
+        is_new: bool = False
+    ) -> None:
+        """
+        Met à jour un item dans le cache business, en respectant le format réel du cache.
+
+        Chaque domaine a ses propres clés de catégorie:
+        - routing: to_process, in_process, pending, processed
+        - invoices (AP): to_do, in_process, pending, processed
+        - bank: to_reconcile, in_process, pending, matched
+
+        Quand un status change (ex: in_queue → pending):
+        1. Trouver l'item dans toutes les listes du domaine (par job_id)
+        2. Le retirer de l'ancienne liste
+        3. MERGER le delta avec l'item original (préserver les champs existants)
+        4. L'ajouter dans la nouvelle liste (basée sur le nouveau status)
+        """
+        try:
+            redis = get_redis()
+            cache_key = build_business_key(uid, company_id, domain)
+
+            # Lire le cache existant
+            raw = redis.get(cache_key)
+            if raw:
+                try:
+                    cache_data = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
+                except json.JSONDecodeError:
+                    cache_data = {}
+            else:
+                cache_data = {}
+
+            # Détecter le format wrapper du unified_cache_manager
+            is_wrapped = "cache_version" in cache_data and "data" in cache_data
+            inner_data = cache_data.get("data", cache_data) if is_wrapped else cache_data
+
+            # Déterminer le nouveau status et la clé de catégorie concrète pour CE domaine
+            new_status = (item_data.get("status") or "").lower()
+            target_category = self._get_target_category_key(domain, new_status)
+
+            # Récupérer les clés de catégorie pour ce domaine
+            category_keys = self.DOMAIN_CATEGORY_KEYS.get(
+                domain, self.DOMAIN_CATEGORY_KEYS.get("routing", [])
+            )
+
+            # Déterminer si le cache utilise des listes pré-catégorisées
+            uses_categorized_lists = any(k in inner_data for k in category_keys)
+
+            if uses_categorized_lists:
+                # Format pré-catégorisé (routing, invoices, bank)
+                # Toutes les catégories sont des flat lists (bank inclus, batches calculés à la volée)
+
+                # Étape 1: Trouver l'item existant dans toutes les listes (conserver ses champs)
+                existing_item = None
+                for cat_key in category_keys:
+                    cat_list = inner_data.get(cat_key, [])
+                    if not isinstance(cat_list, list):
+                        continue
+                    for item in cat_list:
+                        if item.get("job_id") == job_id or item.get("id") == job_id or item.get("task_id") == job_id:
+                            existing_item = item
+                            break
+                    if existing_item:
+                        break
+
+                # Étape 2: Retirer l'item de toutes les listes
+                for cat_key in category_keys:
+                    cat_list = inner_data.get(cat_key, [])
+                    if not isinstance(cat_list, list):
+                        continue
+                    inner_data[cat_key] = [
+                        item for item in cat_list
+                        if item.get("job_id") != job_id and item.get("id") != job_id and item.get("task_id") != job_id
+                    ]
+
+                # Étape 3: MERGER le delta PubSub avec l'item original
+                if existing_item:
+                    merged_item = {**existing_item, **item_data}
+                else:
+                    merged_item = item_data
+
+                # Étape 4: Insérer l'item mergé dans la bonne catégorie
+                if target_category not in inner_data:
+                    inner_data[target_category] = []
+                if not isinstance(inner_data[target_category], list):
+                    inner_data[target_category] = []
+                inner_data[target_category].insert(0, merged_item)
+
+                total = sum(
+                    len(v) if isinstance(v, list) else (
+                        sum(len(items) for items in v.values() if isinstance(items, list))
+                        if isinstance(v, dict) else 0
+                    )
+                    for k, v in inner_data.items() if k in category_keys
+                )
+                logger.info(
+                    "[REDIS_SUBSCRIBER] business_cache_updated domain=%s status=%s → category=%s "
+                    "merged=%s total_items=%s job_id=%s",
+                    domain, new_status, target_category,
+                    "existing+delta" if existing_item else "new_item_only",
+                    total, job_id
+                )
+            else:
+                # Format liste plate (cache vide ou format inconnu)
+                list_key = "items"
+                items = inner_data.get(list_key, [])
+
+                found = False
+                for i, item in enumerate(items):
+                    if item.get("job_id") == job_id or item.get("id") == job_id:
+                        items[i] = {**item, **item_data}
+                        found = True
+                        break
+                if not found:
+                    items.insert(0, item_data)
+
+                inner_data[list_key] = items
+                logger.info(
+                    "[REDIS_SUBSCRIBER] business_cache_updated domain=%s list_key=%s items_count=%s job_id=%s",
+                    domain, list_key, len(items), job_id
+                )
+
+            # Reconstruire avec wrapper si nécessaire
+            if is_wrapped:
+                cache_data["data"] = inner_data
+            else:
+                cache_data = inner_data
+
+            # Sauvegarder avec TTL
+            ttl = get_ttl_for_domain(domain)
+            redis.setex(cache_key, ttl, json.dumps(cache_data))
+
+        except Exception as e:
+            logger.error(
+                "[REDIS_SUBSCRIBER] business_cache_update_failed uid=%s domain=%s error=%s",
+                uid, domain, str(e), exc_info=True
+            )
+
+    def _update_billing_history_cache(
+        self,
+        uid: str,
+        company_id: str,
+        job_id: str,
+        message_data: dict
+    ) -> Optional[dict]:
+        """
+        Met à jour un ExpenseItem dans le cache billing_history (Historique des dépenses).
+
+        Le billing_history est une collection d'ExpenseItems issus de task_manager,
+        affichés dans le tableau du dashboard. Pas de logique open/closed ni de metrics.
+        On cherche l'item par job_id, on merge les champs du payload PubSub, on sauvegarde.
+        """
+        try:
+            redis = get_redis()
+            cache_key = build_business_key(uid, company_id, "billing_history")
+
+            raw = redis.get(cache_key)
+            if not raw:
+                return None
+
+            try:
+                cache_data = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
+            except json.JSONDecodeError:
+                return None
+
+            # Unwrap unified_cache_manager format
+            is_wrapped = "cache_version" in cache_data and "data" in cache_data
+            inner_data = cache_data.get("data", cache_data) if is_wrapped else cache_data
+
+            # Chercher l'item par jobId/id dans la liste plate items[]
+            items_list = inner_data.get("items", [])
+
+            existing_item = None
+            for item in items_list:
+                if item.get("jobId") == job_id or item.get("id") == job_id:
+                    existing_item = item
+                    break
+
+            if existing_item is None:
+                logger.warning(
+                    "[REDIS_SUBSCRIBER] billing_history item NOT FOUND job_id=%s in %d items (cache may not have it yet)",
+                    job_id, len(items_list)
+                )
+                # Log some jobIds for debugging
+                sample_ids = [item.get("jobId", item.get("id", "?")) for item in items_list[:5]]
+                logger.warning("[REDIS_SUBSCRIBER] billing_history sample jobIds: %s", sample_ids)
+                return None
+
+            # Merger les champs du payload PubSub → ExpenseItem (camelCase)
+            # Champs directs task_manager
+            if "status" in message_data:
+                old_status = existing_item.get("status", "N/A")
+                existing_item["status"] = message_data["status"]
+                logger.info(
+                    "[REDIS_SUBSCRIBER] billing_history STATUS CHANGE job_id=%s: '%s' → '%s'",
+                    job_id, old_status, message_data["status"]
+                )
+            if "current_step" in message_data:
+                existing_item["currentStep"] = message_data["current_step"]
+            if "last_message" in message_data:
+                existing_item["lastMessage"] = message_data["last_message"]
+            if "last_outcome" in message_data:
+                existing_item["lastOutcome"] = message_data["last_outcome"]
+            if "file_name" in message_data:
+                existing_item["fileName"] = message_data["file_name"]
+            if "uri_file_link" in message_data:
+                existing_item["uriFileLink"] = message_data["uri_file_link"]
+
+            # Billing data
+            billing = message_data.get("billing")
+            if isinstance(billing, dict):
+                if "total_tokens" in billing:
+                    existing_item["totalTokens"] = int(billing["total_tokens"] or 0)
+                if "total_sales_price" in billing:
+                    existing_item["cost"] = float(billing["total_sales_price"] or 0)
+                if "currency" in billing:
+                    existing_item["currency"] = billing["currency"]
+                if "billed" in billing:
+                    existing_item["billed"] = bool(billing["billed"])
+
+            # Department-specific data
+            dept_data = message_data.get("department_data")
+            if isinstance(dept_data, dict):
+                # APBookkeeper
+                ap_data = dept_data.get("APbookeeper") or dept_data.get("Apbookeeper") or {}
+                if ap_data:
+                    for src, dst in [
+                        ("supplier_name", "supplierName"),
+                        ("invoice_ref", "invoiceRef"),
+                        ("invoice_date", "invoiceDate"),
+                        ("due_date", "dueDate"),
+                        ("accounting_date", "accountingDate"),
+                        ("invoice_description", "invoiceDescription"),
+                    ]:
+                        if src in ap_data:
+                            existing_item[dst] = ap_data[src]
+                    for src, dst in [
+                        ("amount_vat_excluded", "amountVatExcluded"),
+                        ("amount_vat_included", "amountVatIncluded"),
+                        ("amount_vat", "amountVat"),
+                    ]:
+                        if src in ap_data:
+                            existing_item[dst] = float(ap_data[src] or 0)
+                    if "currency" in ap_data:
+                        existing_item["currency"] = ap_data["currency"]
+
+                # Router
+                router_data = dept_data.get("Router") or dept_data.get("router") or {}
+                if router_data:
+                    if "destination" in router_data:
+                        existing_item["routeDestination"] = router_data["destination"]
+                    if "confidence" in router_data:
+                        existing_item["routeConfidence"] = float(router_data["confidence"] or 0)
+
+                # Banker
+                banker_data = dept_data.get("Banker") or dept_data.get("banker") or {}
+                if banker_data:
+                    if "bank_account" in banker_data:
+                        existing_item["bankAccount"] = banker_data["bank_account"]
+                    if "transaction_type" in banker_data:
+                        existing_item["transactionType"] = banker_data["transaction_type"]
+
+            # Reconstruire avec wrapper
+            if is_wrapped:
+                cache_data["data"] = inner_data
+            else:
+                cache_data = inner_data
+
+            # Sauvegarder (TTL 1800s = même durée que le page_state dashboard)
+            redis.setex(cache_key, 1800, json.dumps(cache_data))
+
+            logger.info(
+                "[REDIS_SUBSCRIBER] billing_history_updated job_id=%s fields_merged=%s",
+                job_id, [k for k in message_data.keys() if k not in ("channel", "uid", "company_id")]
+            )
+            return existing_item
+
+        except Exception as e:
+            logger.error(
+                "[REDIS_SUBSCRIBER] billing_history_update_failed uid=%s job_id=%s error=%s",
+                uid, job_id, str(e), exc_info=True
+            )
+            return None
+
     async def _handle_task_manager_message(self, uid: str, channel: str, message_data: Dict[str, Any]) -> None:
         """
         Traite un message du canal task_manager.
@@ -540,6 +887,7 @@ class RedisSubscriber:
         Canal: user:{uid}/task_manager
         Niveau: BUSINESS (page-specific)
         Règle: Publier si utilisateur connecté ET sur la page concernée
+               + Notifier le dashboard si l'utilisateur y est (cross-domain)
 
         Args:
             uid: User ID
@@ -566,28 +914,51 @@ class RedisSubscriber:
                 logger.warning("[REDIS_SUBSCRIBER] → missing company_id or domain, skipping")
                 return
 
+            # Normalisation du status (si présent)
+            raw_status = message_data.get("status")
+            if raw_status:
+                # Utiliser le department comme function_name pour les overrides spécifiques
+                function_name = department.lower() if department != "unknown" else ""
+                normalized_status = StatusNormalizer.normalize_for_function(function_name, raw_status)
+                category = StatusNormalizer.get_category(normalized_status)
+                message_data["status"] = normalized_status
+                message_data["status_category"] = category
+                logger.debug("[REDIS_SUBSCRIBER] → status normalized: %s → %s (category=%s)", raw_status, normalized_status, category)
+
             # Vérification connexion
             is_connected = hub.is_user_connected(uid)
             logger.debug("[REDIS_SUBSCRIBER] → user_connected=%s", is_connected)
 
-            # Étape 1: Mise à jour du cache BUSINESS (TOUJOURS)
-            logger.info("[REDIS_SUBSCRIBER] → Step 1: Updating BUSINESS cache...")
-            try:
-                cache_key = _get_cache_key(CacheLevel.BUSINESS, uid, company_id, domain)
-                ttl = _get_ttl_for_cache(CacheLevel.BUSINESS, domain)
+            # Étape 1: Mise à jour du cache BUSINESS domain-aware (TOUJOURS)
+            # Utilise la structure correcte par domaine (documents/items/transactions)
+            # pour que le MetricsCalculator puisse lire les données
+            logger.info("[REDIS_SUBSCRIBER] → Step 1: Updating BUSINESS cache (domain-aware)...")
+            is_new = task_type in ["task_manager_created"]
+            item_data = message_data.get("data", message_data)
+            # S'assurer que le status normalisé est dans item_data
+            if raw_status and "status" not in item_data:
+                item_data["status"] = message_data.get("status", raw_status)
 
-                # Préparer le payload pour le cache
-                cache_payload = {
-                    "action": "new" if task_type in ["task_manager_created"] else "update",
-                    "data": message_data
-                }
-                _update_cache(CacheLevel.BUSINESS, cache_key, cache_payload, ttl)
-                logger.debug("[REDIS_SUBSCRIBER] → cache_key=%s", cache_key)
+            self._update_business_cache_item(
+                uid=uid,
+                company_id=company_id,
+                domain=domain,
+                job_id=job_id,
+                item_data=item_data,
+                is_new=is_new
+            )
 
-            except Exception as cache_error:
-                logger.error("[REDIS_SUBSCRIBER] cache_update_failed uid=%s error=%s", uid, str(cache_error), exc_info=True)
+            # Étape 1b: Mise à jour du billing_history cache (Historique des dépenses)
+            # Merge les champs du payload PubSub dans l'ExpenseItem correspondant
+            # Returns the updated item (for delta WS push) or None if not found
+            updated_billing_item = self._update_billing_history_cache(
+                uid=uid,
+                company_id=company_id,
+                job_id=job_id,
+                message_data=message_data
+            )
 
-            # Étape 2: Publication WebSocket si connecté ET sur la bonne page
+            # Étape 2: Publication WebSocket si connecté
             if is_connected:
                 # Vérification page active
                 context = _get_user_context(uid)
@@ -596,14 +967,12 @@ class RedisSubscriber:
                 logger.debug("[REDIS_SUBSCRIBER] → user_context: company=%s domain=%s", current_company, current_domain)
 
                 if current_company == company_id and current_domain == domain:
+                    # Utilisateur sur la page du domaine → envoyer l'event spécifique
                     logger.info("[REDIS_SUBSCRIBER] → Step 2: Publishing via WebSocket (user on page)...")
                     try:
-                        # Déterminer le type d'événement selon le domaine
                         event_type = f"{domain}.task_manager_update"
-
                         payload = {"action": "update", "data": message_data}
 
-                        # Publier via contextual_publisher (niveau BUSINESS)
                         published = await publish_business_event(
                             uid=uid,
                             company_id=company_id,
@@ -620,6 +989,45 @@ class RedisSubscriber:
 
                     except Exception as publish_error:
                         logger.error("[REDIS_SUBSCRIBER] publish_failed uid=%s error=%s", uid, str(publish_error), exc_info=True)
+
+                elif current_company == company_id and current_domain == "dashboard":
+                    # Utilisateur sur le DASHBOARD → envoyer:
+                    # 1. BILLING_ITEM_UPDATE delta (juste l'item changé, ~1KB vs ~500KB)
+                    # 2. METRICS_UPDATE (compteurs seulement, pas de billing_history)
+                    logger.info("[REDIS_SUBSCRIBER] → Step 2: User on DASHBOARD - publishing delta + metrics...")
+                    try:
+                        # 2a. Delta billing item update (si l'item existait dans le cache)
+                        if updated_billing_item:
+                            delta_published = await publish_dashboard_event(
+                                uid=uid,
+                                company_id=company_id,
+                                event_type=WS_EVENTS.DASHBOARD.BILLING_ITEM_UPDATE,
+                                payload={
+                                    "action": "update",
+                                    "item": updated_billing_item,
+                                    "job_id": job_id,
+                                    "domain": domain,
+                                }
+                            )
+                            if delta_published:
+                                logger.info("[REDIS_SUBSCRIBER] → published BILLING_ITEM_UPDATE delta for job_id=%s", job_id)
+                            else:
+                                logger.warning("[REDIS_SUBSCRIBER] → BILLING_ITEM_UPDATE publish_failed")
+
+                        # 2b. Metrics update (compteurs seulement, sans billing_history)
+                        published = await publish_metrics_update(
+                            uid=uid,
+                            company_id=company_id
+                        )
+
+                        if published:
+                            logger.info("[REDIS_SUBSCRIBER] → published dashboard.metrics_update for domain=%s", domain)
+                            logger.info("[REDIS_SUBSCRIBER] handle_task_manager SUCCESS - delta+metrics published to dashboard")
+                        else:
+                            logger.warning("[REDIS_SUBSCRIBER] → metrics publish_failed (user may have left dashboard)")
+
+                    except Exception as publish_error:
+                        logger.error("[REDIS_SUBSCRIBER] metrics_publish_failed uid=%s error=%s", uid, str(publish_error), exc_info=True)
 
                 else:
                     logger.info("[REDIS_SUBSCRIBER] → Step 2: Skipping WebSocket publish (user on different page)")
@@ -684,73 +1092,23 @@ class RedisSubscriber:
                 uid, collection_name, job_id, thread_key
             )
 
-            # Appeler llm_manager pour traitement métier
-            from app.llm_service.llm_manager import get_llm_manager
+            # Deleguer au worker via LLMGateway
+            from app.llm_service.llm_gateway import get_llm_gateway
 
-            llm_manager = get_llm_manager()
-
-            # Récupérer ou créer la session
-            session_key = f"{uid}:{collection_name}"
-            
-            # Vérifier si la session existe
-            with llm_manager._lock:
-                session = llm_manager.sessions.get(session_key)
-
-            if not session:
-                logger.warning(
-                    "[REDIS_SUBSCRIBER] session_not_found uid=%s collection=%s thread=%s "
-                    "message will be processed when session is created",
-                    uid, collection_name, thread_key
-                )
-                # On peut quand même essayer de créer une session minimale si nécessaire
-                # Pour l'instant, on log juste l'avertissement
-                logger.info("[REDIS_SUBSCRIBER] handle_job_chat SKIPPED - session not found")
-                logger.info("[REDIS_SUBSCRIBER] ═══════════════════════════════════════════════════════")
-                return
-
-            # Vérifier si le thread a un listener onboarding actif
-            listener_info = session.onboarding_listeners.get(thread_key)
-            if not listener_info:
-                logger.debug(
-                    "[REDIS_SUBSCRIBER] onboarding_listener_not_found uid=%s collection=%s thread=%s "
-                    "message will be ignored (listener not started)",
-                    uid, collection_name, thread_key
-                )
-                logger.info("[REDIS_SUBSCRIBER] handle_job_chat SKIPPED - listener not active")
-                logger.info("[REDIS_SUBSCRIBER] ═══════════════════════════════════════════════════════")
-                return
-
-            # Récupérer le brain depuis la session
-            brain = getattr(session, 'brain', None)
-            if not brain:
-                logger.warning(
-                    "[REDIS_SUBSCRIBER] brain_not_found uid=%s collection=%s thread=%s",
-                    uid, collection_name, thread_key
-                )
-                logger.info("[REDIS_SUBSCRIBER] handle_job_chat SKIPPED - brain not found")
-                logger.info("[REDIS_SUBSCRIBER] ═══════════════════════════════════════════════════════")
-                return
-
-            # Appeler le handler existant (logique métier inchangée)
-            follow_thread_key = f"follow_{job_id}"
-            
-            logger.info(
-                "[REDIS_SUBSCRIBER] → routing to llm_manager._handle_onboarding_log_event()"
-            )
-            
-            await llm_manager._handle_onboarding_log_event(
-                session=session,
-                brain=brain,
+            gateway = get_llm_gateway()
+            result = await gateway.enqueue_job_chat_message(
+                user_id=uid,
                 collection_name=collection_name,
                 thread_key=thread_key,
-                follow_thread_key=follow_thread_key,
+                job_id=job_id,
                 message=message
             )
 
             duration_ms = (time.time() - start_time) * 1000
             logger.info(
-                "[REDIS_SUBSCRIBER] handle_job_chat SUCCESS - processed uid=%s collection=%s job_id=%s duration_ms=%.2f",
-                uid, collection_name, job_id, duration_ms
+                "[REDIS_SUBSCRIBER] handle_job_chat ENQUEUED - uid=%s collection=%s job_id=%s "
+                "queue_job_id=%s duration_ms=%.2f",
+                uid, collection_name, job_id, result.get("job_id", "unknown")[:8], duration_ms
             )
             logger.info("[REDIS_SUBSCRIBER] ═══════════════════════════════════════════════════════")
 

@@ -197,10 +197,11 @@ class WebSocketHub:
                 self._logger.error("ws_send_error uid=%s error=%s", uid, repr(e))
         
         # Logs de broadcast (sauf chunks streaming pour éviter verbosité)
-        if msg_type == "llm.stream_delta" or original_type == "llm_stream_chunk":
-            # Logs de chunks en DEBUG uniquement pour éviter verbosité
-            chunk_len = len(message.get("payload", {}).get("chunk", "") or message.get("payload", {}).get("delta", ""))
-            self._logger.debug("ws_broadcast_chunk uid=%s chunk_len=%s connections=%s sent=%s", uid, chunk_len, len(conns), sent_count)
+        # ⭐ MIGRATION 2026-02-04: Ajout thinking_delta au filtre
+        streaming_types = ("llm.stream_delta", "llm.thinking_delta", "llm_stream_chunk")
+        if msg_type in streaming_types or original_type in streaming_types:
+            # Logs de streaming en DEBUG uniquement pour éviter verbosité
+            self._logger.debug("ws_broadcast_streaming uid=%s type=%s connections=%s", uid, msg_type, len(conns))
         else:
             self._logger.info("ws_broadcast uid=%s type=%s channel=%s connections=%s", uid, msg_type, channel, sent_count)
 

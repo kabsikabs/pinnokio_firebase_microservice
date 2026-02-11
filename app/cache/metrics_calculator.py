@@ -141,7 +141,7 @@ class SummaryMetrics:
 # ═══════════════════════════════════════════════════════════════
 
 # Statuts qui correspondent à "toProcess"
-TO_PROCESS_STATUSES = {"to_process", "to_do", "new", "pending_process", "unprocessed"}
+TO_PROCESS_STATUSES = {"to_process", "to_do", "new", "pending_process", "unprocessed", "to_reconcile"}
 
 # Statuts qui correspondent à "inProcess"
 IN_PROCESS_STATUSES = {"in_process", "processing", "running", "in_progress"}
@@ -195,12 +195,21 @@ class MetricsCalculator:
         self.redis = redis_client
 
     def _get_business_data(self, uid: str, company_id: str, domain: str) -> Optional[Dict]:
-        """Récupère les données business depuis Redis."""
+        """
+        Récupère les données business depuis Redis.
+
+        Gère automatiquement le wrapper unified_cache_manager:
+        {"data": {...}, "cached_at": ..., "cache_version": "3.0"}
+        """
         key = build_business_key(uid, company_id, domain)
         data = self.redis.get(key)
         if data:
             try:
-                return json.loads(data)
+                parsed = json.loads(data)
+                # Unwrap unified_cache_manager format si présent
+                if isinstance(parsed, dict) and "cache_version" in parsed and "data" in parsed:
+                    return parsed["data"]
+                return parsed
             except json.JSONDecodeError:
                 return None
         return None
@@ -233,14 +242,34 @@ class MetricsCalculator:
         """
         Calcule les métriques Router depuis business:{uid}:{cid}:routing.
 
-        Structure attendue:
-            {"documents": [{"id": "...", "status": "to_do|in_process|pending|processed", ...}]}
+        Format réel du cache (après unwrap par _get_business_data):
+            {
+                "to_process": [...],
+                "in_process": [...],
+                "pending": [...],
+                "processed": [...]
+            }
         """
         data = self._get_business_data(uid, company_id, BusinessDomain.ROUTING.value)
 
         if not data:
             return ModuleMetrics()
 
+        # Format pré-catégorisé (listes séparées par status)
+        to_process = data.get("to_process", [])
+        in_process = data.get("in_process", [])
+        pending = data.get("pending", [])
+        processed = data.get("processed", [])
+
+        if any([to_process, in_process, pending, processed]):
+            return ModuleMetrics(
+                to_process=len(to_process),
+                in_process=len(in_process),
+                pending=len(pending),
+                processed=len(processed),
+            )
+
+        # Fallback: format liste plate avec "documents" key
         documents = data.get("documents", [])
         counts = self._count_by_status(documents)
 
@@ -255,14 +284,35 @@ class MetricsCalculator:
         """
         Calcule les métriques APBookkeeper depuis business:{uid}:{cid}:invoices.
 
-        Structure attendue:
-            {"items": [{"id": "...", "status": "to_process|in_process|pending|processed", ...}]}
+        Format réel du cache (après unwrap par _get_business_data):
+            {
+                "to_process": [...],   # Tâches à traiter (error, to_process)
+                "in_process": [...],   # Tâches en cours
+                "pending": [...],      # En attente
+                "processed": [...],    # Terminées (completed, close, closed)
+                "step_mapping": {...}  # Mapping des étapes (ignoré pour metrics)
+            }
         """
         data = self._get_business_data(uid, company_id, BusinessDomain.INVOICES.value)
 
         if not data:
             return ModuleMetrics()
 
+        # Format pré-catégorisé (listes séparées par status)
+        to_process = data.get("to_process", [])
+        in_process = data.get("in_process", [])
+        pending = data.get("pending", [])
+        processed = data.get("processed", [])
+
+        if any([to_process, in_process, pending, processed]):
+            return ModuleMetrics(
+                to_process=len(to_process),
+                in_process=len(in_process),
+                pending=len(pending),
+                processed=len(processed),
+            )
+
+        # Fallback: format liste plate avec "items" key
         items = data.get("items", [])
         counts = self._count_by_status(items)
 
@@ -277,22 +327,34 @@ class MetricsCalculator:
         """
         Calcule les métriques Bank depuis business:{uid}:{cid}:bank.
 
-        Structure attendue:
-            {"to_reconcile": [...], "in_process": [...], "pending": [...]}
+        Format réel du cache (après cross-ref ERP+task_manager dans firebase_cache_handlers):
+            {
+                "to_process": [...],           # Transactions ERP non matchées (à traiter)
+                "in_process": [...],           # Liste plate (aplatie depuis batch_id dict)
+                "pending": [...],              # En attente
+                "processed": [...]             # Terminées
+            }
         """
         data = self._get_business_data(uid, company_id, BusinessDomain.BANK.value)
 
         if not data:
             return BankMetrics()
 
-        # The data is already organized by status in the cache
-        to_reconcile = data.get("to_reconcile", [])
-        in_process = data.get("in_process", [])
+        to_process = data.get("to_process", [])
         pending = data.get("pending", [])
 
+        # in_process: normalement liste plate, mais gérer le cas dict par sécurité
+        in_process_raw = data.get("in_process", [])
+        if isinstance(in_process_raw, dict):
+            in_process_count = sum(
+                len(items) for items in in_process_raw.values() if isinstance(items, list)
+            )
+        else:
+            in_process_count = len(in_process_raw) if isinstance(in_process_raw, list) else 0
+
         return BankMetrics(
-            to_process=len(to_reconcile),
-            in_process=len(in_process),
+            to_process=len(to_process),
+            in_process=in_process_count,
             pending=len(pending),
             processed=0,  # Not used for bank
         )
@@ -395,12 +457,20 @@ class AsyncMetricsCalculator:
         self.redis = redis_client
 
     async def _get_business_data(self, uid: str, company_id: str, domain: str) -> Optional[Dict]:
-        """Récupère les données business depuis Redis (async)."""
+        """
+        Récupère les données business depuis Redis (async).
+
+        Gère automatiquement le wrapper unified_cache_manager.
+        """
         key = build_business_key(uid, company_id, domain)
         data = await self.redis.get(key)
         if data:
             try:
-                return json.loads(data)
+                parsed = json.loads(data)
+                # Unwrap unified_cache_manager format si présent
+                if isinstance(parsed, dict) and "cache_version" in parsed and "data" in parsed:
+                    return parsed["data"]
+                return parsed
             except json.JSONDecodeError:
                 return None
         return None
@@ -423,6 +493,21 @@ class AsyncMetricsCalculator:
         if not data:
             return ModuleMetrics()
 
+        # Format pré-catégorisé (listes séparées par status)
+        to_process = data.get("to_process", [])
+        in_process = data.get("in_process", [])
+        pending = data.get("pending", [])
+        processed = data.get("processed", [])
+
+        if any([to_process, in_process, pending, processed]):
+            return ModuleMetrics(
+                to_process=len(to_process),
+                in_process=len(in_process),
+                pending=len(pending),
+                processed=len(processed),
+            )
+
+        # Fallback: format liste plate
         documents = data.get("documents", [])
         counts = self._count_by_status(documents)
 

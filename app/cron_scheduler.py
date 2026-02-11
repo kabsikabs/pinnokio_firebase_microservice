@@ -346,18 +346,19 @@ class CronScheduler:
                 if not chat_result.get("success"):
                     raise ValueError(f"Échec création chat: {chat_result}")
 
-            # 4. Lancer l'exécution (async task)
-            from .llm_service.llm_manager import get_llm_manager
-            llm_manager = get_llm_manager()
+            # 4. Enqueue l'exécution via LLMGateway (queue → worker)
+            # ⭐ MIGRATION 2026-02-04: Remplace l'appel direct à llm_manager
+            from .llm_service.llm_gateway import get_llm_gateway
 
-            asyncio.create_task(
-                llm_manager._execute_scheduled_task(
-                    user_id=user_id,
-                    company_id=company_id,
-                    task_data=task_data,
-                    thread_key=thread_key,
-                    execution_id=execution_id
-                )
+            gateway = get_llm_gateway()
+            await gateway.enqueue_scheduled_task(
+                user_id=user_id,
+                collection_name=company_id,
+                thread_key=thread_key,
+                task_data={
+                    **task_data,
+                    "execution_id": execution_id
+                }
             )
 
             logger.info(f"[CRON] ✅ Tâche lancée: {task_id} | Thread: {thread_key}")

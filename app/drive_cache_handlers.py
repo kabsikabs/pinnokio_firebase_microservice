@@ -32,7 +32,6 @@ from datetime import datetime
 from .cache.unified_cache_manager import get_drive_cache_manager
 from .llm_service.redis_namespaces import RedisTTL
 from .firebase_providers import get_firebase_management
-from .status_normalization import StatusNormalizer
 
 logger = logging.getLogger("drive.cache_handlers")
 
@@ -70,27 +69,41 @@ class DriveCacheHandlers:
         self,
         user_id: str,
         company_id: str,
-        input_drive_id: str
+        input_drive_id: str,
+        mandate_path: str = ""
     ) -> Dict[str, Any]:
         """
-        Récupère les documents Google Drive avec cache.
+        Récupère les documents Google Drive croisés avec task_manager (Source de Vérité).
 
         RPC: DRIVE_CACHE.get_documents
+
+        Source de Vérité:
+        1. Drive: Liste brute des fichiers (base "to_process")
+        2. task_manager (Firebase): État des traitements par department "Router"
+        - Junction: job_id (Drive file_id == task_manager job_id)
+
+        Classification:
+        - Drive file sans match task_manager → to_process
+        - task_manager status on_process/in_queue/running → in_process
+        - task_manager status pending → pending
+        - task_manager status completed/close/closed → processed
 
         Args:
             user_id (str): Firebase UID (injecté auto)
             company_id (str): Company ID
             input_drive_id (str): Drive folder ID
+            mandate_path (str): Chemin Firestore du mandat (pour requête task_manager)
 
         Returns:
             {
                 "data": {
                     "to_process": [...],
                     "in_process": [...],
+                    "pending": [...],
                     "processed": [...]
                 },
-                "source": "cache"|"drive",
-                "oauth_error": bool  # True si erreur OAuth
+                "source": "cache"|"drive+task_manager",
+                "oauth_error": bool
             }
         """
         try:
@@ -121,7 +134,7 @@ class DriveCacheHandlers:
                 f"fetching_from_drive"
             )
 
-            drive_data = await self._fetch_from_drive(user_id, input_drive_id)
+            drive_data = await self._fetch_from_drive(user_id, input_drive_id, mandate_path)
 
             # 3. Vérifier erreur OAuth
             if drive_data.get("oauth_error"):
@@ -153,7 +166,7 @@ class DriveCacheHandlers:
 
             return {
                 "data": drive_data.get("data"),
-                "source": "drive",
+                "source": "drive+task_manager",
                 "oauth_error": False
             }
 
@@ -169,10 +182,11 @@ class DriveCacheHandlers:
         self,
         user_id: str,
         company_id: str,
-        input_drive_id: str
+        input_drive_id: str,
+        mandate_path: str = ""
     ) -> Dict[str, Any]:
         """
-        Force le rafraîchissement des documents depuis Drive.
+        Force le rafraîchissement des documents depuis Drive + task_manager.
 
         Invalide le cache puis récupère les données fraîches.
 
@@ -182,9 +196,10 @@ class DriveCacheHandlers:
             user_id (str): Firebase UID (injecté auto)
             company_id (str): Company ID
             input_drive_id (str): Drive folder ID
+            mandate_path (str): Chemin Firestore du mandat
 
         Returns:
-            {"data": {...}, "source": "drive", "oauth_error": bool}
+            {"data": {...}, "source": "drive+task_manager", "oauth_error": bool}
         """
         try:
             # 1. Invalider le cache
@@ -200,8 +215,8 @@ class DriveCacheHandlers:
                 f"cache_invalidated"
             )
 
-            # 2. Récupérer depuis Drive
-            return await self.get_documents(user_id, company_id, input_drive_id)
+            # 2. Récupérer depuis Drive + task_manager
+            return await self.get_documents(user_id, company_id, input_drive_id, mandate_path)
 
         except Exception as e:
             logger.error(f"DRIVE_CACHE.refresh_documents error={e}")
@@ -214,10 +229,11 @@ class DriveCacheHandlers:
     async def _fetch_from_drive(
         self,
         user_id: str,
-        input_drive_id: str
+        input_drive_id: str,
+        mandate_path: str = ""
     ) -> Dict[str, Any]:
         """
-        Récupère les documents depuis Google Drive API.
+        Récupère les documents depuis Google Drive API et croise avec task_manager.
 
         IMPORTANT: Cette méthode utilise DriveClientService qui nécessite
         des credentials OAuth valides. En cas d'erreur OAuth, retourne
@@ -226,6 +242,7 @@ class DriveCacheHandlers:
         Args:
             user_id: Firebase UID
             input_drive_id: Drive folder ID
+            mandate_path: Chemin Firestore du mandat (pour requête task_manager)
 
         Returns:
             {
@@ -285,7 +302,7 @@ class DriveCacheHandlers:
 
             # Cas 3: Succès - organiser les documents par statut avec check Firebase
             if isinstance(data, list):
-                organized_docs = await self._organize_documents_by_status_with_firebase(user_id, data)
+                organized_docs = await self._organize_documents_by_status_with_firebase(user_id, data, mandate_path)
                 logger.info(
                     f"DRIVE_CACHE._fetch_from_drive user_id={user_id} "
                     f"success count={len(data)}"
@@ -327,43 +344,67 @@ class DriveCacheHandlers:
     async def _organize_documents_by_status_with_firebase(
         self,
         user_id: str,
-        drive_files: List[Dict]
+        drive_files: List[Dict],
+        mandate_path: str = ""
     ) -> Dict[str, List]:
         """
-        Organise les documents Drive par statut en vérifiant les notifications Firebase.
+        Croise les fichiers Drive avec task_manager (Source de Vérité) en 1 requête bulk.
 
-        Logique de tri (conforme à Router.py):
-        1. Pour chaque fichier Drive, vérifier check_job_status(user_id, file_id)
-        2. Si notification existe avec function_name='Router':
-           - status='running'|'in queue'|'stopping' → in_process (En cours)
-           - status='pending' → pending (En attente)
-           - status='error'|'completed'|'success' ou autre → to_process (À traiter)
-        3. Pas de notification → to_process (À traiter)
+        Logique de tri:
+        1. Charger TOUS les jobs Router depuis task_manager (1 seule requête)
+        2. Pour chaque fichier Drive, vérifier si job_id existe dans task_manager:
+           - status on_process/in_queue/running/stopping → in_process
+           - status pending → pending
+           - status completed/close/closed → processed
+           - Pas de match ou status error/to_process → to_process
+        3. Jobs task_manager sans match Drive → ajoutés à leur catégorie
 
         Args:
             user_id: Firebase user ID
             drive_files: Liste brute de fichiers depuis Drive API
+            mandate_path: Chemin Firestore du mandat
 
         Returns:
             {
                 "to_process": [...],
                 "in_process": [...],
-                "pending": [...]
+                "pending": [...],
+                "processed": [...]
             }
         """
         organized = {
             "to_process": [],
             "in_process": [],
-            "pending": []
+            "pending": [],
+            "processed": []
         }
 
-        firebase_mgmt = get_firebase_management()
+        # 1. Charger les jobs Router depuis task_manager (1 requête bulk)
+        task_manager_index = {}  # job_id → task_manager data
+        if mandate_path:
+            try:
+                firebase_mgmt = get_firebase_management()
+                tm_result = await asyncio.to_thread(
+                    firebase_mgmt.get_router_jobs_from_task_manager,
+                    user_id,
+                    mandate_path
+                )
+                task_manager_index = tm_result.get("by_job_id", {})
+                logger.info(
+                    f"DRIVE_CACHE._organize task_manager loaded: "
+                    f"{len(task_manager_index)} router jobs found"
+                )
+            except Exception as e:
+                logger.warning(f"DRIVE_CACHE._organize task_manager error: {e}")
+
+        # 2. Croiser chaque fichier Drive avec task_manager
+        matched_job_ids = set()
 
         for doc in drive_files:
             file_id = doc.get('id', '')
             file_name = doc.get('name', '')
 
-            # Créer l'objet document enrichi
+            # Formater le timestamp
             created_time = doc.get('createdTime', '')
             try:
                 if created_time:
@@ -377,65 +418,68 @@ class DriveCacheHandlers:
 
             doc_item = {
                 "id": file_id,
-                "job_id": file_id,  # job_id = file_id pour les documents Drive
+                "job_id": file_id,
                 "file_name": file_name,
                 "name": file_name,
                 "created_time": formatted_time,
                 "timestamp": formatted_time,
-                "status": "to_process",  # Statut par défaut
+                "status": "to_process",
                 "source": "drive",
                 "drive_file_id": file_id,
                 "uri_drive_link": doc.get('webViewLink', ''),
                 "web_view_link": doc.get('webViewLink', ''),
             }
 
-            # Vérifier le status dans Firebase notifications
-            try:
-                notification = await asyncio.to_thread(
-                    firebase_mgmt.check_job_status,
-                    user_id,
-                    None,  # job_id
-                    file_id  # file_id
-                )
+            # Vérifier si ce fichier a un job dans task_manager
+            tm_data = task_manager_index.get(file_id)
+            if tm_data:
+                matched_job_ids.add(file_id)
+                status = tm_data.get("status", "").lower()
+                # Garder le statut original pour le badge frontend
+                doc_item["status"] = status
 
-                # Si notification existe et correspond à la fonction Router
-                if notification and notification.get('function_name') == 'Router':
-                    firebase_status = notification.get('status', '')
-                    function_name = notification.get('function_name', '')
-
-                    # Utiliser le normalizer centralisé
-                    normalized_status = StatusNormalizer.normalize_for_function(
-                        function_name,
-                        firebase_status,
-                        default="to_process"
-                    )
-                    doc_item['status'] = normalized_status
-
-                    # Catégoriser selon le statut normalisé
-                    category = StatusNormalizer.get_category(normalized_status)
-                    if category == "in_process":
-                        organized["in_process"].append(doc_item)
-                    elif category == "pending":
-                        organized["pending"].append(doc_item)
-                    else:
-                        # to_process ou processed → dans to_process pour Router
-                        organized["to_process"].append(doc_item)
+                if status in ["completed", "close", "closed"]:
+                    organized["processed"].append(doc_item)
+                elif status == "pending":
+                    organized["pending"].append(doc_item)
+                elif status in ["on_process", "processing", "in_progress", "in_queue", "running", "stopping"]:
+                    organized["in_process"].append(doc_item)
                 else:
-                    # Pas de notification Router → À traiter
+                    # error, to_process, stopped ou autre → reste dans to_process
+                    if status not in ["error", "to_process", "stopped"]:
+                        doc_item["status"] = "to_process"
                     organized["to_process"].append(doc_item)
-
-            except Exception as e:
-                logger.warning(f"Error checking job status for {file_id}: {e}")
-                # En cas d'erreur, mettre dans À traiter
+            else:
+                # Pas de match task_manager → À traiter
                 organized["to_process"].append(doc_item)
 
-            logger.debug(f"Document {file_name} (ID: {file_id}): status={doc_item['status']}")
+        # 3. Jobs task_manager sans match Drive (fichiers déjà déplacés du Drive)
+        for job_id, tm_data in task_manager_index.items():
+            if job_id in matched_job_ids:
+                continue
+            status = tm_data.get("status", "").lower()
+            item = {
+                "id": job_id,
+                "job_id": job_id,
+                "file_name": tm_data.get("file_name", ""),
+                "name": tm_data.get("file_name", ""),
+                "timestamp": tm_data.get("date", ""),
+                "status": status,  # Garder le statut original
+                "source": "task_manager",
+            }
+            if status in ["completed", "close", "closed"]:
+                organized["processed"].append(item)
+            elif status == "pending":
+                organized["pending"].append(item)
+            elif status in ["on_process", "processing", "in_progress", "in_queue", "running", "stopping"]:
+                organized["in_process"].append(item)
 
         logger.info(
-            f"DRIVE_CACHE._organize_documents_with_firebase "
+            f"DRIVE_CACHE._organize_documents "
             f"to_process={len(organized['to_process'])} "
             f"in_process={len(organized['in_process'])} "
-            f"pending={len(organized['pending'])}"
+            f"pending={len(organized['pending'])} "
+            f"processed={len(organized['processed'])}"
         )
 
         return organized

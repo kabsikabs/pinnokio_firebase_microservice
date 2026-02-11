@@ -219,6 +219,342 @@ class LLMGateway:
             logger.error(f"[LLM_GATEWAY] Failed to enqueue scheduled task: {e}")
             raise
 
+    async def enqueue_enter_chat(
+        self,
+        user_id: str,
+        collection_name: str,
+        thread_key: str,
+        chat_mode: str = "general_chat",
+        initial_message: Optional[str] = None,
+        tab_session_id: str = "legacy"
+    ) -> dict[str, Any]:
+        """
+        Enqueue une initialisation de chat.
+
+        Quand l'utilisateur selectionne un thread, ce gateway enqueue
+        le job pour que le worker initialise le contexte LLM.
+
+        Args:
+            user_id: ID Firebase de l'utilisateur
+            collection_name: ID de la company
+            thread_key: Cle du thread de chat
+            chat_mode: Mode de chat ("general_chat", "onboarding_chat", etc.)
+            initial_message: Message initial optionnel
+            tab_session_id: ID de session onglet
+
+        Returns:
+            Dict avec status et job_id
+        """
+        job_id = str(uuid.uuid4())
+
+        job = {
+            "job_id": job_id,
+            "type": "enter_chat",
+            "params": {
+                "user_id": user_id,
+                "collection_name": collection_name,
+                "thread_key": thread_key,
+                "chat_mode": chat_mode,
+                "initial_message": initial_message,
+                "tab_session_id": tab_session_id,
+            },
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        try:
+            self.redis.lpush(self.QUEUE_NAME, json.dumps(job))
+
+            logger.info(
+                f"[LLM_GATEWAY] Job enqueued: {job_id[:8]}... "
+                f"type=enter_chat user={user_id} thread={thread_key}"
+            )
+
+            return {
+                "status": "queued",
+                "job_id": job_id,
+                "message": "Chat initialization enqueued",
+            }
+
+        except Exception as e:
+            logger.error(f"[LLM_GATEWAY] Failed to enqueue enter_chat: {e}")
+            raise
+
+    async def enqueue_card_response(
+        self,
+        user_id: str,
+        collection_name: str,
+        thread_key: str,
+        card_name: str,
+        card_message_id: str,
+        action: str,
+        user_message: str = "",
+        message_data: Optional[dict] = None,
+        tab_session_id: str = "legacy"
+    ) -> dict[str, Any]:
+        """
+        Enqueue une reponse a une carte interactive.
+
+        Quand l'utilisateur clique sur approve/reject d'une carte,
+        ce gateway enqueue le traitement au worker.
+
+        Args:
+            user_id: ID Firebase de l'utilisateur
+            collection_name: ID de la company
+            thread_key: Cle du thread de chat
+            card_name: Nom/ID de la carte
+            card_message_id: ID du message contenant la carte
+            action: Action de l'utilisateur ("approve", "reject", etc.)
+            user_message: Message optionnel de l'utilisateur
+            message_data: Donnees additionnelles
+            tab_session_id: ID de session onglet
+
+        Returns:
+            Dict avec status et job_id
+        """
+        job_id = str(uuid.uuid4())
+
+        job = {
+            "job_id": job_id,
+            "type": "send_card_response",
+            "params": {
+                "user_id": user_id,
+                "collection_name": collection_name,
+                "thread_key": thread_key,
+                "card_name": card_name,
+                "card_message_id": card_message_id,
+                "action": action,
+                "user_message": user_message,
+                "message_data": message_data or {},
+                "tab_session_id": tab_session_id,
+            },
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        try:
+            self.redis.lpush(self.QUEUE_NAME, json.dumps(job))
+
+            logger.info(
+                f"[LLM_GATEWAY] Job enqueued: {job_id[:8]}... "
+                f"type=send_card_response user={user_id} card={card_name} action={action}"
+            )
+
+            return {
+                "status": "queued",
+                "job_id": job_id,
+                "message": "Card response enqueued",
+            }
+
+        except Exception as e:
+            logger.error(f"[LLM_GATEWAY] Failed to enqueue card_response: {e}")
+            raise
+
+    async def enqueue_onboarding_chat(
+        self,
+        user_id: str,
+        collection_name: str,
+        thread_key: str,
+        chat_mode: str = "onboarding_chat"
+    ) -> dict[str, Any]:
+        """
+        Enqueue le demarrage d'un chat d'onboarding.
+
+        Declenche apres la creation d'une company quand l'utilisateur
+        arrive sur la page de chat avec action=create.
+
+        Args:
+            user_id: ID Firebase de l'utilisateur
+            collection_name: ID de la company
+            thread_key: Cle du thread (job_id de l'onboarding)
+            chat_mode: Mode de chat (par defaut "onboarding_chat")
+
+        Returns:
+            Dict avec status et job_id
+        """
+        job_id = str(uuid.uuid4())
+
+        job = {
+            "job_id": job_id,
+            "type": "start_onboarding_chat",
+            "params": {
+                "user_id": user_id,
+                "collection_name": collection_name,
+                "thread_key": thread_key,
+                "chat_mode": chat_mode,
+            },
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        try:
+            self.redis.lpush(self.QUEUE_NAME, json.dumps(job))
+
+            logger.info(
+                f"[LLM_GATEWAY] Job enqueued: {job_id[:8]}... "
+                f"type=start_onboarding_chat user={user_id} thread={thread_key}"
+            )
+
+            return {
+                "status": "queued",
+                "job_id": job_id,
+                "message": "Onboarding chat enqueued",
+            }
+
+        except Exception as e:
+            logger.error(f"[LLM_GATEWAY] Failed to enqueue onboarding_chat: {e}")
+            raise
+
+    async def enqueue_invalidate_context(
+        self,
+        user_id: str,
+        collection_name: str,
+    ) -> dict[str, Any]:
+        """
+        Enqueue une invalidation de contexte utilisateur.
+
+        Force le rechargement du contexte depuis Firebase.
+
+        Args:
+            user_id: ID Firebase de l'utilisateur
+            collection_name: ID de la company
+
+        Returns:
+            Dict avec status et job_id
+        """
+        job_id = str(uuid.uuid4())
+
+        job = {
+            "job_id": job_id,
+            "type": "invalidate_context",
+            "params": {
+                "user_id": user_id,
+                "collection_name": collection_name,
+            },
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        try:
+            self.redis.lpush(self.QUEUE_NAME, json.dumps(job))
+
+            logger.info(
+                f"[LLM_GATEWAY] Job enqueued: {job_id[:8]}... "
+                f"type=invalidate_context user={user_id} company={collection_name}"
+            )
+
+            return {
+                "status": "queued",
+                "job_id": job_id,
+                "message": "Context invalidation enqueued",
+            }
+
+        except Exception as e:
+            logger.error(f"[LLM_GATEWAY] Failed to enqueue invalidate_context: {e}")
+            raise
+
+    async def enqueue_stop_streaming(
+        self,
+        user_id: str,
+        collection_name: str,
+        thread_key: str,
+    ) -> dict[str, Any]:
+        """
+        Enqueue un arret de streaming LLM.
+
+        Interrompt la generation en cours pour un thread.
+
+        Args:
+            user_id: ID Firebase de l'utilisateur
+            collection_name: ID de la company
+            thread_key: Thread du streaming a interrompre
+
+        Returns:
+            Dict avec status et job_id
+        """
+        job_id = str(uuid.uuid4())
+
+        job = {
+            "job_id": job_id,
+            "type": "stop_streaming",
+            "params": {
+                "user_id": user_id,
+                "collection_name": collection_name,
+                "thread_key": thread_key,
+            },
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        try:
+            self.redis.lpush(self.QUEUE_NAME, json.dumps(job))
+
+            logger.info(
+                f"[LLM_GATEWAY] Job enqueued: {job_id[:8]}... "
+                f"type=stop_streaming user={user_id} thread={thread_key}"
+            )
+
+            return {
+                "status": "queued",
+                "job_id": job_id,
+                "message": "Stop streaming enqueued",
+            }
+
+        except Exception as e:
+            logger.error(f"[LLM_GATEWAY] Failed to enqueue stop_streaming: {e}")
+            raise
+
+    async def enqueue_job_chat_message(
+        self,
+        user_id: str,
+        collection_name: str,
+        thread_key: str,
+        job_id: str,
+        message: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Enqueue un message de job chat (onboarding) pour traitement.
+
+        Route vers _handle_onboarding_log_event dans le worker.
+
+        Args:
+            user_id: ID Firebase de l'utilisateur
+            collection_name: ID de la company
+            thread_key: Thread du chat
+            job_id: ID du job onboarding
+            message: Message a traiter
+
+        Returns:
+            Dict avec status et job_id
+        """
+        queue_job_id = str(uuid.uuid4())
+
+        job = {
+            "job_id": queue_job_id,
+            "type": "handle_job_chat_message",
+            "params": {
+                "user_id": user_id,
+                "collection_name": collection_name,
+                "thread_key": thread_key,
+                "job_id": job_id,
+                "message": message,
+            },
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        try:
+            self.redis.lpush(self.QUEUE_NAME, json.dumps(job))
+
+            logger.info(
+                f"[LLM_GATEWAY] Job enqueued: {queue_job_id[:8]}... "
+                f"type=handle_job_chat_message user={user_id} job={job_id}"
+            )
+
+            return {
+                "status": "queued",
+                "job_id": queue_job_id,
+                "message": "Job chat message enqueued",
+            }
+
+        except Exception as e:
+            logger.error(f"[LLM_GATEWAY] Failed to enqueue job_chat_message: {e}")
+            raise
+
     def get_queue_length(self) -> int:
         """Retourne le nombre de jobs dans la queue."""
         return self.redis.llen(self.QUEUE_NAME)

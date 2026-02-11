@@ -727,15 +727,16 @@ class ListenersManager:
                             msg_id
                         )
                         
-                        # Appeler send_card_response de manière asynchrone
+                        # Enqueue la réponse carte via LLMGateway (queue → worker)
+                        # ⭐ MIGRATION 2026-02-04: Remplace l'appel direct à llm_manager
                         try:
                             import asyncio
-                            from .llm_service import get_llm_manager
-                            
-                            async def handle_card_response():
+                            from .llm_service.llm_gateway import get_llm_gateway
+
+                            async def enqueue_card_response():
                                 try:
-                                    llm_manager = get_llm_manager()
-                                    result = await llm_manager.send_card_response(
+                                    gateway = get_llm_gateway()
+                                    result = await gateway.enqueue_card_response(
                                         user_id=uid,
                                         collection_name=space_code,
                                         thread_key=thread_key,
@@ -745,28 +746,25 @@ class ListenersManager:
                                         user_message=user_message
                                     )
                                     self.logger.info(
-                                        "✅ CARD_RESPONSE_HANDLED uid=%s msg_id=%s action=%s result=%s",
-                                        uid, msg_id, action, result.get('success', False)
+                                        "✅ CARD_RESPONSE_ENQUEUED uid=%s msg_id=%s action=%s job_id=%s",
+                                        uid, msg_id, action, result.get('job_id', 'unknown')[:8]
                                     )
                                 except Exception as e:
                                     self.logger.error(
-                                        "❌ CARD_RESPONSE_ERROR uid=%s msg_id=%s error=%s",
+                                        "❌ CARD_RESPONSE_ENQUEUE_ERROR uid=%s msg_id=%s error=%s",
                                         uid, msg_id, str(e), exc_info=True
                                     )
-                            
+
                             # Exécuter de manière asynchrone dans la boucle d'événements
                             try:
                                 loop = asyncio.get_event_loop()
                                 if loop.is_running():
-                                    # Si la boucle est déjà en cours d'exécution, créer une tâche
-                                    asyncio.create_task(handle_card_response())
+                                    asyncio.create_task(enqueue_card_response())
                                 else:
-                                    # Sinon, exécuter directement
-                                    loop.run_until_complete(handle_card_response())
+                                    loop.run_until_complete(enqueue_card_response())
                             except RuntimeError:
-                                # Si aucune boucle n'existe, en créer une nouvelle
-                                asyncio.run(handle_card_response())
-                            
+                                asyncio.run(enqueue_card_response())
+
                         except Exception as e:
                             self.logger.error(
                                 "❌ CARD_ACTION_ROUTING_ERROR uid=%s msg_id=%s error=%s",

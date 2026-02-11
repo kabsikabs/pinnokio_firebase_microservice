@@ -19,8 +19,7 @@ class RoutingDomainConfig(BaseDomainConfig):
 
     DOMAIN = "routing"
 
-    # List name mappings (must match cache keys from drive_cache_handlers)
-    # Note: The cache uses "to_process", not "unprocessed"
+    # List name mappings (universal across all domains)
     LIST_NAMES = {
         "to_process": "to_process",
         "in_process": "in_process",

@@ -21,12 +21,13 @@ Flow (3-Level Architecture):
 
 ARCHITECTURE (3-Level Cache):
     - Level 2: company:{uid}:{cid}:context → Full company_data (mandate_path, client_uuid, bank_erp, etc.)
-    - Level 3: business:{uid}:{cid}:bank → { to_reconcile, in_process, pending }
+    - Level 3: business:{uid}:{cid}:bank → { to_process, in_process, pending, processed }
 
 NOTE Banking Specificities:
-- Bank transactions come from ERP (Odoo) via firebase_cache_handlers
-- Only 3 statuses: to_reconcile, in_process, pending
-- Accounts are extracted from transactions (no separate accounts endpoint)
+- Bank transactions come from ERP (Odoo) + Task Manager (Firebase) via firebase_cache_handlers
+- 4 lists: to_process (ERP unreconciled), in_process (on_process flat list with batch_id), pending, processed (completed)
+- Accounts are extracted from ERP transactions (journal_id / journal_name)
+- Batches are computed on-the-fly by grouping in_process items by batch_id (not stored in cache)
 """
 
 import asyncio
@@ -74,6 +75,59 @@ def _get_company_context(uid: str, company_id: str) -> Dict[str, Any]:
 
     logger.warning(f"[BANKING] No company context found for uid={uid}, company={company_id}")
     return {}
+
+
+def _get_transactions_from_cache(
+    uid: str, company_id: str, transaction_ids: List[str]
+) -> List[Dict[str, Any]]:
+    """
+    Extract selected transactions from the banking business cache.
+
+    Searches the to_process list in business:{uid}:{cid}:bank for the
+    given transaction_ids and returns matching items.
+
+    Args:
+        uid: Firebase user ID
+        company_id: Company ID
+        transaction_ids: List of transaction IDs to extract
+
+    Returns:
+        List of transaction dicts found in cache
+    """
+    try:
+        redis_client = get_redis()
+        cache_key = f"business:{uid}:{company_id}:bank"
+        cached = redis_client.get(cache_key)
+
+        if not cached:
+            logger.warning(f"[BANKING] No business cache for transaction lookup: {cache_key}")
+            return []
+
+        data = json.loads(cached if isinstance(cached, str) else cached.decode())
+        documents = data.get("data", data)
+
+        # Search in to_process (primary source for process action)
+        ids_set = set(transaction_ids)
+        results = []
+
+        for list_name in ["to_process", "in_process", "pending"]:
+            for item in documents.get(list_name, []):
+                item_id = str(item.get("id", item.get("job_id", "")))
+                if item_id in ids_set:
+                    results.append(item)
+                    ids_set.discard(item_id)
+            if not ids_set:
+                break
+
+        logger.info(
+            f"[BANKING] Retrieved {len(results)}/{len(transaction_ids)} "
+            f"transactions from cache"
+        )
+        return results
+
+    except Exception as e:
+        logger.error(f"[BANKING] Error getting transactions from cache: {e}")
+        return []
 
 
 async def handle_banking_orchestrate_init(
@@ -129,20 +183,13 @@ async def handle_banking_orchestrate_init(
 
     try:
         # ════════════════════════════════════════════════════════════
-        # STEP 1: Bank Accounts
-        # Note: Accounts are extracted from transactions, no separate endpoint
-        # ════════════════════════════════════════════════════════════
-        accounts = []
-        total_balance = 0.0
-
-        # ════════════════════════════════════════════════════════════
-        # STEP 2: Fetch Bank Transactions (using cache handler)
-        # Uses the same logic and cache as dashboard orchestration
+        # STEP 1: Fetch Bank Transactions (using cache handler)
+        # Sources: ERP (Odoo) + Task Manager (Firebase)
         # ════════════════════════════════════════════════════════════
         to_process = []
         in_process = []
         pending = []
-        batches = []
+        processed = []
 
         try:
             logger.info(f"[BANKING] Fetching transactions via cache handler...")
@@ -157,7 +204,7 @@ async def handle_banking_orchestrate_init(
             # Use the same handler as dashboard orchestration
             from app.firebase_cache_handlers import get_firebase_cache_handlers
             cache_handlers = get_firebase_cache_handlers()
-            
+
             result = await cache_handlers.get_bank_transactions(
                 user_id=uid,
                 company_id=company_id,
@@ -168,15 +215,17 @@ async def handle_banking_orchestrate_init(
 
             if result.get("data"):
                 data = result["data"]
-                to_process = data.get("to_reconcile", [])
+                to_process = data.get("to_process", [])
                 in_process = data.get("in_process", [])
                 pending = data.get("pending", [])
-                
+                processed = data.get("processed", [])
+
                 logger.info(
                     f"[BANKING] Transactions loaded: "
-                    f"to_reconcile={len(to_process)}, "
+                    f"to_process={len(to_process)}, "
                     f"in_process={len(in_process)}, "
-                    f"pending={len(pending)} "
+                    f"pending={len(pending)}, "
+                    f"processed={len(processed)}, "
                     f"source={result.get('source', 'unknown')}"
                 )
             else:
@@ -186,11 +235,54 @@ async def handle_banking_orchestrate_init(
             logger.error(f"[BANKING] Failed to fetch transactions: {tx_error}")
 
         # ════════════════════════════════════════════════════════════
-        # STEP 3: Active Batches
-        # Note: Batches are tracked in notifications, extracted during
-        # _organize_bank_transactions_by_status in cache handler
+        # STEP 2: Extract Bank Accounts from ALL normalized transactions
+        # All lists now have account_id (str) and account_name (str)
+        # Balance accumulated only from to_process (unreconciled)
         # ════════════════════════════════════════════════════════════
-        batches = []  # Populated from in_process transactions if needed
+        accounts_map = {}  # account_id -> account info
+
+        # Collect accounts from all lists
+        for tx in to_process + in_process + pending + processed:
+            a_id = tx.get("account_id")
+            if a_id and a_id not in accounts_map:
+                accounts_map[a_id] = {
+                    "id": a_id,
+                    "name": tx.get("account_name") or f"Account {a_id}",
+                    "iban": tx.get("account_number", ""),
+                    "currency": tx.get("currency", "CHF"),
+                    "balance": 0.0,
+                }
+
+        # Accumulate balance only from to_process (unreconciled amount)
+        for tx in to_process:
+            a_id = tx.get("account_id")
+            if a_id and a_id in accounts_map:
+                accounts_map[a_id]["balance"] += float(tx.get("amount", 0) or 0)
+
+        accounts = list(accounts_map.values())
+        total_balance = sum(a["balance"] for a in accounts)
+
+        # ════════════════════════════════════════════════════════════
+        # STEP 3: Compute Batches on-the-fly from in_process flat list
+        # Group by batch_id field present on each item.
+        # Batches disappear naturally when all their items leave in_process.
+        # ════════════════════════════════════════════════════════════
+        batches_map = {}
+        for tx in in_process:
+            bid = tx.get("batch_id", "")
+            if bid:
+                batches_map.setdefault(bid, []).append(tx)
+
+        batches = []
+        for batch_id, items in batches_map.items():
+            first_item = items[0] if items else {}
+            batches.append({
+                "batch_id": batch_id,
+                "account_id": first_item.get("account_id", ""),
+                "transaction_count": len(items),
+                "status": "running",
+                "progress": None,
+            })
 
         # ════════════════════════════════════════════════════════════
         # STEP 4: Build combined banking data structure
@@ -205,12 +297,14 @@ async def handle_banking_orchestrate_init(
                 "to_process": to_process,
                 "in_process": in_process,
                 "pending": pending,
+                "processed": processed,
             },
             "batches": batches,
             "counts": {
                 "to_process": len(to_process),
                 "in_process": len(in_process),
                 "pending": len(pending),
+                "processed": len(processed),
             },
             "pagination": {
                 "page": 1,
@@ -219,7 +313,8 @@ async def handle_banking_orchestrate_init(
                 "totalItems": (
                     len(to_process) +
                     len(in_process) +
-                    len(pending)
+                    len(pending) +
+                    len(processed)
                 ),
             },
             "company": {
@@ -229,7 +324,7 @@ async def handle_banking_orchestrate_init(
             "meta": {
                 "loaded_at": datetime.utcnow().isoformat() + "Z",
                 "version": "1.0",
-                "source": "firebase"
+                "source": "erp+firebase"
             }
         }
 
@@ -264,7 +359,8 @@ async def handle_banking_orchestrate_init(
 
         logger.info(
             f"[BANKING] Orchestration completed for company={company_id}: "
-            f"accounts={len(accounts)}, transactions={banking_data['pagination']['totalItems']}"
+            f"accounts={len(accounts)}, batches={len(batches)}, "
+            f"transactions={banking_data['pagination']['totalItems']}"
         )
 
     except Exception as e:
@@ -343,7 +439,8 @@ async def handle_banking_process(
     """
     Handle banking.process WebSocket event.
 
-    Triggers processing of selected transactions.
+    Triggers processing of selected transactions via centralized job_actions_handler.
+    Same pattern as handle_routing_process() — delegates to handle_job_process().
 
     Supports optimistic updates:
     - Frontend sends _optimistic_update_id with the request
@@ -353,11 +450,12 @@ async def handle_banking_process(
     transaction_ids = payload.get("transaction_ids", [])
     company_id = payload.get("company_id")
     optimistic_update_id = payload.get("_optimistic_update_id")
-    general_instructions = payload.get("general_instructions")
 
+    logger.info(f"[BANKING] ──────────────────────────────────────────────────────")
+    logger.info(f"[BANKING] handle_banking_process - uid={uid} session={session_id}")
     logger.info(
-        f"[BANKING] Process requested for {len(transaction_ids)} transactions"
-        f"{f' (optimistic_update_id={optimistic_update_id})' if optimistic_update_id else ''}"
+        f"[BANKING] → transaction_ids count={len(transaction_ids)} company_id={company_id}"
+        f"{f' optimistic_update_id={optimistic_update_id}' if optimistic_update_id else ''}"
     )
 
     if not transaction_ids:
@@ -373,34 +471,99 @@ async def handle_banking_process(
         return
 
     try:
-        # Get context
+        # Get company context from Level 2 cache
         context = _get_company_context(uid, company_id)
         mandate_path = context.get("mandate_path", "")
 
-        # Process via handlers
-        from .handlers import get_banking_handlers
-        handlers = get_banking_handlers()
-        result = await handlers.process_transactions(
-            uid,
-            company_id,
-            mandate_path,
-            transaction_ids,
-            general_instructions=general_instructions,
-            _optimistic_update_id=optimistic_update_id
+        # Build transactions_data from cache for _build_banker_jobs_data
+        transactions_data = _get_transactions_from_cache(uid, company_id, transaction_ids)
+        bank_account = ""
+        bank_account_id = ""
+        if transactions_data:
+            first_tx = transactions_data[0]
+            bank_account = first_tx.get("account_name", "")
+            bank_account_id = first_tx.get("account_id", "")
+
+        # Use centralized job actions handler (same pattern as routing)
+        from app.wrappers.job_actions_handler import handle_job_process
+
+        result = await handle_job_process(
+            uid=uid,
+            job_type="bankbookeeper",
+            payload={
+                "document_ids": transaction_ids,
+                "transactions_data": transactions_data,
+                "bank_account": bank_account,
+                "bank_account_id": bank_account_id,
+                "general_instructions": payload.get("general_instructions", ""),
+            },
+            company_data={
+                "company_id": company_id,
+                "mandate_path": mandate_path,
+                "company_name": context.get("name", context.get("legal_name", company_id)),
+                "client_uuid": context.get("client_uuid", ""),
+                "dms_type": context.get("dms_type", "odoo"),
+                "communication_mode": context.get("chat_type", "rag"),
+                "log_communication_mode": context.get("communication_log_type", "rag"),
+                "workflow_params": context.get("workflow_params", {}),
+            },
         )
 
-        # Send result
-        await hub.broadcast(uid, {
-            "type": WS_EVENTS.BANKING.PROCESSED,
-            "payload": result
-        })
+        if result.get("success"):
+            job_id = result.get("job_id")
+            logger.info(f"[BANKING] → Process SUCCESS - job_id={job_id}")
 
-        # Confirm optimistic update if present
-        if optimistic_update_id and result.get("success"):
-            await _confirm_optimistic_update(uid, optimistic_update_id, "banking", company_id, mandate_path)
+            # Notify processing started
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.BANKING.PROCESSING_STARTED,
+                "payload": {
+                    "transaction_ids": transaction_ids,
+                    "count": len(transaction_ids),
+                    "status": "started",
+                    "job_id": job_id,
+                    "_optimistic_update_id": optimistic_update_id,
+                }
+            })
+
+            # Acknowledge the request was submitted
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.BANKING.PROCESSED,
+                "payload": {
+                    "success": True,
+                    "processed": transaction_ids,
+                    "failed": [],
+                    "job_id": job_id,
+                    "batch_id": result.get("batch_id"),
+                    "summary": {
+                        "totalProcessed": len(transaction_ids),
+                        "totalFailed": 0,
+                    },
+                    "_optimistic_update_id": optimistic_update_id,
+                }
+            })
+
+            # Confirm optimistic update if present
+            if optimistic_update_id:
+                logger.info(f"[BANKING] → Confirming optimistic update: {optimistic_update_id}")
+                await _confirm_optimistic_update(uid, optimistic_update_id, "banking", company_id, mandate_path)
+
+            logger.info(f"[BANKING] ──────────────────────────────────────────────────────")
+        else:
+            logger.warning(f"[BANKING] → Process FAILED - {result.get('error')}")
+
+            if optimistic_update_id:
+                await _reject_optimistic_update(uid, optimistic_update_id, "banking", result.get("error", "Process failed"))
+
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.BANKING.ERROR,
+                "payload": {
+                    "error": result.get("error", "Process failed"),
+                    "code": result.get("code", "PROCESS_ERROR"),
+                }
+            })
 
     except Exception as e:
-        logger.error(f"[BANKING] Process failed: {e}", exc_info=True)
+        logger.error(f"[BANKING] Process EXCEPTION: {e}", exc_info=True)
 
         if optimistic_update_id:
             await _reject_optimistic_update(uid, optimistic_update_id, "banking", str(e))

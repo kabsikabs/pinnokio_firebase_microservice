@@ -2866,9 +2866,44 @@ class BaseAIAgent:
                 self.chat_history[provider.value] = transformed_history
                 logger.debug(f"[LOAD_HISTORY] Historique synchronisé dans BaseAIAgent.chat_history['{provider.value}']")
                 return True
-                
-        # Ajouter d'autres providers ici avec leurs transformations spécifiques
-                
+
+        elif provider == ModelProvider.MOONSHOT_AI:
+            # Format Moonshot AI: Compatible avec OpenAI format [{"role": "user/assistant", "content": "message"}]
+            transformed_history = self._transform_for_openai(history_to_load)
+            if hasattr(instance, 'chat_history'):
+                instance.chat_history = transformed_history
+                self.chat_history[provider.value] = transformed_history
+                logger.info(f"[LOAD_HISTORY] ✅ Historique Moonshot AI synchronisé: {len(transformed_history)} messages")
+                return True
+
+        elif provider == ModelProvider.GEMINI:
+            # Format Gemini: Compatible avec OpenAI format
+            transformed_history = self._transform_for_openai(history_to_load)
+            if hasattr(instance, 'chat_history'):
+                instance.chat_history = transformed_history
+                self.chat_history[provider.value] = transformed_history
+                logger.info(f"[LOAD_HISTORY] ✅ Historique Gemini synchronisé: {len(transformed_history)} messages")
+                return True
+
+        elif provider == ModelProvider.GROQ:
+            # Format Groq: Compatible avec OpenAI format
+            transformed_history = self._transform_for_openai(history_to_load)
+            if hasattr(instance, 'chat_history'):
+                instance.chat_history = transformed_history
+                self.chat_history[provider.value] = transformed_history
+                logger.info(f"[LOAD_HISTORY] ✅ Historique Groq synchronisé: {len(transformed_history)} messages")
+                return True
+
+        else:
+            # Fallback générique pour les autres providers (format OpenAI-compatible)
+            logger.warning(f"[LOAD_HISTORY] ⚠️ Provider {provider.value} non géré explicitement, utilisation format OpenAI")
+            transformed_history = self._transform_for_openai(history_to_load)
+            if hasattr(instance, 'chat_history'):
+                instance.chat_history = transformed_history
+                self.chat_history[provider.value] = transformed_history
+                logger.info(f"[LOAD_HISTORY] ✅ Historique (fallback) synchronisé: {len(transformed_history)} messages")
+                return True
+
         return False
 
     def _transform_for_anthropic(self, history):

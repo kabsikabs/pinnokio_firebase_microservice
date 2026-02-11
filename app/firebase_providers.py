@@ -7,7 +7,7 @@ import threading
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Optional, Callable, Awaitable, Any
+from typing import Optional, Callable, Awaitable, Any,Dict
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from firebase_admin import credentials, firestore, initialize_app,auth
 import firebase_admin
@@ -390,6 +390,290 @@ class FirebaseManagement:
         except Exception as e:
             print(f"❌ Erreur lors de la mise à jour de l'activité: {str(e)}")
             return False
+
+    def get_banker_jobs_from_task_manager(self, user_id: str, mandate_path: str) -> Dict[str, Any]:
+        """
+        Récupère l'état des jobs bancaires depuis task_manager (Source de Vérité).
+        
+        Remplace l'ancienne logique basée sur les notifications et pending sheets.
+        
+        Args:
+            user_id (str): Firebase UID
+            mandate_path (str): Chemin du mandat pour filtrer les tâches
+            
+        Returns:
+            Dict structuré:
+            {
+                "processed": [...],     # Tâches terminées
+                "pending": [...],       # Tâches en attente (détail)
+                "in_process": {...}     # Tâches en cours groupées par batch_id
+            }
+        """
+        try:
+            
+            
+            # Initialiser la structure de retour
+            result = {
+                "processed": [],
+                "pending": [],
+                "in_process": {}  # Dict groupé par batch_id
+            }
+            
+            # Requête sur task_manager
+            # Filtre 1: mandate_path (filtrage post-query si startswith pas dispo, mais ici on suppose égalité)
+            # Filtre 2: department == 'banker' (ou 'Banker')
+            
+            task_ref = self.db.collection("clients").document(user_id).collection("task_manager")
+            
+            # On récupère tout le task_manager pour ce mandat (ou filtré plus finement si possible)
+            # Note: Firestore ne supporte pas nativement "startswith" ou "contains" simple combiné
+            # On va filtrer en mémoire pour être sûr, ou utiliser des filtres d'égalité si mandate_path est exact
+            
+            # Optimisation: Filtrer par department directement si possible, sinon tout charger
+            # Comme mandate_path est stocké dans le doc, on peut filtrer dessus si indexé
+            
+            # Stratégie: Récupérer les tâches 'banker' et filtrer mandate_path en python
+            query = task_ref.where(filter=FieldFilter("department", "in", ["banker", "Banker"]))
+            docs = query.stream()
+            
+            for doc in docs:
+                data = doc.to_dict()
+                doc_mandate_path = data.get("mandate_path", "")
+                
+                # Filtrage strict sur le mandat
+                if doc_mandate_path != mandate_path:
+                    continue
+                    
+                status = data.get("status", "").lower()
+                department_data = data.get("department_data", {})
+                banker_data = department_data.get("banker", {}) or department_data.get("Banker", {})
+                
+                # Cas 1: Completed -> Processed
+                if status in ["completed", "close", "closed"]:
+                    result["processed"].append(data)
+                    
+                # Cas 2: Pending -> Liste simple avec détails
+                elif status == "pending":
+                    # Extraire les infos clés pour le croisement
+                    item = {
+                        "task_id": doc.id,
+                        "status": status,  # Garder le statut original
+                        "batch_id": banker_data.get("batch_id"),
+                        "bank_account_id": banker_data.get("bank_account_id"), # journal_id
+                        "transaction_id": banker_data.get("transaction_id"),   # move_id
+                        "txn_amount": banker_data.get("txn_amount"),
+                        "txn_currency": banker_data.get("txn_currency"),
+                        # Garder le reste au cas où
+                        **banker_data
+                    }
+                    result["pending"].append(item)
+                    
+                # Cas 3: On Process -> Groupé par batch_id
+                elif status in ["on_process", "processing", "in_progress", "in_queue", "running", "stopping"]:
+                    batch_id = banker_data.get("batch_id") or "unknown_batch"
+
+                    item = {
+                        "task_id": doc.id,
+                        "status": status,  # Garder le statut original (on_process, processing, etc.)
+                        "bank_account_id": banker_data.get("bank_account_id"),
+                        "transaction_id": banker_data.get("transaction_id"),
+                        "txn_amount": banker_data.get("txn_amount"),
+                        "txn_currency": banker_data.get("txn_currency"),
+                        **banker_data
+                    }
+                    
+                    if batch_id not in result["in_process"]:
+                        result["in_process"][batch_id] = []
+                    
+                    result["in_process"][batch_id].append(item)
+            
+            return result
+            
+        except Exception as e:
+            print(f"❌ Erreur get_banker_jobs_from_task_manager: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"processed": [], "pending": [], "in_process": {}}
+
+    def get_apbookeeper_jobs_from_task_manager(self, user_id: str, mandate_path: str) -> Dict[str, Any]:
+        """
+        Récupère l'état des jobs APBookkeeper depuis task_manager (Source de Vérité).
+
+        Remplace l'ancienne logique basée sur fetch_journal_entries + check_job_status (notifications).
+
+        Args:
+            user_id (str): Firebase UID
+            mandate_path (str): Chemin du mandat pour filtrer les tâches
+
+        Returns:
+            Dict structuré:
+            {
+                "to_process": [...],    # Tâches à traiter (error, to_process)
+                "in_process": [...],    # Tâches en cours (on_process, in_queue)
+                "pending": [...],       # Tâches en attente
+                "processed": [...],     # Tâches terminées (completed, close, closed)
+                "step_mapping": {...}   # Mapping current_step → translated_term
+            }
+        """
+        try:
+            result = {
+                "to_process": [],
+                "in_process": [],
+                "pending": [],
+                "processed": [],
+                "step_mapping": {}
+            }
+
+            # 1. Charger le mapping ap_approval_list pour traduire current_step
+            try:
+                approval_ref = self.db.document(f"{mandate_path}/setup/ap_approval_list")
+                approval_doc = approval_ref.get()
+                if approval_doc.exists:
+                    mapping_data = approval_doc.to_dict() or {}
+                    # Structure: { "STEP_KEY": { "original_term": "...", "translated_term": "..." } }
+                    for step_key, step_info in mapping_data.items():
+                        if isinstance(step_info, dict) and "translated_term" in step_info:
+                            original = step_info.get("original_term", step_key)
+                            result["step_mapping"][original] = step_info["translated_term"]
+            except Exception as e:
+                print(f"[AP] Warning: Could not load ap_approval_list: {e}")
+
+            # 2. Requête task_manager filtrée par department APbookeeper/Apbookeeper
+            task_ref = self.db.collection("clients").document(user_id).collection("task_manager")
+            query = task_ref.where(filter=FieldFilter("department", "in", ["APbookeeper", "Apbookeeper", "apbookeeper"]))
+            docs = query.stream()
+
+            for doc in docs:
+                data = doc.to_dict()
+                doc_mandate_path = data.get("mandate_path", "")
+
+                # Filtrage strict sur le mandat
+                if doc_mandate_path != mandate_path:
+                    continue
+
+                status = (data.get("status") or "").lower()
+                department_data = data.get("department_data", {})
+                ap_data = department_data.get("APbookeeper", {}) or department_data.get("Apbookeeper", {}) or department_data.get("apbookeeper", {})
+
+                # Extraire le timestamp (format "9 janvier 2026 à 23:59:45 UTC+1") → date seule
+                raw_timestamp = data.get("timestamp", "")
+                date_str = ""
+                if raw_timestamp:
+                    # Prendre la partie avant " à " pour extraire la date
+                    parts = str(raw_timestamp).split(" à ")
+                    date_str = parts[0].strip() if parts else str(raw_timestamp)
+
+                # Construire l'item standardisé
+                item = {
+                    "task_id": doc.id,
+                    "job_id": ap_data.get("job_id", doc.id),
+                    "file_name": ap_data.get("file_name", data.get("file_name", "")),
+                    "file_id": ap_data.get("file_id", ""),
+                    "uri_file_link": data.get("uri_file_link", ""),
+                    "date": date_str,
+                    "current_step": data.get("current_step", ""),
+                    "status": status,
+                }
+
+                # Classement par statut (garder le statut original pour le badge frontend)
+                if status in ["completed", "close", "closed"]:
+                    result["processed"].append(item)
+                elif status == "pending":
+                    result["pending"].append(item)
+                elif status in ["on_process", "processing", "in_progress", "in_queue", "running", "stopping"]:
+                    result["in_process"].append(item)
+                else:
+                    # error, to_process, stopped ou inconnu → to_process
+                    if status not in ["error", "to_process", "stopped"]:
+                        item["status"] = "to_process"
+                    result["to_process"].append(item)
+
+            return result
+
+        except Exception as e:
+            print(f"❌ Erreur get_apbookeeper_jobs_from_task_manager: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"to_process": [], "in_process": [], "pending": [], "processed": [], "step_mapping": {}}
+
+    def get_router_jobs_from_task_manager(self, user_id: str, mandate_path: str) -> Dict[str, Any]:
+        """
+        Récupère l'état des jobs Router depuis task_manager (Source de Vérité).
+
+        Utilisé pour le croisement avec les fichiers Drive:
+        - Drive = liste brute des fichiers (base "to_process")
+        - task_manager = source de vérité des statuts
+        - Junction: job_id (Drive file_id == task_manager job_id)
+
+        Args:
+            user_id (str): Firebase UID
+            mandate_path (str): Chemin du mandat pour filtrer les tâches
+
+        Returns:
+            Dict structuré:
+            {
+                "in_process": [...],   # on_process, in_queue, running, stopping
+                "pending": [...],      # pending
+                "processed": [...],    # completed, close, closed
+                "by_job_id": {...}     # job_id → item (index pour croisement Drive)
+            }
+        """
+        try:
+            result = {
+                "in_process": [],
+                "pending": [],
+                "processed": [],
+                "by_job_id": {}
+            }
+
+            task_ref = self.db.collection("clients").document(user_id).collection("task_manager")
+            query = task_ref.where(filter=FieldFilter("department", "in", ["router", "Router"]))
+            docs = query.stream()
+
+            for doc in docs:
+                data = doc.to_dict()
+                doc_mandate_path = data.get("mandate_path", "")
+
+                if doc_mandate_path != mandate_path:
+                    continue
+
+                status = (data.get("status") or "").lower()
+                job_id = data.get("job_id", doc.id)
+                file_name = data.get("file_name", "")
+                raw_timestamp = data.get("timestamp", "")
+
+                date_str = ""
+                if raw_timestamp:
+                    parts = str(raw_timestamp).split(" à ")
+                    date_str = parts[0].strip() if parts else str(raw_timestamp)
+
+                item = {
+                    "task_id": doc.id,
+                    "job_id": job_id,
+                    "file_name": file_name,
+                    "date": date_str,
+                    "status": status,
+                }
+
+                # Index par job_id pour croisement avec Drive
+                result["by_job_id"][job_id] = item
+
+                # Classement par statut (garder le statut original pour le badge frontend)
+                if status in ["completed", "close", "closed"]:
+                    result["processed"].append(item)
+                elif status == "pending":
+                    result["pending"].append(item)
+                elif status in ["on_process", "processing", "in_progress", "in_queue", "running", "stopping"]:
+                    result["in_process"].append(item)
+                # else: error, to_process → pas ajouté (reste dans to_process du Drive)
+
+            return result
+
+        except Exception as e:
+            print(f"❌ Erreur get_router_jobs_from_task_manager: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"in_process": [], "pending": [], "processed": [], "by_job_id": {}}
 
     def get_telegram_user_by_username(self, telegram_username: str):
         """
@@ -3897,29 +4181,22 @@ class FirebaseManagement:
 
         found_files = []
 
-        # Itérer sur chaque 'pinnokio_func' pour rechercher les fichiers correspondants
+        if user_id:
+            base_path = f'clients/{user_id}/task_manager'
+        else:
+            base_path = 'task_manager'
+        task_manager_ref = self.db.collection(base_path)
+
+        # Itérer sur chaque 'pinnokio_func' (= department) pour rechercher les fichiers correspondants
         for pinnokio_func in pinnokio_funcs:
-            # Trouver le document correspondant dans 'klk_vision' pour chaque 'pinnokio_func'
-            matching_department_doc_id = self.find_matching_department(user_id,pinnokio_func)
-
-            if not matching_department_doc_id:
-                print(f"Aucun département correspondant à '{pinnokio_func}' trouvé dans 'klk_vision'.")
-                continue  # Passer à l'itération suivante si le département n'existe pas
-
-            # Référence à la sous-collection 'journal' du département correspondant
-            if user_id:
-                base_path = f'clients/{user_id}/klk_vision'
-            else:
-                base_path = 'klk_vision'
-            journal_ref = self.db.collection(base_path).document(matching_department_doc_id).collection('journal')
-
-            # Rechercher les fichiers dans la base de données pour chaque file_name
+            # Rechercher les fichiers dans task_manager pour chaque file_name
             for file_name in file_names:
-                query = journal_ref.where(filter=FieldFilter('file_name', '==', file_name)).where(filter=FieldFilter('mandat_id', '==', mandat_id)).get()
-                
-                if query:
-                    for doc in query:
-                        found_files.append(doc.to_dict())
+                query = task_manager_ref.where(filter=FieldFilter('department', '==', pinnokio_func)) \
+                                        .where(filter=FieldFilter('file_name', '==', file_name)) \
+                                        .where(filter=FieldFilter('mandat_id', '==', mandat_id)).stream()
+
+                for doc in query:
+                    found_files.append(doc.to_dict())
 
         # Générer la réponse
         if found_files:
@@ -4031,86 +4308,72 @@ class FirebaseManagement:
             "APbookeeper": "APbookeeper",
             "HRmanager": "HRmanager",
             "Admanager": "Admanager",
-            "EXbookeeper": "EXbookeeper"
+            "EXbookeeper": "EXbookeeper",
+            "Bankbookeeper": "Bankbookeeper",
+            "Router": "Router",
         }
-        
+
         department = departments.get(department_index)
-        
+
         if not department:
             raise ValueError("Invalid department index provided")
-        
-        # Recherche du document correspondant dans la collection /klk_vision/
+
+        # Lecture depuis chat_config/{department}
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            doc_ref = self.db.collection('clients').document(str(user_id)).collection('chat_config').document(department)
         else:
-            base_path = 'klk_vision'
-        doc_ref = self.db.collection(base_path).where(filter=FieldFilter('departement', '==', department)).limit(1).get()
+            doc_ref = self.db.collection('chat_config').document(department)
 
-        if not doc_ref:
-            raise ValueError(f"No document found for department {department}")
-        
-        # Le document est le premier (et normalement unique) résultat
-        doc = doc_ref[0]
-        doc_data = doc.to_dict()
+        doc = doc_ref.get()
 
-        # Vérification du champ 'chat_threadkey'
-        if 'chat_threadkey' in doc_data:
-            return doc_data['chat_threadkey']
-        else:
-            
-            # Génération du chat_threadkey avec UUID
-            chat_threadkey = f"klk_{uuid.uuid4().hex}_{department}"
-            
-            # Mise à jour du document avec le nouveau chat_threadkey
-            doc_ref[0].reference.update({'chat_threadkey': chat_threadkey})
-            
-            return chat_threadkey
+        if doc.exists:
+            doc_data = doc.to_dict()
+            if 'chat_threadkey' in doc_data:
+                return doc_data['chat_threadkey']
+
+        # Génération du chat_threadkey avec UUID
+        chat_threadkey = f"klk_{uuid.uuid4().hex}_{department}"
+
+        # Création/mise à jour du document chat_config
+        doc_ref.set({'chat_threadkey': chat_threadkey, 'department': department}, merge=True)
+
+        return chat_threadkey
 
     def get_close_job_id(self,user_id,departement, space_id):
         """
         Recherche les job_id fermés correspondant aux critères spécifiés.
 
         Args:
-            space_id (str): L'ID de l'espace à rechercher dans le champ 'departement'.
-             departement_index=['Admanager','EXbookeeper','Router','Bankbookeeper','APbookeeper','HRmanager']
+            departement (int): Index dans departement_index.
+            space_id (str): Le mandat_id à filtrer.
         Returns:
             list: Une liste des job_id correspondant aux critères.
         """
         departement_index=['Admanager','EXbookeeper','Router','Bankbookeeper','APbookeeper','HRmanager']
-        
-        filtered_documents = [] 
-        
-        # Itération sur tous les documents de la collection 'klk_vision'
+
+        filtered_documents = []
+        chosen_departement = departement_index[departement]
+
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            base_path = f'clients/{user_id}/task_manager'
         else:
-            base_path = 'klk_vision'
-        klk_vision_docs = self.db.collection(base_path).stream()
-        
-        for doc in klk_vision_docs:
-            data = doc.to_dict()
-            
-            # Vérification si le document a le champ 'departement' égal à space_id
-            chosen_departement=departement_index[departement]
-            #print(chosen_departement)
-            if data.get('departement') == chosen_departement:
-                if chosen_departement=='APbookeeper':
-                    # Si c'est le cas, on cherche dans la collection 'journal' de ce document
-                    journal_docs = doc.reference.collection('journal').stream()
-                    #print(journal_docs)
-                    for journal_doc in journal_docs:
-                        journal_data = journal_doc.to_dict()
-                        #print(f"impression de journal data:{journal_data}\n\n")
-                        # Vérification des critères
-                        if (journal_data.get('status') == 'close' and
-                            journal_data.get('source') == 'documents/invoices/doc_booked' and
-                            journal_data.get('mandat_id')==space_id):
-                            # Ajout de l'ID du document à ses données
-                            journal_data['fb_doc_id'] = journal_doc.id
-                            
-                            # Ajout du document complet à la liste
-                            filtered_documents.append(journal_data)
-        
+            base_path = 'task_manager'
+        task_manager_ref = self.db.collection(base_path)
+
+        # Requête directe sur task_manager avec filtres department + status + mandat_id
+        query = task_manager_ref.where(filter=FieldFilter('department', '==', chosen_departement)) \
+                                .where(filter=FieldFilter('status', '==', 'close')) \
+                                .where(filter=FieldFilter('mandat_id', '==', space_id))
+
+        # Filtre source pour APbookeeper (comme dans l'ancienne version)
+        if chosen_departement == 'APbookeeper':
+            query = query.where(filter=FieldFilter('source', '==', 'documents/invoices/doc_booked'))
+
+        for doc in query.stream():
+            doc_data = doc.to_dict()
+            doc_data['fb_doc_id'] = doc.id
+            filtered_documents.append(doc_data)
+
         return filtered_documents
     
     def watch_transaction_status_changes(self,user_id, batch_id, initial_transaction_statuses, callback_function):
@@ -4275,45 +4538,33 @@ class FirebaseManagement:
         Recherche les job_id ouverts correspondant aux critères spécifiés.
 
         Args:
-            space_id (str): L'ID de l'espace à rechercher dans le champ 'departement'.
-
+            departement (int): Index dans departement_index.
+            space_id (str): Le mandat_id à filtrer.
         Returns:
             list: Une liste des job_id correspondant aux critères.
         """
         departement_index=['Admanager','EXbookeeper','Router','Bankbookeeper','APbookeeper','HRmanager']
-        
-        filtered_documents = [] 
+
+        filtered_documents = []
+        chosen_departement = departement_index[departement]
+
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            base_path = f'clients/{user_id}/task_manager'
         else:
-            base_path = 'klk_vision'
-        
-        # Itération sur tous les documents de la collection 'klk_vision'
-        klk_vision_docs = self.db.collection(base_path).stream()
-        
-        for doc in klk_vision_docs:
-            data = doc.to_dict()
-            
-            # Vérification si le document a le champ 'departement' égal à space_id
-            chosen_departement=departement_index[departement]
-            #print(chosen_departement)
-            if data.get('departement') == chosen_departement:
-                # Si c'est le cas, on cherche dans la collection 'journal' de ce document
-                journal_docs = doc.reference.collection('journal').stream()
-                #print(journal_docs)
-                for journal_doc in journal_docs:
-                    journal_data = journal_doc.to_dict()
-                    #print(f"impression de journal data:{journal_data}\n\n")
-                    # Vérification des critères
-                    if (journal_data.get('status') == 'to_process' and
-                        journal_data.get('source') == 'documents/accounting/invoices/doc_to_do' and
-                        journal_data.get('mandat_id')==space_id):
-                        # Ajout de l'ID du document à ses données
-                        journal_data['fb_doc_id'] = journal_doc.id
-                        
-                        # Ajout du document complet à la liste
-                        filtered_documents.append(journal_data)
-        
+            base_path = 'task_manager'
+        task_manager_ref = self.db.collection(base_path)
+
+        # Requête directe sur task_manager avec filtres department + status + source + mandat_id
+        query = task_manager_ref.where(filter=FieldFilter('department', '==', chosen_departement)) \
+                                .where(filter=FieldFilter('status', '==', 'to_process')) \
+                                .where(filter=FieldFilter('source', '==', 'documents/accounting/invoices/doc_to_do')) \
+                                .where(filter=FieldFilter('mandat_id', '==', space_id))
+
+        for doc in query.stream():
+            doc_data = doc.to_dict()
+            doc_data['fb_doc_id'] = doc.id
+            filtered_documents.append(doc_data)
+
         return filtered_documents
     
     def add_document_without_timestamp(self, collection_path, doc_id, data, merge=None):
@@ -4681,51 +4932,44 @@ class FirebaseManagement:
 
     
     def add_timestamp_and_upload_to_firebase(self, log_entry):
-        # Générer un objet datetime pour le timestamp actuel
-
-
+        """Deprecated: alias vers add_timestamp_and_upload_to_task_manager."""
         log_entry['timestamp'] = datetime.now(timezone.utc).isoformat()
-   
-        # Appeler la fonction d'upload
-        self.upload_to_firebase(log_entry)
+        self.upload_to_task_manager(log_entry)
 
-    def upload_to_firebase(self,user_id, log_entry):
-        #print(f"État de firebase_admin._apps avant l'accès à Firestore: {firebase_admin._apps}")
-        pinnokio_func = log_entry['pinnokio_func']
-        #print(f"impression de pinnokio_func:{pinnokio_func}")
+    def add_timestamp_and_upload_to_task_manager(self, log_entry):
+        log_entry['timestamp'] = datetime.now(timezone.utc).isoformat()
+        self.upload_to_task_manager(log_entry)
 
-        # Trouver le document correspondant dans 'klk_vision'
-        matching_department_doc_id = self.find_matching_department(user_id,pinnokio_func)
+    def upload_to_firebase(self, user_id, log_entry):
+        """Deprecated: alias vers upload_to_task_manager."""
+        self.upload_to_task_manager(log_entry, user_id=user_id)
 
-        if matching_department_doc_id:
-            # Accéder à la sous-collection 'journal' du document trouvé
-            if user_id:
-                base_path = f'clients/{user_id}/klk_vision'
-            else:
-                base_path = 'klk_vision'
-            journal_ref = self.db.collection(base_path).document(matching_department_doc_id).collection('journal')
-            # Ajouter le log_entry comme nouveau document dans 'journal'
-            journal_ref.add(log_entry)
-            print(f"Log ajouté dans 'journal' pour le département '{pinnokio_func}' dans 'klk_vision'.")
-        else:
-            print(f"Aucun département correspondant à '{pinnokio_func}' trouvé dans 'klk_vision'.")
+    def upload_to_task_manager(self, log_entry, user_id=None):
+        pinnokio_func = log_entry.get('pinnokio_func')
+        job_id = log_entry.get('job_id')
 
-    
-    
-    def find_matching_department(self,user_id, pinnokio_func):
+        if not job_id:
+            print(f"[WARN] upload_to_task_manager: pas de job_id dans log_entry, skip.")
+            return None
+
+        # S'assurer que department est renseigné
+        data = log_entry.copy()
+        if pinnokio_func and 'department' not in data:
+            data['department'] = pinnokio_func
+
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            base_path = f'clients/{user_id}/task_manager'
         else:
-            base_path = 'klk_vision'
-        klk_vision_ref = self.db.collection(base_path)
-        departements = klk_vision_ref.stream()
+            base_path = 'task_manager'
 
-        for departement in departements:
-            doc_data = departement.to_dict()
-            if doc_data.get('departement') == pinnokio_func:
-                return departement.id  # Retourner l'ID du document correspondant
+        doc_ref = self.db.collection(base_path).document(job_id)
+        doc_ref.set(data, merge=True)
+        print(f"Log ajouté dans task_manager pour job_id '{job_id}' (department: '{pinnokio_func}').")
+        return doc_ref.path
 
-        return None  # Retourner None si aucune correspondance n'est trouvée
+    def find_matching_department(self, user_id, pinnokio_func):
+        """Deprecated: retourne directement pinnokio_func (plus besoin de chercher le doc_id klk_vision)."""
+        return pinnokio_func
     
     def fetch_documents_from_firestore(self,collection_path, mandat_id_value, max_docs=None):
        
@@ -5597,51 +5841,32 @@ class FirebaseManagement:
 
     def fetch_journal_entries_by_mandat_id_and_job_ids(self,user_id, mandat_id, source, departement, job_ids):
         """
-        Récupère les entrées du journal pour un mandat_id, une source et un département donnés,
-        puis filtre les résultats pour ne garder que ceux correspondant aux job_id demandés,
-        en produisant une liste principale avec des sous-listes.
+        Récupère les entrées task_manager pour un mandat_id, source et département donnés,
+        filtrées par job_ids.
+        Migration: remplace la requête sur klk_vision/{dept}/journal.
         """
-        # Initialiser la requête de base pour obtenir le document associé au département
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            base_path = f'clients/{user_id}/task_manager'
         else:
-            base_path = 'klk_vision'
-        router_query = self.db.collection(base_path).where(filter=FieldFilter('departement', '==', departement)).limit(1).get()
-        entries_with_paths = []  # Liste principale pour stocker les sous-listes des entrées
+            base_path = 'task_manager'
+        task_manager_ref = self.db.collection(base_path)
 
-        for doc in router_query:
-            router_doc = doc.to_dict()
-            router_doc_id = doc.id  # ID du document trouvé pour 'departement'
+        query = task_manager_ref.where(filter=FieldFilter('department', '==', departement)) \
+                                .where(filter=FieldFilter('mandat_id', '==', mandat_id)) \
+                                .where(filter=FieldFilter('source', '==', source)).stream()
 
-            # Accéder à la sous-collection 'journal' du document trouvé
-            journal_query = self.db.collection(base_path).document(router_doc_id).collection('journal')
-
-
-            # Appliquer les filtres sur la sous-collection 'journal'
-            journal_query = journal_query.where(filter=FieldFilter('mandat_id', '==', mandat_id)).where(filter=FieldFilter('source', '==', source))
-
-            # Exécuter la requête et itérer sur les résultats
-            journal_entries = journal_query.stream()
-
-            for entry in journal_entries:
-                entry_data = entry.to_dict()  # Convertir l'entrée en dictionnaire
-
-                # Vérifier si le statut de l'entrée est valide
-                if entry_data.get('status') not in ['rejection']:
-                    # Vérifier si le job_id de l'entrée est dans la liste des job_ids demandés
-                    if entry_data.get('job_id') in job_ids:
-                        document_path = f"{base_path}/{router_doc_id}/journal/{entry.id}"  # Construire le chemin d'accès
-                        firebase_doc_id = entry.id  # Extrait l'ID du document Firestore
-
-                        # Construire un dictionnaire pour l'entrée correspondante
-                        entry_with_path = {
-                            'data': entry_data,
-                            'path': document_path,
-                            'firebase_doc_id': firebase_doc_id
-                        }
-
-                        # Ajouter l'entrée sous forme de sous-liste dans la liste principale
-                        entries_with_paths.append(entry_with_path)
+        entries_with_paths = []
+        for entry in query:
+            entry_data = entry.to_dict()
+            if entry_data.get('status') not in ['rejection']:
+                if entry_data.get('job_id') in job_ids:
+                    document_path = f"{base_path}/{entry.id}"
+                    entry_with_path = {
+                        'data': entry_data,
+                        'path': document_path,
+                        'firebase_doc_id': entry.id
+                    }
+                    entries_with_paths.append(entry_with_path)
 
         return entries_with_paths
 
@@ -5672,52 +5897,33 @@ class FirebaseManagement:
 
     def fetch_journal_entries(self,user_id, mandat_id, departement, job_ids=None, status=None):
         """
-        Récupère les entrées de la collection 'journal' correspondant au mandat_id, au département donné,
-        et filtre les résultats selon job_ids et status (optionnels).
+        Récupère les entrées task_manager pour un mandat_id et département donnés,
+        avec filtres optionnels sur job_ids et status.
+        Migration: remplace la requête sur klk_vision/{dept}/journal.
         """
-        entries_with_paths = []  # Liste principale pour stocker les résultats
-
-        # Itérer au travers des documents dans la collection 'klk_vision'
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            base_path = f'clients/{user_id}/task_manager'
         else:
-            base_path = 'klk_vision'
-        router_query = self.db.collection(base_path).stream()
+            base_path = 'task_manager'
+        task_manager_ref = self.db.collection(base_path)
 
-        for doc in router_query:
-            router_doc = doc.to_dict()
+        query = task_manager_ref.where(filter=FieldFilter('department', '==', departement)) \
+                                .where(filter=FieldFilter('mandat_id', '==', mandat_id))
+        if status is not None:
+            query = query.where(filter=FieldFilter('status', '==', status))
 
-            # Vérifier si le champ 'departement' correspond à l'argument
-            if router_doc.get('departement') == departement:
-                router_doc_id = doc.id  # ID du document trouvé pour le département
-
-                # Accéder à la collection 'journal' sous le document correspondant
-                if user_id:
-                    base_path = f'clients/{user_id}/klk_vision'
-                else:
-                    base_path = 'klk_vision'
-                journal_query = self.db.collection(base_path).document(router_doc_id).collection('journal').stream()
-
-                for entry in journal_query:
-                    entry_data = entry.to_dict()  # Convertir l'entrée en dictionnaire
-
-                    # Filtrer selon mandat_id
-                    if entry_data.get('mandat_id') == mandat_id:
-                        job_id = entry_data.get('job_id')
-                        # Appliquer les filtres supplémentaires : job_ids et status
-                        if (job_ids is None or (isinstance(job_id, str) and job_id in job_ids)) and (status is None or entry_data.get('status') == status):
-                            document_path = f"klk_vision/{router_doc_id}/journal/{entry.id}"  # Construire le chemin d'accès
-                            firebase_doc_id = entry.id  # ID du document Firestore
-
-                            # Construire un dictionnaire pour l'entrée correspondante
-                            entry_with_path = {
-                                'data': entry_data,
-                                'path': document_path,
-                                'firebase_doc_id': firebase_doc_id
-                            }
-
-                            # Ajouter l'entrée dans la liste principale
-                            entries_with_paths.append(entry_with_path)
+        entries_with_paths = []
+        for entry in query.stream():
+            entry_data = entry.to_dict()
+            job_id = entry_data.get('job_id')
+            if job_ids is None or (isinstance(job_id, str) and job_id in job_ids):
+                document_path = f"{base_path}/{entry.id}"
+                entry_with_path = {
+                    'data': entry_data,
+                    'path': document_path,
+                    'firebase_doc_id': entry.id
+                }
+                entries_with_paths.append(entry_with_path)
 
         return entries_with_paths
 
@@ -5725,157 +5931,95 @@ class FirebaseManagement:
 
     def fetch_journal_entries_by_mandat_id_without_source(self,user_id, mandat_id, departement):
         """
-        Traitement de tout les id du département concerné a l'exclusion des id avec un 
-        statut 'rejection'
+        Récupère les entrées task_manager par mandat_id et département,
+        en excluant les statuts 'rejection' et 'pending'.
+        Migration: remplace la requête sur klk_vision/{dept}/journal.
         """
-        # Initialiser la requête de base pour obtenir le document associé au département
         try:
             if user_id:
-                base_path = f'clients/{user_id}/klk_vision'
+                base_path = f'clients/{user_id}/task_manager'
             else:
-                base_path = 'klk_vision'
-            router_query = self.db.collection(base_path).where(filter=FieldFilter('departement', '==', departement)).limit(1).get()
-            entries_with_paths = []  # Liste pour stocker les données des entrées et leurs chemins
+                base_path = 'task_manager'
+            task_manager_ref = self.db.collection(base_path)
 
-            for doc in router_query:
-                router_doc = doc.to_dict()
-                #print(f"Document trouvé: {router_doc}")
-                router_doc_id = doc.id  # ID du document trouvé pour 'departement'
+            query = task_manager_ref.where(filter=FieldFilter('department', '==', departement)) \
+                                    .where(filter=FieldFilter('mandat_id', '==', mandat_id)).stream()
 
-                # Accéder à la sous-collection 'journal' du document trouvé
-                if user_id:
-                    base_path = f'clients/{user_id}/klk_vision'
-                else:
-                    base_path = 'klk_vision'
-                journal_query = self.db.collection(base_path).document(router_doc_id).collection('journal')
-
-                # Appliquer les filtres sur la sous-collection 'journal'
-                journal_query = journal_query.where(filter=FieldFilter('mandat_id', '==', mandat_id))
-
-                # Exécuter la requête et itérer sur les résultats
-                journal_entries = journal_query.stream()
-
-                for entry in journal_entries:
-                    entry_data = entry.to_dict()  # Convertir l'entrée en dictionnaire
-
-                    # Vérifier si le status de l'entrée est 'rejection'
-                    if entry_data.get('status')  not in ['rejection', 'pending']:
-                        if user_id:
-                            document_path=f'clients/{user_id}/klk_vision//{router_doc_id}/journal/{entry.id}'
-                        else:
-                            document_path = f"klk_vision/{router_doc_id}/journal/{entry.id}"  # Construire le chemin d'accès
-                        
-                        firebase_doc_id = entry.id  # Extrait l'ID du document Firestore
-
-                        # Construire un dictionnaire pour chaque entrée, sans ceux ayant un status 'rejection'
-                        entry_with_path = {
-                            'data': entry_data,
-                            'path': document_path,
-                            'firebase_doc_id': firebase_doc_id
-                        }
-
-                        entries_with_paths.append(entry_with_path)
+            entries_with_paths = []
+            for entry in query:
+                entry_data = entry.to_dict()
+                if entry_data.get('status') not in ['rejection', 'pending']:
+                    document_path = f"{base_path}/{entry.id}"
+                    entry_with_path = {
+                        'data': entry_data,
+                        'path': document_path,
+                        'firebase_doc_id': entry.id
+                    }
+                    entries_with_paths.append(entry_with_path)
 
             print(f"Total documents récupérés: {len(entries_with_paths)}")
             return entries_with_paths
 
         except Exception as e:
-            print(f"erreur lors de la récupraation des items traité par le router depuis firebase:{e}")
+            print(f"erreur lors de la récupération des items traités depuis task_manager: {e}")
 
     def fetch_journal_entries_by_mandat_id(self,user_id, mandat_id, source, departement):
         """
-        Traitement de tout les id du département concerné a l'exclusion des id avec un 
-        statut 'rejection'
+        Récupère les entrées task_manager par mandat_id, source et département,
+        en excluant le statut 'rejection'.
+        Migration: remplace la requête sur klk_vision/{dept}/journal.
         """
-        # Initialiser la requête de base pour obtenir le document associé au département
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            base_path = f'clients/{user_id}/task_manager'
         else:
-            base_path = 'klk_vision'
-        router_query = self.db.collection(base_path).where(filter=FieldFilter('departement', '==', departement)).limit(1).get()
-        entries_with_paths = []  # Liste pour stocker les données des entrées et leurs chemins
+            base_path = 'task_manager'
+        task_manager_ref = self.db.collection(base_path)
 
-        for doc in router_query:
-            router_doc = doc.to_dict()
-            #print(f"Document trouvé: {router_doc}")
-            router_doc_id = doc.id  # ID du document trouvé pour 'departement'
+        query = task_manager_ref.where(filter=FieldFilter('department', '==', departement)) \
+                                .where(filter=FieldFilter('mandat_id', '==', mandat_id)) \
+                                .where(filter=FieldFilter('source', '==', source)).stream()
 
-            # Accéder à la sous-collection 'journal' du document trouvé
-            journal_query = self.db.collection(base_path).document(router_doc_id).collection('journal')
-
-            # Appliquer les filtres sur la sous-collection 'journal'
-            journal_query = journal_query.where(filter=FieldFilter('mandat_id', '==', mandat_id)).where(filter=FieldFilter('source', '==', source))
-
-            # Exécuter la requête et itérer sur les résultats
-            journal_entries = journal_query.stream()
-
-            for entry in journal_entries:
-                entry_data = entry.to_dict()  # Convertir l'entrée en dictionnaire
-
-                # Vérifier si le status de l'entrée est 'rejection'
-                if entry_data.get('status')  not in ['rejection']:
-                    document_path = f"klk_vision/{router_doc_id}/journal/{entry.id}"  # Construire le chemin d'accès
-                    firebase_doc_id = entry.id  # Extrait l'ID du document Firestore
-
-                    # Construire un dictionnaire pour chaque entrée, sans ceux ayant un status 'rejection'
-                    entry_with_path = {
-                        'data': entry_data,
-                        'path': document_path,
-                        'firebase_doc_id': firebase_doc_id
-                    }
-
-                    entries_with_paths.append(entry_with_path)
+        entries_with_paths = []
+        for entry in query:
+            entry_data = entry.to_dict()
+            if entry_data.get('status') not in ['rejection']:
+                document_path = f"{base_path}/{entry.id}"
+                entry_with_path = {
+                    'data': entry_data,
+                    'path': document_path,
+                    'firebase_doc_id': entry.id
+                }
+                entries_with_paths.append(entry_with_path)
 
         return entries_with_paths
 
     def fetch_pending_journal_entries_by_mandat_id(self,user_id, mandat_id, source, departement):
         """
-        Récupère uniquement les documents avec le statut 'pending' pour un département donné.
-        Cette méthode est spécifiquement créée pour l'onglet Pending.
+        Récupère uniquement les documents task_manager avec le statut 'pending'.
+        Migration: remplace la requête sur klk_vision/{dept}/journal.
         """
-        # Initialiser la requête de base pour obtenir le document associé au département
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            base_path = f'clients/{user_id}/task_manager'
         else:
-            base_path = 'klk_vision'
-        
-        router_query = self.db.collection(base_path).where(filter=FieldFilter('departement', '==', departement)).limit(1).get()
-        entries_with_paths = []  # Liste pour stocker les données des entrées et leurs chemins
+            base_path = 'task_manager'
+        task_manager_ref = self.db.collection(base_path)
 
-        for doc in router_query:
-            router_doc = doc.to_dict()
-            print(f"Document trouvé pour pending: {router_doc}")
-            router_doc_id = doc.id  # ID du document trouvé pour 'departement'
+        query = task_manager_ref.where(filter=FieldFilter('department', '==', departement)) \
+                                .where(filter=FieldFilter('mandat_id', '==', mandat_id)) \
+                                .where(filter=FieldFilter('source', '==', source)) \
+                                .where(filter=FieldFilter('status', '==', 'pending')).stream()
 
-            # Accéder à la sous-collection 'journal' du document trouvé
-            journal_query = self.db.collection(base_path).document(router_doc_id).collection('journal')
-
-            # Appliquer les filtres sur la sous-collection 'journal'
-            # Filtrer par mandat_id, source ET status 'pending'
-            journal_query = journal_query.where(filter=FieldFilter('mandat_id', '==', mandat_id))\
-                                    .where(filter=FieldFilter('source', '==', source))\
-                                    .where(filter=FieldFilter('status', '==', 'pending'))
-
-            # Exécuter la requête et itérer sur les résultats
-            journal_entries = journal_query.stream()
-
-            for entry in journal_entries:
-                entry_data = entry.to_dict()  # Convertir l'entrée en dictionnaire
-                
-                # Double vérification que le status est bien 'pending'
-                if entry_data.get('status') == 'pending':
-                    document_path = f"klk_vision/{router_doc_id}/journal/{entry.id}"  # Construire le chemin d'accès
-                    firebase_doc_id = entry.id  # Extrait l'ID du document Firestore
-
-                    # Construire un dictionnaire pour chaque entrée pending
-                    entry_with_path = {
-                        'data': entry_data,
-                        'path': document_path,
-                        'firebase_doc_id': firebase_doc_id
-                    }
-
-                    entries_with_paths.append(entry_with_path)
-                    print(f"Document pending trouvé: {entry_data.get('file_name', 'Unknown')} - Status: {entry_data.get('status')}")
+        entries_with_paths = []
+        for entry in query:
+            entry_data = entry.to_dict()
+            document_path = f"{base_path}/{entry.id}"
+            entry_with_path = {
+                'data': entry_data,
+                'path': document_path,
+                'firebase_doc_id': entry.id
+            }
+            entries_with_paths.append(entry_with_path)
+            print(f"Document pending trouvé: {entry_data.get('file_name', 'Unknown')} - Status: pending")
 
         print(f"Total documents pending récupérés: {len(entries_with_paths)}")
         return entries_with_paths
@@ -5930,10 +6074,11 @@ class FirebaseManagement:
 
     def delete_items_by_job_id(self, user_id, job_ids, mandate_path=None):
         """
-        Supprime les items par job_id dans task_manager, klk_vision et expenses_details.
-        
+        Supprime les items par job_id dans task_manager et expenses_details.
+
         ⚠️ IMPORTANT: côté task_manager, on fait un PURGE qui PRÉSERVE le champ `billing` si présent.
-        
+        Migration: klk_vision cleanup supprimé (migration vers task_manager terminée).
+
         Args:
             user_id: ID de l'utilisateur Firebase
             job_ids: Liste de job_ids à supprimer
@@ -5941,63 +6086,37 @@ class FirebaseManagement:
         """
         if not isinstance(job_ids, list):
             job_ids = [job_ids]
-        
+
         for job_id in job_ids:
-            exbookeeper_detected = False  # Flag pour détecter si EXbookeeper est concerné
-            klk_job_id = None  # Pour stocker le job_id original (format klk_xxx) si trouvé
-            
-            # Étape 1: PURGE task_manager (préserver billing)
+            exbookeeper_detected = False
+            klk_job_id = None
+
+            # Étape 1: Lire task_manager AVANT purge pour détecter EXbookeeper
+            try:
+                if user_id:
+                    tm_base = f'clients/{user_id}/task_manager'
+                else:
+                    tm_base = 'task_manager'
+                tm_doc_ref = self.db.collection(tm_base).document(job_id)
+                tm_doc = tm_doc_ref.get()
+                if tm_doc.exists:
+                    tm_data = tm_doc.to_dict()
+                    department = tm_data.get('department', '')
+                    if department == 'EXbookeeper':
+                        exbookeeper_detected = True
+                        original_job_id = tm_data.get('job_id', '')
+                        if original_job_id and original_job_id.startswith("klk"):
+                            klk_job_id = original_job_id
+            except Exception as e:
+                print(f"⚠️ Erreur lecture task_manager pour {job_id} (non bloquant): {e}")
+
+            # Étape 2: PURGE task_manager (préserver billing)
             print(f"[PURGE] task_manager pour le job_id: {job_id} (préserver billing si présent)")
             try:
                 self.delete_task_manager_document(user_id=user_id, document_id=job_id)
             except Exception as e:
                 print(f"⚠️ Erreur purge task_manager pour {job_id} (non bloquant): {e}")
-            
-            # Étape 2: Parcours et suppression dans klk_vision/journal
-            if user_id:
-                base_path = f'clients/{user_id}/klk_vision'
-            else:
-                base_path = 'klk_vision'
-            klk_vision_ref = self.db.collection(base_path)
-            docs = klk_vision_ref.stream()
-            
-            for doc in docs:
-                doc_data = doc.to_dict()
-                department = doc_data.get('departement', '') if doc_data else ''
-                
-                journal_ref = doc.reference.collection('journal')
-                
-                # Chercher par job_id OU drive_file_id
-                # 1. D'abord chercher par job_id
-                journal_docs_by_job_id = list(journal_ref.where(filter=FieldFilter('job_id', '==', job_id)).stream())
-                
-                # 2. Ensuite chercher par drive_file_id
-                journal_docs_by_drive_id = list(journal_ref.where(filter=FieldFilter('drive_file_id', '==', job_id)).stream())
-                
-                # Combiner les résultats (éviter les doublons par ID de document)
-                seen_doc_ids = set()
-                all_journal_docs = []
-                for jdoc in journal_docs_by_job_id + journal_docs_by_drive_id:
-                    if jdoc.id not in seen_doc_ids:
-                        seen_doc_ids.add(jdoc.id)
-                        all_journal_docs.append(jdoc)
-                
-                for jdoc in all_journal_docs:
-                    # Récupérer le job_id original du document avant suppression
-                    jdoc_data = jdoc.to_dict()
-                    original_job_id = jdoc_data.get('job_id', '') if jdoc_data else ''
-                    
-                    print(f"Suppression du document avec job_id/drive_file_id: {job_id} dans klk_vision/{doc.id}/journal")
-                    jdoc.reference.delete()
-                    
-                    # Détecter si EXbookeeper est concerné et sauvegarder le job_id original
-                    if department == 'EXbookeeper':
-                        exbookeeper_detected = True
-                        # Sauvegarder le job_id original s'il commence par "klk"
-                        if original_job_id and original_job_id.startswith("klk"):
-                            klk_job_id = original_job_id
-                            print(f"🔍 [EXPENSES] Job_id original récupéré: {klk_job_id}")
-            
+
             # Étape 3: Suppression dans expenses_details si EXbookeeper détecté et mandate_path fourni
             if mandate_path and exbookeeper_detected:
                 try:
@@ -8531,31 +8650,26 @@ class FirebaseManagement:
         return input_drive_doc_id, output_drive_doc_id, mandat_space_id, mandat_space_name, client_name, legal_name, uuid_id, gl_sheet_id, root_folder_id, doc_folder_id, odoo_erp_type, odoo_url, odoo_username, odoo_secret_manager, odoo_db,mandate_drive_space_parent_id,odoo_company_name,mandat_base_currency,gl_accounting_erp,ar_erp,ap_erp,bank_erp
 
     def fetch_job_journals_by_mandat_id(self,user_id, mandat_id):
-        # Collection principale
+        """
+        Récupère tous les documents task_manager pour un mandat_id donné.
+        Migration: remplace l'ancien scan de klk_vision/{dept}/journal.
+        """
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            base_path = f'clients/{user_id}/task_manager'
         else:
-            base_path = 'klk_vision'
-        main_collection = self.db.collection(base_path)
-        
-        # Résultats à retourner
+            base_path = 'task_manager'
+        task_manager_ref = self.db.collection(base_path)
+
+        query = task_manager_ref.where(filter=FieldFilter('mandat_id', '==', mandat_id)).stream()
+
         filtered_journals = []
-        document_paths = []  # Liste pour stocker les chemins complets des documents
+        document_paths = []
+        for doc in query:
+            doc_data = doc.to_dict()
+            document_path = f"{base_path}/{doc.id}"
+            filtered_journals.append(doc_data)
+            document_paths.append(document_path)
 
-        # Itérer dans les collections sous 'departement'
-        departments = main_collection.list_documents()  # Cela liste les références de documents dans 'klk_vision'
-        for department_ref in departments:
-            # Accéder à la sous-collection 'journal' de chaque 'departement'
-            journals = department_ref.collection('journal').where(filter=FieldFilter('mandat_id', '==', mandat_id)).stream()
-
-            # Itérer sur les documents filtrés et les ajouter à la liste des résultats
-            for journal in journals:
-                journal_data = journal.to_dict()
-                # Construire le chemin complet du document
-                document_path = f"{department_ref.path}/journal/{journal.id}"
-                filtered_journals.append(journal_data)
-                document_paths.append(document_path)  # Ajouter le chemin complet du document à la liste
-        
         return filtered_journals, document_paths
 
     def delete_documents_by_full_paths(self, document_paths):

@@ -189,7 +189,7 @@ class DashboardHandlers:
             approvals = self._safe_result(results[4], [])
             tasks = self._safe_result(results[5], [])
             logger.info(f"[FULL_DATA] Tasks after _safe_result: count={len(tasks)}, raw_result_type={type(results[5])}, is_exception={isinstance(results[5], Exception)}")
-            expenses = self._safe_result(results[6], {"open": [], "closed": [], "metrics": {"totalOpen": 0, "totalClosed": 0, "totalAmount": 0}})
+            expenses = self._safe_result(results[6], {"items": []})
             activity = self._safe_result(results[7], []) if include_activity else []
             alerts = self._safe_result(results[8], [])
             balance_info = self._safe_result(results[9], {
@@ -563,7 +563,7 @@ class DashboardHandlers:
                 )
                 if ap_data and "data" in ap_data:
                     data = ap_data["data"]
-                    metrics["ap"]["toProcess"] = len(data.get("to_do", []))
+                    metrics["ap"]["toProcess"] = len(data.get("to_process", []))
                     metrics["ap"]["inProcess"] = len(data.get("in_process", []))
                     metrics["ap"]["pending"] = len(data.get("pending", []))
                     metrics["ap"]["processed"] = len(data.get("processed", []))
@@ -581,7 +581,7 @@ class DashboardHandlers:
                 )
                 if bank_data and "data" in bank_data:
                     data = bank_data["data"]
-                    metrics["bank"]["toProcess"] = len(data.get("to_reconcile", []))
+                    metrics["bank"]["toProcess"] = len(data.get("to_process", []))
                     metrics["bank"]["inProcess"] = len(data.get("in_process", []))
                     metrics["bank"]["pending"] = len(data.get("pending", []))
                     logger.info(f"_get_metrics: Bank from cache - toProcess={metrics['bank']['toProcess']}")
@@ -924,18 +924,25 @@ class DashboardHandlers:
             from .firebase_providers import get_firebase_management
 
             # 1. Tentative de récupération depuis le cache Redis
+            # billing_history (PAS expenses) = Historique des dépenses (task_manager)
             cache = get_firebase_cache_manager()
             cached = await cache.get_cached_data(
                 user_id,
                 company_id,
-                "expenses",
+                "billing_history",
                 "details",
-                ttl_seconds=300  # 5 minutes TTL
+                ttl_seconds=1800  # 30 minutes TTL
             )
 
-            if cached and cached.get("data"):
-                logger.info(f"_get_expenses company_id={company_id} source=cache")
-                return cached["data"]
+            if cached:
+                # Handle both WRAPPED format (from unified_cache_manager.set_cached_data)
+                # and UNWRAPPED format (from main.py/redis_subscriber direct writes)
+                if cached.get("data") and isinstance(cached["data"], dict):
+                    logger.info(f"_get_expenses company_id={company_id} source=cache (wrapped)")
+                    return cached["data"]
+                elif cached.get("items") is not None:
+                    logger.info(f"_get_expenses company_id={company_id} source=cache (unwrapped, items={len(cached.get('items', []))})")
+                    return cached
 
             # 2. Resolve mandate_path if not provided
             db = get_firestore()
@@ -960,10 +967,7 @@ class DashboardHandlers:
 
             if not mandate_path:
                 logger.warning(f"_get_expenses: No mandate_path found for company_id={company_id}")
-                return {
-                    "open": [],
-                    "closed": [],
-                    "metrics": {"totalOpen": 0, "totalClosed": 0, "totalAmount": 0, "totalTokens": 0}
+                return {"items": []
                 }
 
             # 3. Utiliser list_task_manager_by_mandate_path (comme Reflex JobHistory)
@@ -976,9 +980,23 @@ class DashboardHandlers:
                 2000  # limit
             )
 
+            # 3b. Charger le step_mapping depuis ap_approval_list pour traduire current_step
+            step_mapping = {}
+            try:
+                approval_ref = db.document(f"{mandate_path}/setup/ap_approval_list")
+                approval_doc = approval_ref.get()
+                if approval_doc.exists:
+                    mapping_data = approval_doc.to_dict() or {}
+                    for step_key, step_info in mapping_data.items():
+                        if isinstance(step_info, dict) and "translated_term" in step_info:
+                            original = step_info.get("original_term", step_key)
+                            step_mapping[original] = step_info["translated_term"]
+                    logger.debug(f"_get_expenses: step_mapping loaded with {len(step_mapping)} keys")
+            except Exception as sm_err:
+                logger.warning(f"_get_expenses: Could not load step_mapping: {sm_err}")
+
             # 4. Transformer chaque doc task_manager en ExpenseItem
-            open_expenses = []
-            closed_expenses = []
+            all_expenses = []
             total_amount = 0.0
             total_tokens = 0
 
@@ -1021,6 +1039,9 @@ class DashboardHandlers:
                 last_outcome = task_data.get("last_outcome", "")
                 mandat_name = task_data.get("mandat_name", "")
 
+                # Translate current_step via step_mapping (human-readable label)
+                current_step_label = step_mapping.get(current_step, "") if current_step else ""
+
                 # Billing data
                 tokens = int(billing.get("total_tokens", 0) or 0)
                 cost = float(billing.get("total_sales_price", 0.0) or 0.0)
@@ -1036,6 +1057,23 @@ class DashboardHandlers:
                 router_data = department_data.get("Router", {}) or department_data.get("router", {}) or {}
                 banker_data = department_data.get("Banker", {}) or department_data.get("banker", {}) or {}
 
+                # Override currency with department-specific currency (invoice currency)
+                if ap_data.get("currency"):
+                    currency = ap_data["currency"]
+
+                # Transform accounting_lines from snake_case to camelCase
+                raw_lines = ap_data.get("accounting_lines", [])
+                accounting_lines = []
+                for line in (raw_lines or []):
+                    if isinstance(line, dict):
+                        accounting_lines.append({
+                            "accountNumber": str(line.get("account_number", "") or ""),
+                            "priceUnit": float(line.get("price_unit", 0) or 0),
+                            "quantity": float(line.get("quantity", 0) or 0),
+                            "taxPercent": float(line.get("tax_percent", 0) or 0),
+                            "amountVat": float(line.get("amount_vat", 0) or 0),
+                        })
+
                 # Build expense item (matching Reflex ExpenseItem structure)
                 expense_item = {
                     "id": job_id,
@@ -1050,6 +1088,7 @@ class DashboardHandlers:
                     "status": status,
                     "uriFileLink": uri_file_link,
                     "currentStep": current_step,
+                    "currentStepLabel": current_step_label,
                     "lastMessage": last_message,
                     "lastOutcome": last_outcome,
                     "mandatName": mandat_name,
@@ -1058,11 +1097,12 @@ class DashboardHandlers:
                     "invoiceRef": ap_data.get("invoice_ref", ""),
                     "invoiceDate": ap_data.get("invoice_date", ""),
                     "dueDate": ap_data.get("due_date", ""),
+                    "accountingDate": ap_data.get("accounting_date", ""),
                     "invoiceDescription": ap_data.get("invoice_description", ""),
                     "amountVatExcluded": float(ap_data.get("amount_vat_excluded", 0) or 0),
                     "amountVatIncluded": float(ap_data.get("amount_vat_included", 0) or 0),
                     "amountVat": float(ap_data.get("amount_vat", 0) or 0),
-                    "accountingLines": ap_data.get("accounting_lines", []),
+                    "accountingLines": accounting_lines,
                     # Router specific
                     "routeDestination": router_data.get("destination", ""),
                     "routeConfidence": float(router_data.get("confidence", 0) or 0),
@@ -1071,38 +1111,28 @@ class DashboardHandlers:
                     "transactionType": banker_data.get("transaction_type", ""),
                 }
 
-                # Grouper par statut
-                if status.lower() in ("completed", "close", "closed"):
-                    closed_expenses.append(expense_item)
-                else:
-                    open_expenses.append(expense_item)
+                all_expenses.append(expense_item)
 
             expenses_result = {
-                "open": open_expenses,
-                "closed": closed_expenses,
-                "metrics": {
-                    "totalOpen": len(open_expenses),
-                    "totalClosed": len(closed_expenses),
-                    "totalAmount": round(total_amount, 2),
-                    "totalTokens": total_tokens
-                }
+                "items": all_expenses
             }
 
             logger.info(
                 f"_get_expenses company_id={company_id} "
-                f"open={len(open_expenses)} closed={len(closed_expenses)} "
+                f"items={len(all_expenses)} "
                 f"source=firebase"
             )
 
-            # 5. Sauvegarder dans le cache
+            # 5. Sauvegarder dans le cache (billing_history, PAS expenses)
+            # expenses = Notes de Frais (autre cache), billing_history = Historique des dépenses (task_manager)
             try:
                 await cache.set_cached_data(
                     user_id,
                     company_id,
-                    "expenses",
+                    "billing_history",
                     "details",
                     expenses_result,
-                    ttl_seconds=300  # 5 minutes TTL
+                    ttl_seconds=1800  # 30 minutes TTL (même durée que page_state)
                 )
             except Exception as cache_err:
                 logger.warning(f"_get_expenses: Cache write error: {cache_err}")
@@ -1111,11 +1141,7 @@ class DashboardHandlers:
 
         except Exception as e:
             logger.error(f"_get_expenses error: {e}", exc_info=True)
-            return {
-                "open": [],
-                "closed": [],
-                "metrics": {"totalOpen": 0, "totalClosed": 0, "totalAmount": 0, "totalTokens": 0}
-            }
+            return {"items": []}
 
     async def _get_activity(self, user_id: str, company_id: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Récupère l'activité récente."""

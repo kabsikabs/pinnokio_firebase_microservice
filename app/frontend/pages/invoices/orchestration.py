@@ -5,7 +5,7 @@ APBookkeeper/Invoices Page Orchestration
 Handles post-authentication data loading for the APBookkeeper (Invoices) page.
 
 IMPORTANT: This module reuses the SAME data source as the dashboard widgets:
-- Firebase AP documents from firebase_cache_handlers.get_ap_documents() → to_do, in_process, pending, processed
+- Firebase AP documents from firebase_cache_handlers.get_ap_documents() → to_process, in_process, pending, processed
 
 Pattern:
     page.restore_state -> cache hit: instant data
@@ -24,7 +24,7 @@ Flow (3-Level Architecture):
 
 ARCHITECTURE (3-Level Cache):
     - Level 2: company:{uid}:{cid}:context → Full company_data (mandate_path, client_uuid, etc.)
-    - Level 3: business:{uid}:{cid}:invoices → { to_do, in_process, pending, processed }
+    - Level 3: business:{uid}:{cid}:invoices → { to_process, in_process, pending, processed }
 """
 
 import asyncio
@@ -141,16 +141,17 @@ async def handle_invoices_orchestrate_init(
 
     try:
         # ════════════════════════════════════════════════════════════
-        # STEP 1: Fetch AP documents with Firebase status check
+        # STEP 1: Fetch AP documents from task_manager (Source de Vérité)
         # Uses firebase_cache_handlers.get_ap_documents() which:
         # - Checks Redis cache first
-        # - On miss: fetches from Firebase journal + checks notifications
-        # - Returns: to_do, in_process, pending, processed (correctly sorted)
+        # - On miss: fetches from task_manager filtered by department APbookeeper
+        # - Returns: to_process, in_process, pending, processed, step_mapping
         # ════════════════════════════════════════════════════════════
-        to_do_documents = []
+        to_process_documents = []
         in_process_documents = []
         pending_documents = []
         processed_documents = []
+        step_mapping = {}
 
         logger.info(f"[INVOICES] Fetching documents via firebase_cache_handlers...")
         cache_handlers = get_firebase_cache_handlers()
@@ -164,18 +165,19 @@ async def handle_invoices_orchestrate_init(
 
             if ap_result.get("data"):
                 data = ap_result["data"]
-                # firebase_cache_handlers does the correct sorting via check_job_status
-                to_do_documents = data.get("to_do", [])
+                to_process_documents = data.get("to_process", [])
                 in_process_documents = data.get("in_process", [])
                 pending_documents = data.get("pending", [])
                 processed_documents = data.get("processed", [])
+                step_mapping = data.get("step_mapping", {})
 
                 logger.info(
                     f"[INVOICES] Documents loaded: "
-                    f"to_do={len(to_do_documents)}, "
+                    f"to_process={len(to_process_documents)}, "
                     f"in_process={len(in_process_documents)}, "
                     f"pending={len(pending_documents)}, "
-                    f"processed={len(processed_documents)} "
+                    f"processed={len(processed_documents)}, "
+                    f"step_mapping_keys={len(step_mapping)} "
                     f"source={ap_result.get('source', 'unknown')}"
                 )
         except Exception as ap_error:
@@ -186,13 +188,14 @@ async def handle_invoices_orchestrate_init(
         # ════════════════════════════════════════════════════════════
         invoices_data = {
             "documents": {
-                "to_do": to_do_documents,
+                "to_process": to_process_documents,
                 "in_process": in_process_documents,
                 "pending": pending_documents,
                 "processed": processed_documents,
             },
+            "step_mapping": step_mapping,
             "counts": {
-                "to_do": len(to_do_documents),
+                "to_process": len(to_process_documents),
                 "in_process": len(in_process_documents),
                 "pending": len(pending_documents),
                 "processed": len(processed_documents),
@@ -202,7 +205,7 @@ async def handle_invoices_orchestrate_init(
                 "pageSize": 20,
                 "totalPages": 1,
                 "totalItems": (
-                    len(to_do_documents) +
+                    len(to_process_documents) +
                     len(in_process_documents) +
                     len(pending_documents) +
                     len(processed_documents)
@@ -216,7 +219,7 @@ async def handle_invoices_orchestrate_init(
             "meta": {
                 "loaded_at": datetime.utcnow().isoformat() + "Z",
                 "version": "1.0",
-                "source": "firebase"
+                "source": "task_manager"
             }
         }
 

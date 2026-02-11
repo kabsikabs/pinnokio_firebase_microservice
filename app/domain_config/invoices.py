@@ -20,9 +20,9 @@ class InvoicesDomainConfig(BaseDomainConfig):
 
     DOMAIN = "invoices"
 
-    # List name mappings (UI tab names)
+    # List name mappings (universal)
     LIST_NAMES = {
-        "to_process": "to_do",          # Different naming for invoices
+        "to_process": "to_process",
         "in_process": "in_process",
         "pending": "pending",
         "processed": "processed",

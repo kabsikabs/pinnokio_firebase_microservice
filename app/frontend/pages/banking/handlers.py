@@ -14,14 +14,13 @@ IMPORTANT: This handler uses the CENTRAL BUSINESS CACHE (firebase_cache_handlers
            to ensure consistency with Dashboard metrics.
 
 Cache Strategy:
-    - Transactions (to_process, in_process, pending): from firebase_cache_handlers.get_bank_transactions()
+    - Transactions (to_process, in_process, pending, processed): from firebase_cache_handlers.get_bank_transactions()
       → business:{uid}:{cid}:bank
-    - Matched transactions: from journal (separate source, not in central cache)
     - After any action (process/stop/delete): invalidate central cache
 
 Endpoints:
     - BANKING.list                 -> List transactions by category
-    - BANKING.process              -> Process selected transactions
+    - BANKING.process              -> (handled by orchestration.py → job_actions_handler)
     - BANKING.stop                 -> Stop processing
     - BANKING.delete               -> Delete transactions
     - BANKING.instructions_save    -> Save transaction instructions
@@ -29,7 +28,7 @@ Endpoints:
     - BANKING.accounts_list        -> List bank accounts
 
 Status Flow:
-    to_process -> in_queue -> on_process -> matched
+    to_process -> in_queue -> on_process -> processed
                                          -> error -> to_process (restart)
                                          -> pending -> in_queue (re-process)
 """
@@ -78,10 +77,11 @@ class BankingHandlers:
 
     Chaque methode correspond a un endpoint RPC:
     - BANKING.list -> list_transactions()
-    - BANKING.process -> process_transactions()
     - BANKING.stop -> stop_processing()
     - BANKING.delete -> delete_transactions()
     - BANKING.accounts_list -> list_accounts()
+
+    NOTE: BANKING.process is handled by orchestration.py → job_actions_handler
     """
 
     NAMESPACE = "BANKING"
@@ -236,7 +236,7 @@ class BankingHandlers:
             client_uuid: Client UUID for ERP connection
             bank_erp: Bank ERP type (e.g., "odoo")
             account_id: Optional filter by bank account
-            category: "to_process", "in_process", "pending", "matched", or "all"
+            category: "to_process", "in_process", "pending", "processed", or "all"
             page: Current page number (1-indexed)
             page_size: Items per page
             search: Search filter
@@ -251,13 +251,13 @@ class BankingHandlers:
                     "to_process": [...],
                     "in_process": [...],
                     "pending": [...],
-                    "matched": [...],
+                    "processed": [...],
                     "batches": [...],
                     "counts": {
                         "to_process": 10,
                         "in_process": 5,
                         "pending": 3,
-                        "matched": 25
+                        "processed": 25
                     },
                     "pagination": {...}
                 },
@@ -287,10 +287,8 @@ class BankingHandlers:
             from_cache = bank_result.get("source") == "cache"
             bank_data = bank_result.get("data", {})
 
-            # Map central cache categories to UI categories
-            # Central cache: to_reconcile, in_process, pending
-            # UI expects: to_process, in_process, pending
-            to_process = bank_data.get("to_reconcile", [])
+            # All categories now use universal names
+            to_process = bank_data.get("to_process", [])
             in_process = bank_data.get("in_process", [])
             pending = bank_data.get("pending", [])
 
@@ -312,15 +310,15 @@ class BankingHandlers:
             )
 
             # ═══════════════════════════════════════════════════════════════
-            # STEP 2: Fetch MATCHED transactions from journal (separate source)
-            # Matched transactions are reconciled and stored in journal, not in
+            # STEP 2: Fetch PROCESSED transactions from journal (separate source)
+            # Processed transactions are reconciled and stored in journal, not in
             # the central bank cache. This is intentional - they are a different
             # data source.
             # ═══════════════════════════════════════════════════════════════
-            matched = []
+            processed = []
             batches = []
 
-            if category == "all" or category == "matched":
+            if category == "all" or category == "processed":
                 firebase_mgmt = get_firebase_management()
                 matched_docs = await asyncio.to_thread(
                     firebase_mgmt.fetch_journal_entries_by_mandat_id_without_source,
@@ -337,7 +335,7 @@ class BankingHandlers:
                             # Filter by account if specified
                             if account_id and doc_data.get('account_id') != account_id:
                                 continue
-                            matched.append({
+                            processed.append({
                                 "id": doc.get('firebase_doc_id', ''),
                                 "transaction_id": doc_data.get('transaction_id', ''),
                                 "job_id": doc_data.get('job_id', ''),
@@ -349,33 +347,30 @@ class BankingHandlers:
                                 "partner_name": doc_data.get('partner_name', ''),
                                 "amount": float(doc_data.get('amount', 0) or 0),
                                 "currency": doc_data.get('currency', 'CHF'),
-                                "status": 'matched',
+                                "status": 'processed',
                                 "matched_invoice": doc_data.get('matched_invoice', ''),
                                 "timestamp": str(doc_data.get('timestamp', '')),
                             })
 
             # ═══════════════════════════════════════════════════════════════
-            # STEP 3: Fetch active batches for in_process tab
+            # STEP 3: Compute active batches on-the-fly from in_process
+            # Group by batch_id field present on each item.
+            # Batches disappear naturally when all their items leave in_process.
             # ═══════════════════════════════════════════════════════════════
             if category == "all" or category == "in_process":
-                firebase_mgmt = get_firebase_management()
-                batches_raw = await asyncio.to_thread(
-                    firebase_mgmt.fetch_active_batches,
-                    user_id,
-                    company_id,
-                    'banking'
-                )
-                if batches_raw and isinstance(batches_raw, list):
-                    for batch in batches_raw:
-                        batches.append({
-                            "batch_id": batch.get('batch_id', ''),
-                            "account_id": batch.get('account_id', ''),
-                            "transaction_count": batch.get('transaction_count', 0),
-                            "status": batch.get('status', 'running'),
-                            "progress": batch.get('progress', 0),
-                            "current_item": batch.get('current_item', ''),
-                            "started_at": batch.get('started_at', ''),
-                        })
+                batches_map = {}
+                for tx in in_process:
+                    bid = tx.get("batch_id", "")
+                    if bid:
+                        batches_map.setdefault(bid, []).append(tx)
+                for batch_id, items in batches_map.items():
+                    first_item = items[0] if items else {}
+                    batches.append({
+                        "batch_id": batch_id,
+                        "account_id": first_item.get("account_id", ""),
+                        "transaction_count": len(items),
+                        "status": "running",
+                    })
 
             # ═══════════════════════════════════════════════════════════════
             # STEP 4: Build result
@@ -384,13 +379,13 @@ class BankingHandlers:
                 "to_process": to_process,
                 "in_process": in_process,
                 "pending": pending,
-                "matched": matched,
+                "processed": processed,
                 "batches": batches,
                 "counts": {
                     "to_process": len(to_process),
                     "in_process": len(in_process),
                     "pending": len(pending),
-                    "matched": len(matched),
+                    "processed": len(processed),
                 }
             }
 
@@ -465,102 +460,6 @@ class BankingHandlers:
             },
             "from_cache": from_cache
         }
-
-    # ===============================================
-    # PROCESS TRANSACTIONS
-    # ===============================================
-
-    async def process_transactions(
-        self,
-        user_id: str,
-        company_id: str,
-        mandate_path: str,
-        transaction_ids: List[str],
-        general_instructions: Optional[str] = None,
-        transaction_instructions: Optional[Dict[str, str]] = None,
-        _optimistic_update_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        BANKING.process - Process selected transactions.
-
-        After processing, invalidates the CENTRAL BUSINESS CACHE to ensure
-        Dashboard metrics stay consistent.
-
-        Args:
-            user_id: Firebase UID
-            company_id: Company ID
-            mandate_path: Firebase mandate path
-            transaction_ids: List of transaction IDs to process
-            general_instructions: General instructions for all transactions
-            transaction_instructions: Per-transaction specific instructions
-            _optimistic_update_id: ID for optimistic update tracking
-
-        Returns:
-            {"success": True, "processed": [...], "failed": [...], "batch_id": "..."}
-        """
-        try:
-            if not transaction_ids:
-                return {
-                    "success": False,
-                    "error": {"code": "NO_TRANSACTIONS", "message": "No transactions selected"}
-                }
-
-            firebase_mgmt = get_firebase_management()
-            processed = []
-            failed = []
-            batch_id = None
-
-            # Create a batch for tracking
-            batch_id = f"batch_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{len(transaction_ids)}"
-
-            for tx_id in transaction_ids:
-                try:
-                    # Get transaction-specific instructions
-                    instructions = (transaction_instructions or {}).get(tx_id, general_instructions or "")
-
-                    # Create job in Firebase
-                    result = await asyncio.to_thread(
-                        firebase_mgmt.create_banking_job,
-                        user_id,
-                        company_id,
-                        mandate_path,
-                        tx_id,
-                        batch_id=batch_id,
-                        instructions=instructions
-                    )
-
-                    if result.get("success"):
-                        processed.append(tx_id)
-                    else:
-                        failed.append({"id": tx_id, "error": result.get("error", "Unknown error")})
-
-                except Exception as tx_err:
-                    failed.append({"id": tx_id, "error": str(tx_err)})
-
-            # ═══════════════════════════════════════════════════════════════
-            # CRITICAL: Invalidate CENTRAL BUSINESS CACHE
-            # This ensures Dashboard metrics are recalculated from fresh data
-            # ═══════════════════════════════════════════════════════════════
-            await self._invalidate_central_cache(user_id, company_id)
-
-            return {
-                "success": True,
-                "processed": processed,
-                "failed": failed,
-                "batch_id": batch_id,
-                "summary": {
-                    "totalProcessed": len(processed),
-                    "totalFailed": len(failed)
-                },
-                "_optimistic_update_id": _optimistic_update_id,
-            }
-
-        except Exception as e:
-            logger.error(f"[BANKING] process_transactions error: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": {"code": "PROCESS_ERROR", "message": str(e)}
-            }
 
     # ===============================================
     # STOP PROCESSING

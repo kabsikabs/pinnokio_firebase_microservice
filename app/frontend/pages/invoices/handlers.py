@@ -15,9 +15,9 @@ Endpoints:
     - INVOICES.invalidate_cache    -> Invalidate cache
 
 Status Flow:
-    to_do -> in_queue -> on_process -> processed
-                                    -> error -> to_do (restart)
-                                    -> pending -> in_queue (re-process)
+    to_process -> in_queue -> on_process -> processed
+                                         -> error -> to_process (restart)
+                                         -> pending -> in_queue (re-process)
 """
 
 import asyncio
@@ -84,7 +84,7 @@ class InvoicesHandlers:
             user_id: Firebase UID
             company_id: Company ID
             mandate_path: Firebase mandate path
-            category: "to_do", "in_process", "pending", "processed", or "all"
+            category: "to_process", "in_process", "pending", "processed", or "all"
             page: Current page number (1-indexed)
             page_size: Items per page
             search: Search filter
@@ -96,12 +96,12 @@ class InvoicesHandlers:
             {
                 "success": True,
                 "data": {
-                    "to_do": [...],
+                    "to_process": [...],
                     "in_process": [...],
                     "pending": [...],
                     "processed": [...],
                     "counts": {
-                        "to_do": 10,
+                        "to_process": 10,
                         "in_process": 5,
                         "pending": 3,
                         "processed": 25
@@ -137,18 +137,18 @@ class InvoicesHandlers:
                 return {
                     "success": True,
                     "data": {
-                        "to_do": [],
+                        "to_process": [],
                         "in_process": [],
                         "pending": [],
                         "processed": [],
-                        "counts": {"to_do": 0, "in_process": 0, "pending": 0, "processed": 0},
+                        "counts": {"to_process": 0, "in_process": 0, "pending": 0, "processed": 0},
                         "pagination": {"page": 1, "pageSize": page_size, "totalPages": 0, "totalItems": 0}
                     },
                     "from_cache": False
                 }
 
             data = ap_result["data"]
-            to_do = data.get("to_do", [])
+            to_process = data.get("to_process", [])
             in_process = data.get("in_process", [])
             pending = data.get("pending", [])
             processed = data.get("processed", [])
@@ -156,19 +156,19 @@ class InvoicesHandlers:
             # Apply search filter if provided
             if search:
                 search_lower = search.lower()
-                to_do = [d for d in to_do if self._matches_search(d, search_lower)]
+                to_process = [d for d in to_process if self._matches_search(d, search_lower)]
                 in_process = [d for d in in_process if self._matches_search(d, search_lower)]
                 pending = [d for d in pending if self._matches_search(d, search_lower)]
                 processed = [d for d in processed if self._matches_search(d, search_lower)]
 
             # Build result
             result_data = {
-                "to_do": to_do,
+                "to_process": to_process,
                 "in_process": in_process,
                 "pending": pending,
                 "processed": processed,
                 "counts": {
-                    "to_do": len(to_do),
+                    "to_process": len(to_process),
                     "in_process": len(in_process),
                     "pending": len(pending),
                     "processed": len(processed),
@@ -176,8 +176,8 @@ class InvoicesHandlers:
                 "pagination": {
                     "page": page,
                     "pageSize": page_size,
-                    "totalPages": max(1, (len(to_do) + len(in_process) + len(pending) + len(processed)) // page_size),
-                    "totalItems": len(to_do) + len(in_process) + len(pending) + len(processed),
+                    "totalPages": max(1, (len(to_process) + len(in_process) + len(pending) + len(processed)) // page_size),
+                    "totalItems": len(to_process) + len(in_process) + len(pending) + len(processed),
                 }
             }
 
@@ -283,7 +283,7 @@ class InvoicesHandlers:
             keys_to_invalidate = [
                 ("apbookeeper", "documents"),
                 ("invoices", "list_all_all"),
-                ("invoices", "list_all_to_do"),
+                ("invoices", "list_all_to_process"),
                 ("invoices", "list_all_in_process"),
                 ("invoices", "list_all_pending"),
                 ("invoices", "list_all_processed"),

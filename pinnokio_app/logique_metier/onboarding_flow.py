@@ -1,5 +1,9 @@
-from .g_cred import DriveClientService,get_secret,create_secret,FireBaseManagement,SPACE_MANAGER,StorageClient,GoogleSpaceManager
-from .g_cred import FirebaseRealtimeChat
+# Imports depuis les singletons app/
+from app.firebase_providers import FirebaseManagement as FireBaseManagement, FirebaseRealtimeChat
+from app.driveClientService import DriveClientService
+from app.storage_client import StorageClientSingleton as StorageClient
+from app.tools.g_cred import get_secret, create_secret
+
 import json
 
 import datetime
@@ -30,12 +34,7 @@ class DMS_CREATION:
             self.firebase_user_id=firebase_user_id
             self.dms=DriveClientService()  # 🆕 Plus de user_id dans le constructeur
             self.firebase_realtime_chat=FirebaseRealtimeChat()
-            if self.communication_mode=='google_chat':
-                self.space_manager=GoogleSpaceManager(
-                communication_mode=self.communication_mode,
-                auth_user_mail=user_mail,mode='prod',
-                firebase_user_id=firebase_user_id,
-                mandates_path=self.mandates_path)
+            # NOTE: GoogleSpaceManager pour google_chat non implémenté
 
             self.storage_client=StorageClient()
             self.gcs_bucket_name = "pinnokio_app"
@@ -265,19 +264,20 @@ class DMS_CREATION:
                     bucket_name = parts[0]
                     relative_path = parts[1] if len(parts) > 1 else ""
                     
-                    bucket = self.storage_client.storage_client.bucket(bucket_name)
-                    blobs = list(bucket.list_blobs(prefix=relative_path, max_results=1))
+                    # Vérifier si des fichiers existent dans ce chemin
+                    existing_blobs = self.storage_client.list_blobs(prefix=relative_path, bucket_name=bucket_name)
                     
-                    if blobs:
+                    if existing_blobs:
                         print(f"Fichiers trouvés dans: {formatted_path}")
-                        result = self.storage_client.delete_path(formatted_path, recursive=True)
+                        # Utiliser delete_path avec le bucket spécifié
+                        result = self.storage_client.delete_path(relative_path, recursive=True, bucket_name=bucket_name)
                     
                         if result["success"]:
                             storage_deletion_success = True
-                            storage_files_deleted += result.get('files_deleted', 0)
-                            print(f"Suppression réussie dans {formatted_path}: {result['files_deleted']} fichiers supprimés")
+                            storage_files_deleted += result.get('deleted_count', 0)
+                            print(f"Suppression réussie dans {formatted_path}: {result['deleted_count']} fichiers supprimés")
                         else:
-                            print(f"Erreurs lors de la suppression dans {formatted_path}: {result['errors']}")
+                            print(f"Erreurs lors de la suppression dans {formatted_path}: {result.get('error', 'Unknown error')}")
                     else:
                         print(f"Aucun fichier trouvé dans: {formatted_path}")
                 
@@ -526,15 +526,10 @@ class DMS_CREATION:
     def create_space(self,space_name,share_email):
         # Créer l'espace de Chat
         if self.communication_mode=='google_chat':
-            print("Creation de l'espace de Chat au nom du mandat")
-            description=""" Chat to interact with Pinnokio Agents."""
-
-            _, space_id = self.space_manager.create_space(space_name,description)
-            self.space_manager.share_space(space_id,share_email)
-            #first_message=f"""Welcome to your new chat space {space_name}! This is where you can communicate with the Pinnokio agent to manage your tasks, ask questions, and track your processes in real time. Feel free to ask any questions you may have."""
-            #self.space_manager.send_message(space_code=space_id,text=first_message)
-            self.unique_space_id = space_id.split('/')[-1]
-            print(f"impression de l'unique space id : {self.unique_space_id}")
+            # NOTE: Google Chat spaces non implémenté - utilisation du fallback
+            print("⚠️ Google Chat non implémenté - utilisation du fallback Pinnokio")
+            self.unique_space_id = f"klk_space_id_{str(uuid.uuid4())[:6]}"
+            print(f"impression de l'unique space id Pinnokio (fallback) : {self.unique_space_id}")
         else:
             self.unique_space_id = f"klk_space_id_{str(uuid.uuid4())[:6]}"
             print(f"impression de l'unique space id Pinnokio (fallback) : {self.unique_space_id}")
@@ -577,11 +572,21 @@ class DMS_CREATION:
                 
 
                 print(f"impression de drive_client_parent_id:{drive_client_parent_id}")
+                # ⭐ CORRECTION: Récupérer client_uuid et client_name depuis client_data pour la sauvegarde
+                # Utiliser client_uuid passé en paramètre si absent de client_data
+                existing_client_uuid = client_data.get('client_uuid', '') or client_uuid
+                existing_client_name = client_data.get('client_name', client_name)
+                
                 # Vérifier si le dossier existe réellement dans Google Drive
                 if not drive_client_parent_id:
                     # Si aucun ID n'existe dans Firebase, créer le dossier
                     drive_client_parent_id, folder_name=self.dms.create_or_find_folder(self.firebase_user_id,client_name,'root')
-                    data={'drive_client_parent_id':drive_client_parent_id}
+                    # ⭐ CORRECTION: Sauvegarder uniquement les 3 champs requis
+                    data={
+                        'client_uuid': existing_client_uuid,
+                        'client_name': existing_client_name,
+                        'drive_client_parent_id': drive_client_parent_id
+                    }
                     client_document_path = f'clients/{self.firebase_user_id}/bo_clients/{client_doc_id}'
                     self.firebase_service.set_document(document_path=client_document_path,data=data,merge=True)
                     print(f"le dossier parent drive a été créé avec succès:{drive_client_parent_id}")
@@ -591,12 +596,25 @@ class DMS_CREATION:
                         print(f"⚠️ Le dossier parent Drive (ID: {drive_client_parent_id}) n'existe pas ou a été supprimé. Recréation du dossier...")
                         # Recréer le dossier et mettre à jour Firebase
                         drive_client_parent_id, folder_name=self.dms.create_or_find_folder(self.firebase_user_id,client_name,'root')
-                        data={'drive_client_parent_id':drive_client_parent_id}
+                        # ⭐ CORRECTION: Sauvegarder uniquement les 3 champs requis
+                        data={
+                            'client_uuid': existing_client_uuid,
+                            'client_name': existing_client_name,
+                            'drive_client_parent_id': drive_client_parent_id
+                        }
                         client_document_path = f'clients/{self.firebase_user_id}/bo_clients/{client_doc_id}'
                         self.firebase_service.set_document(document_path=client_document_path,data=data,merge=True)
                         print(f"✅ Le dossier parent drive a été recréé avec succès:{drive_client_parent_id}")
                     else:
                         print(f"✅ Le dossier parent Drive (ID: {drive_client_parent_id}) existe et est valide.")
+                        # ⭐ CORRECTION: Mettre à jour uniquement les 3 champs requis (au cas où ils manqueraient)
+                        data={
+                            'client_uuid': existing_client_uuid,
+                            'client_name': existing_client_name,
+                            'drive_client_parent_id': drive_client_parent_id
+                        }
+                        client_document_path = f'clients/{self.firebase_user_id}/bo_clients/{client_doc_id}'
+                        self.firebase_service.set_document(document_path=client_document_path,data=data,merge=True)
                 if not client_uuid and drive_client_parent_id:
                     print("Numéro de client non identifié. Veuillez d'abord paramétrer le client.")
                     return
@@ -617,11 +635,8 @@ class DMS_CREATION:
                 bucket_name = 'pinnokio_app'
                 destination_blob_name = 'setting_params/router_gdrive_structure/drive_manager.json'
 
-                # Initialiser le service de stockage
-                storage_service = StorageClient()
-
-                # Télécharger le fichier depuis GCS
-                file_in_memory = storage_service.download_blob(bucket_name, destination_blob_name)
+                # Télécharger le fichier depuis GCS (utiliser self.storage_client, pas une nouvelle instance)
+                file_in_memory = self.storage_client.download_blob(bucket_name, destination_blob_name)
 
                 # Charger le contenu JSON dans un dictionnaire Python
                 folder_description_schema = json.load(file_in_memory)
@@ -1020,8 +1035,8 @@ class ONBOARDING_MANAGEMENT:
             'contact_space_name': (self.fb_data['base_info'].get('business_name', '') or '').strip() or (self.fb_data['base_info'].get('company_name', '') or '').strip(),
             'isactive': True,
             'email': self.fb_data['base_info'].get('email', '').strip(),
-            'legal_name': (self.fb_data['base_info'].get('company_name') or 
-              self.fb_data['base_info'].get('business_name') or 
+            'legal_name': (self.fb_data['base_info'].get('company_name') or
+              self.fb_data['base_info'].get('business_name') or
               '').strip(),
             'legal_status': self.fb_data['base_info'].get('legal_status', ''),
             'country': self.fb_data['base_info'].get('country', ''),
@@ -1039,7 +1054,9 @@ class ONBOARDING_MANAGEMENT:
             'address': self.fb_data['base_info'].get('address', '').strip(),
             # Suppression du double 'country'
             'ownership_type': self.fb_data['base_info'].get('ownership_type', ''),
-            'language': self.fb_data['base_info'].get('language', '')
+            'language': self.fb_data['base_info'].get('language', ''),
+            # ✅ Ajout client_uuid pour DMS_CREATION
+            'client_uuid': self.client_uuid,
         }
         if mandates_data['chat_type']:
             self.chat_type=mandates_data['chat_type']
@@ -1151,13 +1168,72 @@ class ONBOARDING_MANAGEMENT:
         self.firebase.set_document(workflow_params_path, workflow_params_data, merge=False)
         print(f"✅ Document workflow_params créé avec succès au chemin: {workflow_params_path}")
 
-    def process_onboarding(self):
+    async def create_neon_hr_company(self):
+        """
+        Cree le contexte complet dans PostgreSQL Neon (non-bloquant).
+
+        NOUVEAU FLUX: Utilise ensure_account_context() qui cree:
+        - core.users (utilisateur Firebase)
+        - core.accounts (compte proprietaire)
+        - core.account_access (relation user <-> account avec permissions)
+        - core.companies (societe)
+        - Initialise automatiquement les modules (HR settings, etc.)
+        """
+        if not self.mandates_path:
+            print("⚠️ Neon HR: mandates_path non initialise")
+            return None
+
+        try:
+            from app.tools.account_context import ensure_account_context
+
+            company_name = (
+                self.fb_data.get('base_info', {}).get('company_name') or
+                self.fb_data.get('base_info', {}).get('business_name') or ''
+            ).strip()
+            country = self.fb_data.get('base_info', {}).get('country', '')
+            email = self.fb_data.get('base_info', {}).get('email', '').strip()
+
+            # Utiliser le nouveau flux qui cree users + accounts + account_access + companies
+            context = await ensure_account_context(
+                firebase_uid=self.user_id,
+                mandate_path=self.mandates_path,
+                company_name=company_name,
+                country=country,
+                email=email,
+                display_name=company_name,  # Utiliser le nom de la societe comme display_name
+            )
+
+            print(f"✅ Neon context created: company={context.company_id}, user={context.user_id}, access={context.access_type.value}/{context.profile.value}")
+
+            # Stocker dans Firebase (enrichi avec les nouvelles infos)
+            self.firebase.set_document(
+                self.mandates_path,
+                {
+                    "hr_company_id": str(context.company_id),
+                    "hr_user_id": str(context.user_id),
+                    "hr_account_id": str(context.account_id),
+                    "hr_access_type": context.access_type.value,
+                    "hr_profile": context.profile.value,
+                },
+                merge=True
+            )
+
+            return str(context.company_id)
+
+        except Exception as e:
+            print(f"⚠️ Neon HR creation failed (non-blocking): {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    async def process_onboarding(self):
         try:
             self.create_client_document()
             self.create_mandates_document()
+            await self.create_neon_hr_company()  # ✅ NOUVEAU : Créer société dans PostgreSQL Neon
             self.create_erp_document()
-            self.create_workflow_params_document()  # ✅ NOUVEAU : Créer workflow_params
-            
+            self.create_workflow_params_document()
+
             self.workflow_status['database'] = 'completed'
             print("Database in NoSql created successfully...")
             return self.client_uuid,self.client_mandat_id,self.mandates_path,self.erp_path

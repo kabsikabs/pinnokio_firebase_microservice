@@ -80,11 +80,13 @@ class MetricsHandlers:
         try:
             from datetime import datetime
 
-            # If force_refresh, invalidate cache first
+            # If force_refresh, invalidate domain caches then re-populate from sources
             if force_refresh:
                 await self._invalidate_metrics_cache(user_id, company_id)
+                await self._repopulate_domain_caches(user_id, company_id)
 
             # Delegate to dashboard handlers for actual metrics fetching
+            # (reads from domain caches which are now fresh if force_refresh was True)
             dashboard_handlers = get_dashboard_handlers()
             metrics = await dashboard_handlers._get_metrics(user_id, company_id, mandate_path)
 
@@ -218,3 +220,40 @@ class MetricsHandlers:
 
         except Exception as e:
             logger.warning(f"METRICS cache invalidation error: {e}")
+
+    async def _repopulate_domain_caches(self, user_id: str, company_id: str) -> None:
+        """
+        Re-populate domain caches from sources after invalidation.
+
+        Gets company context from Level 2 cache, then calls
+        _populate_widget_caches to fetch fresh data from Drive/ERP/Firebase
+        and re-cache it.
+        """
+        try:
+            import json
+            from app.redis_client import get_redis
+
+            # Get company context from Level 2 cache
+            redis_client = get_redis()
+            context_key = f"company:{user_id}:{company_id}:context"
+            context_raw = redis_client.get(context_key)
+            company_data = {}
+            if context_raw:
+                company_data = json.loads(
+                    context_raw if isinstance(context_raw, str) else context_raw.decode()
+                )
+
+            if not company_data:
+                logger.warning(
+                    f"METRICS: No company context in L2 cache for repopulation - "
+                    f"uid={user_id} company={company_id}"
+                )
+                return
+
+            # Re-populate all domain caches from sources
+            from app.wrappers.dashboard_orchestration_handlers import _populate_widget_caches
+            await _populate_widget_caches(user_id, company_id, company_data)
+            logger.info(f"METRICS: Domain caches repopulated for company={company_id}")
+
+        except Exception as e:
+            logger.warning(f"METRICS: Domain cache repopulation error: {e}")

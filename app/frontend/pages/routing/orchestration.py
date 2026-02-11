@@ -4,9 +4,16 @@ Routing Page Orchestration
 
 Handles post-authentication data loading for the Routing page.
 
-IMPORTANT: This module reuses the SAME data source as the dashboard widgets:
-- Drive documents from drive_cache_handlers.get_documents() → to_process, in_process, pending
-- Firebase processed docs from firebase_mgmt.fetch_journal_entries_by_mandat_id() → processed
+Source de Vérité:
+- Drive: Liste brute des fichiers (base "to_process")
+- task_manager (Firebase): État des traitements par department "Router"
+- Junction: job_id (Drive file_id == task_manager job_id)
+
+Classification:
+- Drive file sans match task_manager → to_process
+- task_manager status on_process/in_queue/running → in_process
+- task_manager status pending → pending
+- task_manager status completed/close/closed → processed
 
 Pattern:
     page.restore_state -> cache hit: instant data
@@ -18,17 +25,15 @@ Flow (3-Level Architecture):
     3. If cache miss -> page.state_not_found
     4. Frontend sends routing.orchestrate_init with company_id only
     5. Backend reads company context from Level 2 cache: company:{uid}:{cid}:context
-    6. Backend checks business cache (Level 3): business:{uid}:{cid}:routing
-    7. If cache miss -> fetch from Drive using input_drive_doc_id from Level 2
-    8. Backend saves to page state cache
-    9. Backend sends routing.full_data
+    6. Backend fetches Drive docs + crosses with task_manager (1 bulk query)
+    7. Backend saves to page state cache
+    8. Backend sends routing.full_data
 
 ARCHITECTURE (3-Level Cache):
     - Level 2: company:{uid}:{cid}:context → Full company_data (mandate_path, input_drive_doc_id, etc.)
-    - Level 3: business:{uid}:{cid}:routing → { to_process, in_process, pending }
+    - Level 3: business:{uid}:{cid}:routing → { to_process, in_process, pending, processed }
 """
 
-import asyncio
 import json
 import logging
 from datetime import datetime
@@ -37,7 +42,6 @@ from typing import Any, Dict, List, Optional
 from app.ws_hub import hub
 from app.ws_events import WS_EVENTS
 from app.drive_cache_handlers import get_drive_cache_handlers
-from app.firebase_providers import get_firebase_management
 from app.redis_client import get_redis
 
 logger = logging.getLogger("routing.orchestration")
@@ -147,15 +151,16 @@ async def handle_routing_orchestrate_init(
 
     try:
         # ════════════════════════════════════════════════════════════
-        # STEP 1: Fetch Drive documents with Firebase status check
+        # STEP 1: Fetch Drive documents croisés avec task_manager
         # Uses drive_cache_handlers.get_documents() which:
         # - Checks Redis cache first
-        # - On miss: fetches from Drive API + checks Firebase notifications
-        # - Returns: to_process, in_process, pending (correctly sorted)
+        # - On miss: fetches from Drive API + crosses with task_manager (1 bulk query)
+        # - Returns: to_process, in_process, pending, processed (correctly sorted)
         # ════════════════════════════════════════════════════════════
-        unprocessed_documents = []
+        to_process_documents = []
         in_process_documents = []
         pending_documents = []
+        processed_documents = []
         oauth_error = False
 
         if input_drive_id:
@@ -166,7 +171,8 @@ async def handle_routing_orchestrate_init(
                 drive_result = await drive_handlers.get_documents(
                     user_id=uid,
                     company_id=company_id,
-                    input_drive_id=input_drive_id
+                    input_drive_id=input_drive_id,
+                    mandate_path=mandate_path
                 )
 
                 if drive_result.get("oauth_error"):
@@ -174,16 +180,17 @@ async def handle_routing_orchestrate_init(
                     logger.warning(f"[ROUTING] OAuth re-auth required for Drive")
                 elif drive_result.get("data"):
                     data = drive_result["data"]
-                    # drive_cache_handlers now does the correct sorting via check_job_status
-                    unprocessed_documents = data.get("to_process", [])
+                    to_process_documents = data.get("to_process", [])
                     in_process_documents = data.get("in_process", [])
                     pending_documents = data.get("pending", [])
+                    processed_documents = data.get("processed", [])
 
                     logger.info(
                         f"[ROUTING] Documents loaded: "
-                        f"to_process={len(unprocessed_documents)}, "
+                        f"to_process={len(to_process_documents)}, "
                         f"in_process={len(in_process_documents)}, "
-                        f"pending={len(pending_documents)} "
+                        f"pending={len(pending_documents)}, "
+                        f"processed={len(processed_documents)} "
                         f"source={drive_result.get('source', 'unknown')}"
                     )
             except Exception as drive_error:
@@ -192,68 +199,17 @@ async def handle_routing_orchestrate_init(
             logger.warning(f"[ROUTING] No input_drive_doc_id in session context - skipping Drive fetch")
 
         # ════════════════════════════════════════════════════════════
-        # STEP 2: Fetch Firebase processed documents (Terminé)
-        # These come from klk_vision/{department}/journal
-        # Uses fetch_journal_entries_by_mandat_id_without_source (like Router.py)
-        # ════════════════════════════════════════════════════════════
-        processed_documents = []
-
-        try:
-            logger.info(f"[ROUTING] Fetching Firebase journal entries for processed documents...")
-            firebase_mgmt = get_firebase_management()
-
-            # Fetch processed documents from Firebase journal (like Router.py)
-            processed_docs = await asyncio.to_thread(
-                firebase_mgmt.fetch_journal_entries_by_mandat_id_without_source,
-                uid,
-                company_id,  # mandat_id = base_collection_id
-                'Router'  # departement
-            )
-
-            if processed_docs and isinstance(processed_docs, list):
-                for doc in processed_docs:
-                    doc_data = doc.get('data', {}) if isinstance(doc, dict) else {}
-                    # Filtrer uniquement les statuts de succès: completed, routed, success, close
-                    # (comme dans l'ancien code g_cred.py ligne 6615)
-                    status = doc_data.get('status', '')
-                    if status in ['completed', 'routed', 'success', 'close']:
-                        # Build document item matching frontend expectations
-                        processed_item = {
-                            "id": doc.get('firebase_doc_id', ''),
-                            "job_id": doc_data.get('job_id', ''),
-                            "file_name": doc_data.get('file_name', ''),
-                            "client": doc_data.get('client', ''),
-                            "status": status,
-                            "timestamp": (
-                                doc_data['timestamp'].strftime("%d/%m/%Y %H:%M")
-                                if hasattr(doc_data.get('timestamp'), 'strftime')
-                                else str(doc_data.get('timestamp', ''))
-                            ),
-                            "source": doc_data.get('source', ''),
-                            "uri_drive_link": doc_data.get('uri_drive_link', ''),
-                            "drive_file_id": doc_data.get('drive_file_id', ''),
-                            "pinnokio_func": doc_data.get('pinnokio_func', 'Router'),
-                        }
-                        processed_documents.append(processed_item)
-
-            logger.info(f"[ROUTING] Firebase processed documents: {len(processed_documents)}")
-
-        except Exception as firebase_error:
-            logger.warning(f"[ROUTING] Firebase processed fetch error: {firebase_error}")
-            # Non-critical - continue with empty processed list
-
-        # ════════════════════════════════════════════════════════════
-        # STEP 3: Build combined routing data structure
+        # STEP 2: Build combined routing data structure
         # ════════════════════════════════════════════════════════════
         routing_data = {
             "documents": {
-                "unprocessed": unprocessed_documents,
+                "to_process": to_process_documents,
                 "in_process": in_process_documents,
                 "pending": pending_documents,
                 "processed": processed_documents,
             },
             "counts": {
-                "unprocessed": len(unprocessed_documents),
+                "to_process": len(to_process_documents),
                 "in_process": len(in_process_documents),
                 "pending": len(pending_documents),
                 "processed": len(processed_documents),
@@ -263,7 +219,7 @@ async def handle_routing_orchestrate_init(
                 "pageSize": 20,
                 "totalPages": 1,
                 "totalItems": (
-                    len(unprocessed_documents) +
+                    len(to_process_documents) +
                     len(in_process_documents) +
                     len(pending_documents) +
                     len(processed_documents)
@@ -283,12 +239,12 @@ async def handle_routing_orchestrate_init(
             "meta": {
                 "loaded_at": datetime.utcnow().isoformat() + "Z",
                 "version": "1.0",
-                "source": "drive+firebase"
+                "source": "drive+task_manager"
             }
         }
 
         # ════════════════════════════════════════════════════════════
-        # STEP 4: Save page state for fast recovery
+        # STEP 3: Save page state for fast recovery
         # ════════════════════════════════════════════════════════════
         try:
             from app.wrappers.page_state_manager import get_page_state_manager
@@ -305,7 +261,7 @@ async def handle_routing_orchestrate_init(
             logger.warning(f"[ROUTING] Failed to save page state: {cache_err}")
 
         # ════════════════════════════════════════════════════════════
-        # STEP 5: Send response via WebSocket
+        # STEP 4: Send response via WebSocket
         # ════════════════════════════════════════════════════════════
         await hub.broadcast(uid, {
             "type": WS_EVENTS.ROUTING.FULL_DATA,
@@ -348,9 +304,10 @@ async def handle_routing_refresh(
 
     logger.info(f"[ROUTING] Refresh requested for company={company_id}, tab={tab}")
 
-    # Get input_drive_id from SessionStateManager
+    # Get context from Level 2 cache
     context = _get_company_context(uid, company_id)
     input_drive_id = context.get("input_drive_doc_id", "")
+    mandate_path = context.get("mandate_path", "")
 
     # Invalidate Drive cache first
     if input_drive_id:
@@ -359,7 +316,8 @@ async def handle_routing_refresh(
             await drive_handlers.refresh_documents(
                 user_id=uid,
                 company_id=company_id,
-                input_drive_id=input_drive_id
+                input_drive_id=input_drive_id,
+                mandate_path=mandate_path
             )
             logger.info(f"[ROUTING] Drive cache invalidated")
         except Exception as e:

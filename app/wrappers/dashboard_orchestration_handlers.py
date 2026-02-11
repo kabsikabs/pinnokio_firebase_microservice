@@ -523,11 +523,20 @@ async def handle_refresh(
             }
         }
 
-    # Invalidate cache and fetch fresh data
-    dashboard_handlers = get_dashboard_handlers()
-
     # Get mandate_path from company_data if available
     mandate_path = company_data.get("mandate_path", "") if company_data else ""
+
+    # Re-populate domain caches from sources BEFORE reading metrics
+    # Without this, full_data would read stale domain caches
+    if company_data:
+        try:
+            await _populate_widget_caches(uid, company_id, company_data)
+            logger.info(f"[ORCHESTRATION] Refresh: Domain caches repopulated")
+        except Exception as pop_err:
+            logger.warning(f"[ORCHESTRATION] Refresh: Cache repopulation error: {pop_err}")
+
+    # Fetch fresh aggregated data (reads from just-repopulated domain caches)
+    dashboard_handlers = get_dashboard_handlers()
 
     result = await dashboard_handlers.full_data(
         user_id=uid,
@@ -1798,7 +1807,7 @@ async def _populate_widget_caches(
         tasks.append(
             _safe_cache_fetch(
                 "Router/Drive",
-                drive_handlers.get_documents(uid, company_id, input_drive_id)
+                drive_handlers.get_documents(uid, company_id, input_drive_id, mandate_path)
             )
         )
     else:
@@ -1815,18 +1824,7 @@ async def _populate_widget_caches(
     else:
         logger.warning(f"[ORCHESTRATION] No mandate_path for AP cache")
 
-    # 3. Tasks from Firebase (requires mandate_path)
-    if mandate_path:
-        tasks.append(
-            _safe_cache_fetch(
-                "Tasks",
-                firebase_handlers.get_tasks(uid, company_id, mandate_path=mandate_path)
-            )
-        )
-    else:
-        logger.warning(f"[ORCHESTRATION] No mandate_path for Tasks cache")
-
-    # 4. Bank transactions (requires ERP connection)
+    # 3. Bank transactions (requires ERP connection)
     # Bank transactions come from ERP (Odoo), NOT from Firebase
     client_uuid = company_data.get("client_uuid", "")
     bank_erp = company_data.get("bank_erp", "")
@@ -1848,7 +1846,7 @@ async def _populate_widget_caches(
             f"client_uuid={bool(client_uuid)} bank_erp={bank_erp}"
         )
 
-    # 5. COA (accounts + functions) - Cache Niveau 2
+    # 4. COA (accounts + functions) - Cache Niveau 2
     # Le COA est traité comme donnée critique de niveau entreprise
     # Il est pré-chargé pour que la page COA s'affiche immédiatement
     if mandate_path:

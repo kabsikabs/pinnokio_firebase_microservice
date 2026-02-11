@@ -20,12 +20,12 @@ class BankingDomainConfig(BaseDomainConfig):
 
     DOMAIN = "banking"
 
-    # List name mappings (UI tab names)
+    # List name mappings (universal)
     LIST_NAMES = {
         "to_process": "to_process",
         "in_process": "in_process",
         "pending": "pending",
-        "processed": "matched",         # Different naming for banking
+        "processed": "processed",
     }
 
     # Action configurations

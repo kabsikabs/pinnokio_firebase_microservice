@@ -1,31 +1,22 @@
 """
 Service LLM pour le microservice Firebase.
-Gère les sessions LLM et la communication via Firebase Realtime Database.
 
-⭐ Architecture Stateless (Multi-Instance Ready):
-- SessionStateManager: Externalise l'état des sessions dans Redis
-- ChatHistoryManager: Externalise l'historique des chats dans Redis
+Architecture Worker Pattern (Scalable):
+- LLMGateway: Enqueue les jobs vers le worker externe (pinnokio_agentic_worker)
+- SessionStateManager: Gere l'etat des sessions dans Redis
+- redis_namespaces: Constantes et helpers pour les cles Redis
 
-⭐ Worker Pattern (Scalable):
-- LLMGateway: Enqueue les jobs vers le worker externe
+Note: Le traitement LLM est delegue au worker externe.
 """
 
-from .llm_manager import get_llm_manager, LLMManager
-from .llm_context import LLMContext
-from .session_state_manager import get_session_state_manager, SessionStateManager
-from .chat_history_manager import get_chat_history_manager, ChatHistoryManager
 from .llm_gateway import get_llm_gateway, LLMGateway
+from .session_state_manager import get_session_state_manager, SessionStateManager
+from .redis_namespaces import RedisTTL
 
 __all__ = [
-    'get_llm_manager',
-    'LLMManager',
-    'LLMContext',
-    'get_session_state_manager',
-    'SessionStateManager',
-    'get_chat_history_manager',
-    'ChatHistoryManager',
     'get_llm_gateway',
     'LLMGateway',
+    'get_session_state_manager',
+    'SessionStateManager',
+    'RedisTTL',
 ]
-
-

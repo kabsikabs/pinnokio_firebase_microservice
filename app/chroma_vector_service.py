@@ -13,13 +13,19 @@ from .tools.g_cred import get_secret
 from .redis_client import get_redis
 
 
+# ============================================================================
+# SYNC VERSION (Legacy - Backward Compatible)
+# ============================================================================
+
 _CHROMA_VECTOR_SERVICE_SINGLETON: Optional["ChromaVectorService"] = None
 
 
 class ChromaVectorService:
     """
-    Gestionnaire ChromaDB avec pattern Singleton thread-safe.
+    Gestionnaire ChromaDB SYNCHRONE avec pattern Singleton thread-safe.
     Garantit une seule instance avec une seule connexion ChromaDB.
+
+    DEPRECATED: Préférer AsyncChromaVectorService pour les nouveaux développements.
 
     Important: Mapping RPC: "CHROMA_VECTOR.*"
     """
@@ -48,7 +54,7 @@ class ChromaVectorService:
         try:
             self._initialize_chroma_client()
             self._initialize_embeddings()
-            print("✅ ChromaVectorService initialisé avec succès")
+            print("✅ ChromaVectorService (sync) initialisé avec succès")
         except Exception as e:
             print(f"❌ Erreur lors de l'initialisation ChromaVectorService: {e}")
             raise
@@ -64,18 +70,18 @@ class ChromaVectorService:
             chroma_host = safe_env("CHROMA_HOST")
             chroma_port = safe_env("CHROMA_PORT")
 
-            print(f"🔗 Connexion ChromaDB: {chroma_host}:{chroma_port}")
+            print(f"🔗 Connexion ChromaDB (sync): {chroma_host}:{chroma_port}")
 
             # Configuration minimale qui fonctionne (sans headers/settings/tenant/database)
             self.chroma = chromadb.HttpClient(
-                host=chroma_host or '35.180.247.70',
+                host=chroma_host or '13.36.168.113',
                 port=chroma_port or '8000',
                 ssl=safe_env("CHROMA_SSL") == "True"
             )
 
             # Test immédiat de connexion
             heartbeat = self.chroma.heartbeat()
-            print(f"✅ ChromaDB connecté, heartbeat: {heartbeat}")
+            print(f"✅ ChromaDB connecté (sync), heartbeat: {heartbeat}")
 
         except Exception as e:
             print(f"❌ Erreur connexion ChromaDB: {e}")
@@ -210,15 +216,15 @@ class ChromaVectorService:
         # ANCIEN comportement maintenu à 100%
         result = self._register_collection_session(user_id, collection_name, session_id)
         print(f"🔗 Enregistrement Chroma: utilisateur={user_id}, collection={collection_name}")
-        
+
         # NOUVEAU : Sync silencieuse avec le registre unifié (si activé)
         try:
             from .registry.registry_wrapper import get_chroma_registry_wrapper
             wrapper = get_chroma_registry_wrapper()
             if wrapper.unified_enabled:
                 wrapper.registry_wrapper.update_user_service(
-                    user_id, 
-                    "chroma", 
+                    user_id,
+                    "chroma",
                     {
                         "collections": [collection_name],
                         "last_heartbeat": result.get("registered_at")
@@ -227,7 +233,7 @@ class ChromaVectorService:
         except Exception as e:
             # Erreur silencieuse - ne pas impacter l'ancien système
             print(f"⚠️ Erreur sync ChromaDB unifié (register): {e}")
-        
+
         return result  # Format IDENTIQUE qu'avant
 
     def heartbeat_collection(self, user_id: str, collection_name: str) -> dict:
@@ -238,7 +244,7 @@ class ChromaVectorService:
         # ANCIEN comportement maintenu
         success = self._update_collection_heartbeat(user_id, collection_name)
         result = {"user_id": user_id, "collection_name": collection_name, "heartbeat_updated": success}
-        
+
         # NOUVEAU : Sync avec registre unifié (si activé)
         try:
             from .registry.registry_wrapper import get_chroma_registry_wrapper
@@ -247,7 +253,7 @@ class ChromaVectorService:
             if wrapper.unified_enabled:
                 wrapper.registry_wrapper.update_user_service(
                     user_id,
-                    "chroma", 
+                    "chroma",
                     {
                         "collections": [collection_name],
                         "last_heartbeat": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -256,7 +262,7 @@ class ChromaVectorService:
         except Exception as e:
             # Erreur silencieuse
             print(f"⚠️ Erreur sync heartbeat ChromaDB unifié: {e}")
-        
+
         return result
 
     def unregister_collection_user(self, user_id: str, collection_name: str) -> dict:
@@ -268,7 +274,7 @@ class ChromaVectorService:
         success = self._unregister_collection_session(user_id, collection_name)
         print(f"🔗 Désenregistrement Chroma: utilisateur={user_id}, collection={collection_name}")
         result = {"user_id": user_id, "collection_name": collection_name, "unregistered": success}
-        
+
         # NOUVEAU : Sync avec registre unifié (si activé)
         try:
             from .registry.registry_wrapper import get_chroma_registry_wrapper
@@ -280,7 +286,7 @@ class ChromaVectorService:
                     collections = user_registry.get("services", {}).get("chroma", {}).get("collections", [])
                     if collection_name in collections:
                         collections.remove(collection_name)
-                    
+
                     wrapper.registry_wrapper.update_user_service(
                         user_id,
                         "chroma",
@@ -289,7 +295,7 @@ class ChromaVectorService:
         except Exception as e:
             # Erreur silencieuse
             print(f"⚠️ Erreur sync désenregistrement ChromaDB unifié: {e}")
-        
+
         return result
 
     def add_documents(self, collection_name: str, documents: List[str], metadatas: List[Dict[str, Any]], ids: Optional[List[str]] = None) -> dict:
@@ -353,20 +359,20 @@ class ChromaVectorService:
     def _convert_where_to_chroma_format(self, where: Dict[str, Any]) -> Dict[str, Any]:
         """
         Convertit un dictionnaire simple en format ChromaDB valide.
-        
+
         Args:
             where: Dictionnaire simple comme {'source': 'journal', 'pinnokio_func': 'APbookeeper'}
-            
+
         Returns:
             Format ChromaDB valide avec opérateurs $eq
         """
         if not where:
             return where
-            
+
         # Si c'est déjà au format ChromaDB (contient des opérateurs), on le retourne tel quel
         if any(key.startswith('$') for key in where.keys()):
             return where
-            
+
         # Conversion du format simple vers le format ChromaDB
         if len(where) == 1:
             # Un seul critère : {'source': 'journal'} -> {'source': {'$eq': 'journal'}}
@@ -389,7 +395,7 @@ class ChromaVectorService:
 
             # Conversion automatique du format where si nécessaire
             chroma_where = self._convert_where_to_chroma_format(where) if where else None
-            
+
             print(f"🔍 Suppression avec where: {chroma_where}, ids: {ids}")
             collection.delete(where=chroma_where, ids=ids)
 
@@ -643,9 +649,6 @@ class ChromaVectorService:
             # Conversion bytes vers GB (1 GB = 1024^3 bytes)
             gb_factor = 1024 ** 3
             total_size_gb = total_size_bytes / gb_factor
-            embeddings_size_gb = embeddings_size_bytes / gb_factor
-            documents_size_gb = documents_size_bytes / gb_factor
-            metadata_size_gb = metadata_size_bytes / gb_factor
 
             # Calcul du pourcentage d'utilisation
             storage_percentage = min(100, int((total_size_gb / max_storage) * 100)) if max_storage > 0 else 0
@@ -703,10 +706,390 @@ class ChromaVectorService:
 
 def get_chroma_vector_service() -> ChromaVectorService:
     """
-    Retourne l'instance singleton de ChromaVectorService.
+    Retourne l'instance singleton de ChromaVectorService (SYNC).
     Thread-safe, initialise au premier appel.
+
+    DEPRECATED: Préférer get_async_chroma_vector_service() pour les nouveaux développements.
     """
     global _CHROMA_VECTOR_SERVICE_SINGLETON
     if _CHROMA_VECTOR_SERVICE_SINGLETON is None:
         _CHROMA_VECTOR_SERVICE_SINGLETON = ChromaVectorService()
     return _CHROMA_VECTOR_SERVICE_SINGLETON
+
+
+# ============================================================================
+# ASYNC VERSION (New - Recommended for agentic workflows)
+# ============================================================================
+
+_ASYNC_CHROMA_SERVICE_SINGLETON: Optional["AsyncChromaVectorService"] = None
+_ASYNC_INIT_LOCK = asyncio.Lock()
+
+
+class AsyncChromaVectorService:
+    """
+    Gestionnaire ChromaDB ASYNCHRONE avec pattern Singleton.
+    Utilise chromadb.AsyncHttpClient pour des opérations non-bloquantes.
+
+    Recommandé pour:
+    - Workflows agentiques (RAG_SEARCH parallélisé)
+    - Contextes async (FastAPI, asyncio)
+    - Haute concurrence
+
+    Usage:
+        service = await get_async_chroma_vector_service()
+        results = await service.query_documents(collection_name, ["query"])
+
+        # Recherches parallèles
+        results = await service.parallel_query(collection_name, ["q1", "q2", "q3"])
+    """
+
+    _instance: Optional["AsyncChromaVectorService"] = None
+    _initialized: bool = False
+    _collection_cache: Dict[str, Any] = {}
+    _cache_lock: asyncio.Lock = None
+
+    def __init__(self):
+        self.chroma: Optional[chromadb.AsyncHttpClient] = None
+        self.embeddings = None
+        self.api_key: Optional[str] = None
+        self.embedding_model: str = 'text-embedding-ada-002'
+        if self._cache_lock is None:
+            self.__class__._cache_lock = asyncio.Lock()
+
+    async def initialize(self) -> None:
+        """
+        Initialise le client async ChromaDB.
+        Doit être appelé avant d'utiliser le service.
+        """
+        if self._initialized:
+            return
+
+        try:
+            await self._initialize_async_client()
+            self._initialize_embeddings()
+            self.__class__._initialized = True
+            print("✅ AsyncChromaVectorService initialisé avec succès")
+        except Exception as e:
+            print(f"❌ Erreur lors de l'initialisation AsyncChromaVectorService: {e}")
+            raise
+
+    async def _initialize_async_client(self) -> None:
+        """Initialise le client ChromaDB asynchrone."""
+        def safe_env(key, default=None):
+            value = os.getenv(key, default)
+            return None if value == "None" else value
+
+        try:
+            chroma_host = safe_env("CHROMA_HOST") or '13.36.168.113'
+            chroma_port = safe_env("CHROMA_PORT") or '8000'
+
+            print(f"🔗 Connexion ChromaDB (async): {chroma_host}:{chroma_port}")
+
+            # Client asynchrone ChromaDB
+            self.chroma = await chromadb.AsyncHttpClient(
+                host=chroma_host,
+                port=int(chroma_port),
+                ssl=safe_env("CHROMA_SSL") == "True"
+            )
+
+            # Test de connexion
+            heartbeat = await self.chroma.heartbeat()
+            print(f"✅ ChromaDB connecté (async), heartbeat: {heartbeat}")
+
+        except Exception as e:
+            print(f"❌ Erreur connexion ChromaDB async: {e}")
+            raise
+
+    def _initialize_embeddings(self) -> None:
+        """Initialise le modèle d'embeddings (sync car pas d'API async)."""
+        try:
+            self.api_key = get_secret('openai_pinnokio')
+            self.embeddings = embedding_functions.OpenAIEmbeddingFunction(
+                api_key=self.api_key,
+                model_name=self.embedding_model
+            )
+        except Exception as e:
+            print(f"❌ Erreur lors de l'initialisation des embeddings: {e}")
+            raise
+
+    async def get_or_create_collection(self, collection_name: str):
+        """
+        Récupère ou crée une collection ChromaDB de manière asynchrone.
+        Met en cache l'instance pour éviter les créations multiples.
+        """
+        if collection_name in self._collection_cache:
+            return self._collection_cache[collection_name]
+
+        async with self._cache_lock:
+            if collection_name not in self._collection_cache:
+                collection = await self.chroma.get_or_create_collection(
+                    name=collection_name,
+                    embedding_function=self.embeddings
+                )
+                self._collection_cache[collection_name] = collection
+
+        return self._collection_cache[collection_name]
+
+    async def query_documents(
+        self,
+        collection_name: str,
+        query_texts: List[str],
+        n_results: int = 10,
+        where: Optional[Dict[str, Any]] = None
+    ) -> dict:
+        """
+        Recherche des documents dans une collection de manière asynchrone.
+
+        Args:
+            collection_name: Nom de la collection
+            query_texts: Liste des textes de recherche
+            n_results: Nombre de résultats par requête
+            where: Filtres optionnels
+
+        Returns:
+            {"success": True, "collection_name": str, "results": dict}
+        """
+        try:
+            collection = await self.get_or_create_collection(collection_name)
+
+            results = await collection.query(
+                query_texts=query_texts,
+                n_results=n_results,
+                where=where
+            )
+
+            return {
+                "success": True,
+                "collection_name": collection_name,
+                "results": results
+            }
+        except Exception as e:
+            print(f"❌ Erreur lors de la recherche async: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "collection_name": collection_name
+            }
+
+    async def parallel_query(
+        self,
+        collection_name: str,
+        queries: List[str],
+        n_results: int = 10,
+        where: Optional[Dict[str, Any]] = None
+    ) -> List[dict]:
+        """
+        Exécute plusieurs recherches en parallèle.
+
+        Optimisation majeure pour les workflows agentiques qui font
+        plusieurs recherches RAG successives.
+
+        Args:
+            collection_name: Nom de la collection
+            queries: Liste des requêtes à exécuter en parallèle
+            n_results: Nombre de résultats par requête
+            where: Filtres optionnels (appliqués à toutes les requêtes)
+
+        Returns:
+            Liste des résultats pour chaque requête
+
+        Example:
+            results = await service.parallel_query(
+                "my_collection",
+                ["AVS cotisations", "LPP retraite", "bulletin salaire"],
+                n_results=5
+            )
+            # Toutes les recherches s'exécutent en parallèle!
+        """
+        tasks = [
+            self.query_documents(collection_name, [query], n_results, where)
+            for query in queries
+        ]
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Convertir les exceptions en résultats d'erreur
+        processed_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                processed_results.append({
+                    "success": False,
+                    "error": str(result),
+                    "query": queries[i]
+                })
+            else:
+                result["query"] = queries[i]
+                processed_results.append(result)
+
+        return processed_results
+
+    async def add_documents(
+        self,
+        collection_name: str,
+        documents: List[str],
+        metadatas: List[Dict[str, Any]],
+        ids: Optional[List[str]] = None
+    ) -> dict:
+        """
+        Ajoute des documents à une collection de manière asynchrone.
+        """
+        try:
+            collection = await self.get_or_create_collection(collection_name)
+
+            if ids is None:
+                ids = [str(uuid.uuid4()) for _ in documents]
+
+            await collection.add(
+                documents=documents,
+                metadatas=metadatas,
+                ids=ids
+            )
+
+            return {
+                "success": True,
+                "collection_name": collection_name,
+                "documents_added": len(documents),
+                "ids": ids
+            }
+        except Exception as e:
+            print(f"❌ Erreur lors de l'ajout de documents async: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "collection_name": collection_name
+            }
+
+    async def delete_documents(
+        self,
+        collection_name: str,
+        where: Optional[Dict[str, Any]] = None,
+        ids: Optional[List[str]] = None
+    ) -> dict:
+        """
+        Supprime des documents d'une collection de manière asynchrone.
+        """
+        try:
+            collection = await self.get_or_create_collection(collection_name)
+
+            # Conversion automatique du format where si nécessaire
+            chroma_where = self._convert_where_to_chroma_format(where) if where else None
+
+            await collection.delete(where=chroma_where, ids=ids)
+
+            return {
+                "success": True,
+                "collection_name": collection_name,
+                "deleted": True
+            }
+        except Exception as e:
+            print(f"❌ Erreur lors de la suppression async: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "collection_name": collection_name
+            }
+
+    async def get_collection_info(self, collection_name: str) -> dict:
+        """
+        Récupère les informations d'une collection de manière asynchrone.
+        """
+        try:
+            collection = await self.get_or_create_collection(collection_name)
+            count = await collection.count()
+
+            return {
+                "success": True,
+                "collection_name": collection_name,
+                "document_count": count
+            }
+        except Exception as e:
+            print(f"❌ Erreur lors de la récupération des infos async: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "collection_name": collection_name
+            }
+
+    async def delete_collection(self, collection_name: str) -> dict:
+        """
+        Supprime une collection entière de manière asynchrone.
+        """
+        try:
+            await self.chroma.delete_collection(name=collection_name)
+
+            # Nettoyer le cache
+            async with self._cache_lock:
+                self._collection_cache.pop(collection_name, None)
+
+            print(f"✅ Collection '{collection_name}' supprimée (async)")
+            return {"success": True}
+        except Exception as e:
+            print(f"❌ Erreur lors de la suppression de collection async: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def heartbeat(self) -> int:
+        """Vérifie la connexion au serveur ChromaDB."""
+        return await self.chroma.heartbeat()
+
+    def _convert_where_to_chroma_format(self, where: Dict[str, Any]) -> Dict[str, Any]:
+        """Convertit un dictionnaire simple en format ChromaDB valide."""
+        if not where:
+            return where
+
+        if any(key.startswith('$') for key in where.keys()):
+            return where
+
+        if len(where) == 1:
+            key, value = next(iter(where.items()))
+            return {key: {"$eq": value}}
+        else:
+            conditions = [{key: {"$eq": value}} for key, value in where.items()]
+            return {"$and": conditions}
+
+
+async def get_async_chroma_vector_service() -> AsyncChromaVectorService:
+    """
+    Retourne l'instance singleton de AsyncChromaVectorService.
+    Initialise au premier appel de manière thread-safe.
+
+    Usage:
+        service = await get_async_chroma_vector_service()
+        results = await service.query_documents("collection", ["query"])
+    """
+    global _ASYNC_CHROMA_SERVICE_SINGLETON
+
+    if _ASYNC_CHROMA_SERVICE_SINGLETON is None:
+        async with _ASYNC_INIT_LOCK:
+            if _ASYNC_CHROMA_SERVICE_SINGLETON is None:
+                service = AsyncChromaVectorService()
+                await service.initialize()
+                _ASYNC_CHROMA_SERVICE_SINGLETON = service
+
+    return _ASYNC_CHROMA_SERVICE_SINGLETON
+
+
+# ============================================================================
+# UTILITY: Run async from sync context
+# ============================================================================
+
+def run_async_query(collection_name: str, query_texts: List[str], n_results: int = 10) -> dict:
+    """
+    Helper pour exécuter une requête async depuis un contexte sync.
+
+    Usage (depuis du code sync):
+        results = run_async_query("collection", ["query"], n_results=5)
+    """
+    async def _run():
+        service = await get_async_chroma_vector_service()
+        return await service.query_documents(collection_name, query_texts, n_results)
+
+    try:
+        loop = asyncio.get_running_loop()
+        # Déjà dans un loop async, créer une tâche
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            future = pool.submit(asyncio.run, _run())
+            return future.result()
+    except RuntimeError:
+        # Pas de loop, en créer un
+        return asyncio.run(_run())

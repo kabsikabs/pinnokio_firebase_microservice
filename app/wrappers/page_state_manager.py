@@ -154,6 +154,17 @@ class PageStateManager:
                 f"[PAGE_STATE] Saved: page={page} uid={uid} "
                 f"company={company_id} ttl={ttl}s"
             )
+            
+            # Synchroniser le contexte de session pour le Contextual Publisher
+            try:
+                from app.realtime.contextual_publisher import update_page_context
+                update_page_context(uid, page)
+                logger.debug(f"[PAGE_STATE] Synced session context for page={page}")
+            except ImportError:
+                logger.warning("[PAGE_STATE] Could not import update_page_context (circular import?)")
+            except Exception as ctx_err:
+                logger.warning(f"[PAGE_STATE] Failed to sync session context: {ctx_err}")
+
             return True
         except Exception as e:
             logger.error(f"[PAGE_STATE] Save error: {e}", exc_info=True)

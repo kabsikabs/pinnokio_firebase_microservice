@@ -26,6 +26,7 @@ class NormalizedStatus(str, Enum):
     COMPLETED = "completed"        # Terminé
     ERROR = "error"                # Erreur
     STOPPED = "stopped"            # Arrêté
+    SKIPPED = "skipped"            # Sauté (retour to_process)
     ROUTED = "routed"              # Routé (spécifique Router)
 
 
@@ -73,6 +74,7 @@ RAW_TO_NORMALIZED: Dict[str, NormalizedStatus] = {
     "pending": NormalizedStatus.PENDING,
     "error": NormalizedStatus.ERROR,
     "stopped": NormalizedStatus.STOPPED,
+    "skipped": NormalizedStatus.SKIPPED,
     "routed": NormalizedStatus.ROUTED,
 }
 
@@ -87,6 +89,7 @@ NORMALIZED_TO_CATEGORY: Dict[NormalizedStatus, StatusCategory] = {
     NormalizedStatus.TO_PROCESS: StatusCategory.TO_PROCESS,
     NormalizedStatus.ERROR: StatusCategory.TO_PROCESS,
     NormalizedStatus.STOPPED: StatusCategory.TO_PROCESS,
+    NormalizedStatus.SKIPPED: StatusCategory.TO_PROCESS,
 
     # Catégorie "En cours"
     NormalizedStatus.IN_QUEUE: StatusCategory.IN_PROCESS,
@@ -111,6 +114,7 @@ CATEGORY_STATUS_GROUPS: Dict[StatusCategory, Set[NormalizedStatus]] = {
         NormalizedStatus.TO_PROCESS,
         NormalizedStatus.ERROR,
         NormalizedStatus.STOPPED,
+        NormalizedStatus.SKIPPED,
     },
     StatusCategory.IN_PROCESS: {
         NormalizedStatus.IN_QUEUE,

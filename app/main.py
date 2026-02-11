@@ -94,6 +94,22 @@ async def on_startup():
     except Exception as e:
         logger.error("redis_subscriber status=error error=%s", repr(e))
 
+    # ⭐ NOUVEAU: Démarrer le WorkerBroadcastListener pour les broadcasts du worker agentique
+    try:
+        from .realtime.worker_broadcast_listener import start_worker_broadcast_listener
+        await start_worker_broadcast_listener()
+        logger.info("worker_broadcast_listener status=started")
+    except Exception as e:
+        logger.error("worker_broadcast_listener status=error error=%s", repr(e))
+
+    # ⭐ NOUVEAU: Démarrer le listener pour les dispatch agentic (lpt_client -> backend)
+    try:
+        from .wrappers.job_dispatch_listener import start_agentic_dispatch_listener
+        await start_agentic_dispatch_listener()
+        logger.info("agentic_dispatch_listener status=started")
+    except Exception as e:
+        logger.error("agentic_dispatch_listener status=error error=%s", repr(e))
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
@@ -123,6 +139,22 @@ async def on_shutdown():
         logger.info("redis_subscriber status=stopped")
     except Exception as e:
         logger.error("redis_subscriber_stop status=error error=%s", repr(e))
+
+    # ⭐ NOUVEAU: Arrêter le WorkerBroadcastListener
+    try:
+        from .realtime.worker_broadcast_listener import stop_worker_broadcast_listener
+        await stop_worker_broadcast_listener()
+        logger.info("worker_broadcast_listener status=stopped")
+    except Exception as e:
+        logger.error("worker_broadcast_listener_stop status=error error=%s", repr(e))
+
+    # ⭐ NOUVEAU: Arrêter le listener dispatch agentic
+    try:
+        from .wrappers.job_dispatch_listener import stop_agentic_dispatch_listener
+        await stop_agentic_dispatch_listener()
+        logger.info("agentic_dispatch_listener status=stopped")
+    except Exception as e:
+        logger.error("agentic_dispatch_listener_stop status=error error=%s", repr(e))
 
 
 @app.get("/healthz")
@@ -853,137 +885,19 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
     #     target = getattr(get_unified_registry(), name, None)
     #     if callable(target):
     #         return target, "UNIFIED_REGISTRY"
-    if method.startswith("LLM."):
-        name = method.split(".", 1)[1]
-        from .llm_service import get_llm_manager
-        
-        # ═══════════════════════════════════════════════════════════════
-        # MÉTHODES LLM - ARCHITECTURE UNIFIÉE UI/BACKEND
-        # ═══════════════════════════════════════════════════════════════
-        # ⭐ FLUX UNIFIÉ :
-        #   - MODE UI : send_message() → _process_unified_workflow(streaming=True)
-        #   - MODE BACKEND : _resume_workflow_after_lpt() → _process_unified_workflow(streaming=False/True)
-        #
-        # ✅ Isolation garantie par _ensure_session_initialized() :
-        #   - Charge user_context, jobs_data, jobs_metrics
-        #   - Utilisé automatiquement par send_message() et _resume_workflow_after_lpt()
-        # ═══════════════════════════════════════════════════════════════
-        
-        if name == "initialize_session":
-            # ⭐ FIX: Utiliser un wrapper ASYNCHRONE pour permettre à create_task de fonctionner sur l'event loop principal
-            # L'ancien wrapper synchrone + ThreadPoolExecutor tuait les tâches d'arrière-plan
-            async def _async_wrapper(**kwargs):
-                return await get_llm_manager().initialize_session(**kwargs)
-            return _async_wrapper, "LLM"
-        if name == "start_onboarding_chat":
-            async def _async_wrapper(**kwargs):
-                return await get_llm_manager().start_onboarding_chat(**kwargs)
-            return _async_wrapper, "LLM"
-        if name == "stop_onboarding_chat":
-            async def _async_wrapper(**kwargs):
-                return await get_llm_manager().stop_onboarding_chat(**kwargs)
-            return _async_wrapper, "LLM"
-        if name == "send_message":
-            # ⭐ MODE UI - Point d'entrée principal pour messages utilisateur
-            # Architecture unifiée :
-            #   1. _ensure_session_initialized() → Garantit données permanentes
-            #   2. Vérifie/crée brain pour le thread
-            #   3. _process_unified_workflow(enable_streaming=True) → Streaming WebSocket
-            # Version async directe - pas de wrapper synchrone pour éviter l'annulation des tâches
-            async def _async_wrapper(**kwargs):
-                return await get_llm_manager().send_message(**kwargs)
-            return _async_wrapper, "LLM"
-        if name == "update_context":
-            def _sync_wrapper(**kwargs):
-                # Exécuter la coroutine dans l'event loop
-                import asyncio
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # Si on est déjà dans un event loop, créer une nouvelle tâche
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            future = executor.submit(asyncio.run, get_llm_manager().update_context(**kwargs))
-                            return future.result()
-                    else:
-                        return asyncio.run(get_llm_manager().update_context(**kwargs))
-                except RuntimeError:
-                    # Fallback si pas d'event loop
-                    return asyncio.run(get_llm_manager().update_context(**kwargs))
-            return _sync_wrapper, "LLM"
-        if name == "load_chat_history":
-            def _sync_wrapper(**kwargs):
-                # Exécuter la coroutine dans l'event loop
-                import asyncio
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # Si on est déjà dans un event loop, créer une nouvelle tâche
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            future = executor.submit(asyncio.run, get_llm_manager().load_chat_history(**kwargs))
-                            return future.result()
-                    else:
-                        return asyncio.run(get_llm_manager().load_chat_history(**kwargs))
-                except RuntimeError:
-                    # Fallback si pas d'event loop
-                    return asyncio.run(get_llm_manager().load_chat_history(**kwargs))
-            return _sync_wrapper, "LLM"
-        if name == "stop_streaming":
-            def _sync_wrapper(**kwargs):
-                # Exécuter la coroutine dans l'event loop
-                import asyncio
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # Si on est déjà dans un event loop, créer une nouvelle tâche
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            future = executor.submit(asyncio.run, get_llm_manager().stop_streaming(**kwargs))
-                            return future.result()
-                    else:
-                        return asyncio.run(get_llm_manager().stop_streaming(**kwargs))
-                except RuntimeError:
-                    # Fallback si pas d'event loop
-                    return asyncio.run(get_llm_manager().stop_streaming(**kwargs))
-            return _sync_wrapper, "LLM"
-        if name == "flush_chat_history":
-            # ⭐ CORRIGÉ: Wrapper asynchrone non-bloquant (était sync et causait des timeouts)
-            async def _async_wrapper(**kwargs):
-                return await get_llm_manager().flush_chat_history(**kwargs)
-            return _async_wrapper, "LLM"
-        if name == "enter_chat":
-            # ⭐ NOUVEAU: Signal d'entrée sur un thread de chat (pour tracking présence)
-            # Appelé par Reflex quand user ouvre/entre sur un thread
-            async def _async_wrapper(**kwargs):
-                return await get_llm_manager().enter_chat(**kwargs)
-            return _async_wrapper, "LLM"
-        if name == "leave_chat":
-            # ⭐ NOUVEAU: Signal de départ de la page chat (pour tracking présence)
-            # Appelé par Reflex quand user ferme l'onglet ou change de module
-            async def _async_wrapper(**kwargs):
-                return await get_llm_manager().leave_chat(**kwargs)
-            return _async_wrapper, "LLM"
-        if name == "approve_plan":
-            # ⭐ NOUVEAU: Gérer les approbations de plans LPT
-            async def _async_wrapper(**kwargs):
-                return await get_llm_manager().handle_approval_response(**kwargs)
-            return _async_wrapper, "LLM"
-        if name == "send_card_response":
-            # ⭐ NOUVEAU: Réception réponse carte interactive
-            async def _async_wrapper(**kwargs):
-                return await get_llm_manager().send_card_response(**kwargs)
-            return _async_wrapper, "LLM"
-        if name == "invalidate_user_context":
-            async def _async_wrapper(**kwargs):
-                return await get_llm_manager().invalidate_user_context(**kwargs)
-            return _async_wrapper, "LLM"
-        if name == "execute_task_now":
-            # ⭐ NOUVEAU: Exécution immédiate d'une tâche (déclenchée depuis le frontend)
-            # Réplique la logique du CRON mais appelée manuellement
-            async def _async_wrapper(**kwargs):
-                return await get_llm_manager().execute_task_now(**kwargs)
-            return _async_wrapper, "LLM"
+    # ═══════════════════════════════════════════════════════════════
+    # ❌ SUPPRIMÉ (2026-02-04): Bloc RPC LLM.* pour Reflex
+    # ═══════════════════════════════════════════════════════════════
+    # Ces 14 méthodes RPC sont maintenant gérées via WebSocket + Queue:
+    # - LLM.initialize_session → WebSocket dashboard.initialize
+    # - LLM.start_onboarding_chat → WebSocket chat.start_onboarding
+    # - LLM.send_message → WebSocket chat.send_message → LLMGateway
+    # - LLM.send_card_response → WebSocket chat.send_card_response → LLMGateway
+    # - LLM.enter_chat → WebSocket chat.session_select → LLMGateway
+    # - etc.
+    #
+    # L'endpoint HTTP POST /invalidate_context reste disponible.
+    # ═══════════════════════════════════════════════════════════════
     # ❌ SUPPRIMÉ: DOUBLON - Les méthodes listeners sont déjà exposées sous REGISTRY.*
     # if method.startswith("REGISTRY_LISTENERS."):
     #     name = method.split(".", 1)[1]
@@ -1485,11 +1399,12 @@ class CloudWatchDownloadRequest(BaseModel):
 async def invalidate_context(req: InvalidateContextRequest):
     """
     Invalide le contexte utilisateur pour forcer un rechargement depuis Firebase.
+    Delegue au worker via LLMGateway.
     """
-    from .llm_service import get_llm_manager
+    from .llm_service.llm_gateway import get_llm_gateway
 
-    llm_manager = get_llm_manager()
-    result = await llm_manager.invalidate_user_context(
+    gateway = get_llm_gateway()
+    result = await gateway.enqueue_invalidate_context(
         user_id=req.user_id,
         collection_name=req.collection_name,
     )
@@ -1741,53 +1656,46 @@ async def lpt_callback(req: LPTCallbackRequest, authorization: str | None = Head
                 "dt_ms": dt_ms
             }
         
-        # ⭐ ÉTAPE 4.1 : Déterminer le mode (UI ou Backend) avec check robuste
-        from .llm_service import get_llm_manager
-        
-        llm_manager = get_llm_manager()
-        
-        # Garantir que la session existe (nécessaire pour vérifier is_user_on_specific_thread)
-        session = await llm_manager._ensure_session_initialized(
+        # ⭐ ÉTAPE 4.1 : Déterminer le mode (UI ou Backend) via SessionStateManager (Redis)
+        from .llm_service.session_state_manager import get_session_state_manager
+        from .llm_service.llm_gateway import get_llm_gateway
+
+        state_manager = get_session_state_manager()
+
+        # ⭐ CHECK ROBUSTE via Redis: User est-il ACTUELLEMENT sur ce thread précis?
+        user_on_active_chat = state_manager.is_user_on_thread_multi_tab(
             user_id=req.user_id,
-            collection_name=company_id,
-            chat_mode="general_chat"
+            company_id=company_id,
+            thread_key=req.thread_key
         )
-        
-        # ⭐ CHECK ROBUSTE: User est-il ACTUELLEMENT sur ce thread précis?
-        # Logique:
-        # - is_on_chat_page = False → Mode BACKEND (user pas sur la page)
-        # - is_on_chat_page = True + current_active_thread = thread_key → Mode UI
-        # - is_on_chat_page = True + current_active_thread ≠ thread_key → Mode BACKEND
-        user_on_active_chat = session.is_user_on_specific_thread(req.thread_key)
-        
+
         mode = "UI" if user_on_active_chat else "BACKEND"
-        
+
         logger.info(
             "lpt_callback_resume_workflow mode=%s task_id=%s thread=%s "
-            "user_on_active_chat=%s is_on_chat_page=%s current_active_thread=%s is_planned=%s",
+            "user_on_active_chat=%s is_planned=%s",
             mode,
             req.task_id,
             req.thread_key,
             user_on_active_chat,
-            session.is_on_chat_page,
-            session.current_active_thread,
             is_planned_task
         )
-        
-        # Lancer la reprise du workflow en arrière-plan
-        # ⭐ _resume_workflow_after_lpt gère automatiquement :
+
+        # ⭐ Déléguer le traitement au worker via LLMGateway
+        # Le worker gère automatiquement :
         # - Création de session si nécessaire (_ensure_session_initialized)
         # - Création du brain si nécessaire (charge historique RTDB)
         # - Streaming conditionnel (enable_streaming=user_on_active_chat)
-        asyncio.create_task(
-            llm_manager._resume_workflow_after_lpt(
-                user_id=req.user_id,
-                company_id=company_id,
-                thread_key=req.thread_key,
-                task_id=req.task_id,
-                task_data=task_data,
-                lpt_response=req.response,
-                original_payload={
+        gateway = get_llm_gateway()
+        await gateway.enqueue_lpt_callback(
+            user_id=req.user_id,
+            collection_name=company_id,
+            thread_key=req.thread_key,
+            payload={
+                "task_id": req.task_id,
+                "task_data": task_data,
+                "lpt_response": req.response,
+                "original_payload": {
                     "collection_name": req.collection_name,
                     "user_id": req.user_id,
                     "client_uuid": req.client_uuid,
@@ -1800,9 +1708,9 @@ async def lpt_callback(req: LPTCallbackRequest, authorization: str | None = Head
                     "start_instructions": req.start_instructions,
                     "task_type": req.task_type
                 },
-                user_connected=user_on_active_chat,  # ⭐ Check robuste du thread actif
-                is_planned_task=is_planned_task  # ⭐ NOUVEAU: Distinguer tâche planifiée vs LPT simple
-            )
+                "user_connected": user_on_active_chat,  # ⭐ Check robuste du thread actif
+                "is_planned_task": is_planned_task  # ⭐ NOUVEAU: Distinguer tâche planifiée vs LPT simple
+            }
         )
         
         logger.info(
@@ -2277,9 +2185,10 @@ async def websocket_endpoint(ws: WebSocket):
                         logger.info(f"[WS] Chat mode_change response sent - uid={uid}")
 
                     elif msg_type == "chat.send_message":
-                        # Route message to LLM via existing send_message handler
-                        # Streaming response will be sent via LLM events (llm.stream_start, llm.stream_delta, llm.stream_end)
-                        from .llm_service import get_llm_manager
+                        # ⭐ ARCHITECTURE QUEUE: Route message via LLMGateway → Worker
+                        # Le Worker traite le message et publie le streaming via Redis PubSub
+                        # Le WorkerBroadcastListener transmet au frontend via WebSocket
+                        from .llm_service.llm_gateway import get_llm_gateway
 
                         thread_key = msg_payload.get("thread_key") or msg_payload.get("session_id")
                         content = msg_payload.get("content", "")
@@ -2289,20 +2198,25 @@ async def websocket_endpoint(ws: WebSocket):
                         logger.info(f"[WS] Chat send_message - uid={uid} thread={thread_key} content_len={len(content)}")
 
                         try:
-                            # Call LLM manager's send_message - streaming handled internally
-                            # Note: send_message uses collection_name (not company_id) and message (not content)
-                            result = await get_llm_manager().send_message(
+                            # Enqueue message for Worker processing
+                            # Worker will handle streaming via Redis PubSub → WorkerBroadcastListener → WebSocket
+                            gateway = get_llm_gateway()
+                            queue_result = await gateway.enqueue_message(
                                 user_id=uid,
                                 collection_name=company_id,
                                 thread_key=thread_key,
                                 message=content,
                                 chat_mode=chat_mode,
                             )
+
+                            logger.info(f"[WS] Chat send_message enqueued: job_id={queue_result.get('job_id', 'unknown')[:8]}...")
+
                             response = {
                                 "type": "chat.message_sent",
                                 "payload": {
                                     "success": True,
-                                    "message_id": result.get("message_id") if isinstance(result, dict) else None,
+                                    "status": "queued",
+                                    "job_id": queue_result.get("job_id"),
                                 }
                             }
                         except Exception as e:
@@ -2912,8 +2826,8 @@ async def websocket_endpoint(ws: WebSocket):
                     # LLM STREAMING EVENTS
                     # ============================================
                     elif msg_type == "llm.stop_streaming":
-                        # Stop the current LLM streaming response
-                        from .llm_service import get_llm_manager
+                        # Stop the current LLM streaming response - delegue au worker
+                        from .llm_service.llm_gateway import get_llm_gateway
 
                         session_id = msg_payload.get("session_id")  # thread_key from frontend
                         company_id = msg_payload.get("company_id")
@@ -2921,19 +2835,21 @@ async def websocket_endpoint(ws: WebSocket):
                         logger.info(f"[WS] LLM stop_streaming request - uid={uid} company={company_id} thread={session_id}")
 
                         try:
-                            result = await get_llm_manager().stop_streaming(
+                            gateway = get_llm_gateway()
+                            result = await gateway.enqueue_stop_streaming(
                                 user_id=uid,
                                 collection_name=company_id,
                                 thread_key=session_id,  # session_id from frontend is the thread_key
                             )
+                            # Note: Le worker enverra la reponse via Redis PubSub -> WebSocket
+                            # On envoie une confirmation immediate que le job est enqueue
                             response = {
-                                "type": "llm.stream_interrupted",
+                                "type": "llm.stop_streaming_queued",
                                 "payload": {
-                                    "success": result.get("success", True) if isinstance(result, dict) else True,
+                                    "success": True,
                                     "session_id": session_id,
-                                    "message_id": result.get("message_id") if isinstance(result, dict) else None,
-                                    "accumulated_content": result.get("accumulated_content", "") if isinstance(result, dict) else "",
-                                    "reason": "user_stopped",
+                                    "job_id": result.get("job_id"),
+                                    "message": "Stop streaming request queued",
                                 }
                             }
                         except Exception as e:
@@ -2986,6 +2902,10 @@ async def websocket_endpoint(ws: WebSocket):
                             )
 
                             if state:
+                                # Synchroniser le contexte de page pour le Contextual Publisher
+                                from .realtime.contextual_publisher import update_page_context
+                                update_page_context(uid, page)
+
                                 response = {
                                     "type": WS_EVENTS.PAGE_STATE.RESTORED,
                                     "payload": {
@@ -3009,6 +2929,85 @@ async def websocket_endpoint(ws: WebSocket):
                                 logger.info(f"[WS] Page state not found - uid={uid} page={page} company={company_id}")
 
                         await ws.send_text(_json.dumps(response))
+
+                        # Dashboard: recalculer les metrics fraîches depuis le business cache
+                        # Le page_state contient un snapshot figé, mais le business cache est
+                        # à jour (mis à jour par PubSub subscriber). On envoie un event
+                        # dashboard.metrics_update immédiatement après le restore pour corriger.
+                        if page == "dashboard" and state:
+                            try:
+                                from .cache.metrics_calculator import MetricsCalculator
+                                from .llm_service.redis_namespaces import build_business_key
+                                calculator = MetricsCalculator(get_redis())
+                                fresh_metrics = calculator.get_all_metrics(uid, company_id)
+
+                                # Lire le billing_history frais depuis le cache Redis
+                                # (mis à jour par PubSub subscriber en temps réel)
+                                # Fallback sur les données du page_state snapshot
+                                billing_history_payload = None
+                                try:
+                                    billing_key = build_business_key(uid, company_id, "billing_history")
+                                    raw_billing = get_redis().get(billing_key)
+                                    if raw_billing:
+                                        billing_data = _json.loads(raw_billing if isinstance(raw_billing, str) else raw_billing.decode())
+                                        # Gérer le format enveloppé (unified_cache_manager) et brut
+                                        if "data" in billing_data and isinstance(billing_data["data"], dict):
+                                            billing_history_payload = billing_data["data"]
+                                        elif "items" in billing_data:
+                                            billing_history_payload = billing_data
+                                        if billing_history_payload:
+                                            logger.info(
+                                                f"[WS] billing_history from Redis cache: "
+                                                f"items={len(billing_history_payload.get('items', []))}"
+                                            )
+                                except Exception as bh_err:
+                                    logger.warning(f"[WS] Could not read billing_history from cache: {bh_err}")
+
+                                # Fallback: utiliser les données du page_state snapshot
+                                if not billing_history_payload:
+                                    expenses_snapshot = state.get("data", {}).get("expenses")
+                                    if expenses_snapshot and expenses_snapshot.get("items"):
+                                        billing_history_payload = expenses_snapshot
+                                        logger.info(
+                                            f"[WS] billing_history from page_state snapshot: "
+                                            f"items={len(billing_history_payload.get('items', []))}"
+                                        )
+
+                                metrics_payload = {
+                                    "metrics": fresh_metrics,
+                                    "action": "full"
+                                }
+                                if billing_history_payload:
+                                    metrics_payload["expenses"] = billing_history_payload
+
+                                metrics_event = {
+                                    "type": WS_EVENTS.DASHBOARD.METRICS_UPDATE,
+                                    "payload": metrics_payload
+                                }
+                                await ws.send_text(_json.dumps(metrics_event))
+                                logger.info(
+                                    f"[WS] Fresh metrics+billing_history sent after dashboard restore - "
+                                    f"uid={uid} has_expenses={bool(billing_history_payload)}"
+                                )
+                            except Exception as metrics_err:
+                                logger.error(f"[WS] Failed to send fresh metrics after dashboard restore: {metrics_err}")
+
+                            # Re-peupler le cache billing_history depuis les données du page_state
+                            # Le page_state (TTL 1800s) survit au billing_history cache (TTL 1800s),
+                            # donc on re-écrit le cache pour que les PubSub puissent le mettre à jour
+                            try:
+                                expenses_data = state.get("data", {}).get("expenses")
+                                if expenses_data and expenses_data.get("items"):
+                                    billing_key = build_business_key(uid, company_id, "billing_history")
+                                    # Vérifier si le cache existe déjà (écrit par PubSub subscriber)
+                                    existing = get_redis().exists(billing_key)
+                                    if not existing:
+                                        get_redis().setex(billing_key, 1800, _json.dumps(expenses_data))
+                                        logger.info(f"[WS] billing_history cache re-populated from page_state - uid={uid}")
+                                    else:
+                                        logger.info(f"[WS] billing_history cache already exists, skipping re-populate - uid={uid}")
+                            except Exception as exp_err:
+                                logger.error(f"[WS] Failed to re-populate billing_history cache: {exp_err}")
 
                     elif msg_type == "page.invalidate_state":
                         from .wrappers.page_state_manager import get_page_state_manager
