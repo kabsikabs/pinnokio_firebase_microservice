@@ -13,7 +13,6 @@ Architecture:
 Endpoints:
     - ROUTING.list              -> List documents by category
     - ROUTING.process           -> Process selected documents
-    - ROUTING.restart           -> Restart a job
     - ROUTING.refresh           -> Refresh current tab data
     - ROUTING.instructions_save -> Save document instructions
     - ROUTING.toggle_selection  -> Toggle document selection
@@ -59,7 +58,6 @@ class RoutingHandlers:
     Chaque methode correspond a un endpoint RPC:
     - ROUTING.list -> list_documents()
     - ROUTING.process -> process_documents()
-    - ROUTING.restart -> restart_job()
     - ROUTING.refresh -> refresh_tab()
     """
 
@@ -366,84 +364,6 @@ class RoutingHandlers:
             return {
                 "success": False,
                 "error": {"code": "PROCESS_ERROR", "message": str(e)}
-            }
-
-    # ===============================================
-    # RESTART JOB
-    # ===============================================
-
-    async def restart_job(
-        self,
-        user_id: str,
-        company_id: str,
-        job_id: str,
-        mandate_path: str
-    ) -> Dict[str, Any]:
-        """
-        ROUTING.restart - Restart a processing job.
-
-        Resets a job to initial state, clearing events and chat history.
-
-        Args:
-            user_id: Firebase UID
-            company_id: Company ID (base_collection_id)
-            job_id: Job ID to restart
-            mandate_path: Firebase mandate path
-
-        Returns:
-            {"success": True, "job_id": "..."}
-        """
-        try:
-            firebase_mgmt = get_firebase_management()
-
-            # 1. Restart job in Firebase (clears events)
-            restart_success = await asyncio.to_thread(
-                firebase_mgmt.restart_job,
-                user_id,
-                job_id
-            )
-
-            if not restart_success:
-                return {
-                    "success": False,
-                    "error": {"code": "RESTART_FAILED", "message": f"Failed to restart job {job_id}"}
-                }
-
-            # 2. Clear Realtime chats
-            try:
-                from app.firebase_realtime import get_firebase_realtime_chat
-                realtime_service = get_firebase_realtime_chat()
-
-                await asyncio.to_thread(
-                    realtime_service.erase_chat,
-                    space_code=company_id,
-                    thread_key=job_id,
-                    mode='job_chats'
-                )
-                await asyncio.to_thread(
-                    realtime_service.erase_chat,
-                    space_code=company_id,
-                    thread_key=job_id,
-                    mode='active_chats'
-                )
-            except Exception as chat_err:
-                logger.warning(f"[ROUTING] Failed to clear chats: {chat_err}")
-
-            # 3. Invalidate cache
-            cache = get_firebase_cache_manager()
-            await cache.delete_cached_data(user_id, company_id, "routing", "list_all")
-
-            return {
-                "success": True,
-                "job_id": job_id,
-                "message": f"Job {job_id} has been successfully reset"
-            }
-
-        except Exception as e:
-            logger.error(f"[ROUTING] restart_job error: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": {"code": "RESTART_ERROR", "message": str(e)}
             }
 
     # ===============================================

@@ -63,6 +63,7 @@ VALID_PAGES = [
     "invoices",
     "expenses",
     "chat",
+    "chat_tasks",  # Chat tasks page (separate from chat)
     "hr",
     "settings",
     "company_settings",  # Company settings page

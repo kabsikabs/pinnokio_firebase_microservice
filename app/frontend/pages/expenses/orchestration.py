@@ -49,7 +49,7 @@ def _get_company_context(uid: str, company_id: str) -> Dict[str, Any]:
 
     Cache hierarchy (tries in order):
     1. Level 2: company:{uid}:{company_id}:context (full company_data)
-    2. Legacy: SessionStateManager (fallback)
+    2. Fallback Firebase: fetch_all_mandates_light → repopulate Level 2
 
     Returns:
         Dict with: mandate_path, client_uuid, etc.
@@ -70,8 +70,28 @@ def _get_company_context(uid: str, company_id: str) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"[EXPENSES] Level 2 context read error: {e}")
 
-    # Si Level 2 n'existe pas, retourner un dict vide
-    logger.warning(f"[EXPENSES] No company context found for uid={uid}, company={company_id}")
+    # 2. Fallback Firebase: Level 2 expiré ou absent → récupérer depuis Firebase
+    logger.warning(f"[EXPENSES] Level 2 cache MISS for uid={uid}, company={company_id} — fetching from Firebase...")
+    try:
+        from app.firebase_providers import get_firebase_management
+        from app.wrappers.dashboard_orchestration_handlers import set_selected_company
+
+        firebase = get_firebase_management()
+        mandates = firebase.fetch_all_mandates_light(uid)
+        for m in (mandates or []):
+            m_ids = (m.get("contact_space_id"), m.get("id"), m.get("contact_space_name"))
+            if company_id in m_ids:
+                m["company_id"] = company_id
+                set_selected_company(uid, company_id, m)
+                logger.info(
+                    f"[EXPENSES] Context repopulated from Firebase: "
+                    f"mandate_path={m.get('mandate_path', '')[:30]}..."
+                )
+                return m
+    except Exception as e:
+        logger.error(f"[EXPENSES] Firebase fallback failed: {e}")
+
+    logger.error(f"[EXPENSES] No company context found for uid={uid}, company={company_id}")
     return {}
 
 

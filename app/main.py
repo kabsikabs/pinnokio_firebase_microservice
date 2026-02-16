@@ -2101,6 +2101,59 @@ async def websocket_endpoint(ws: WebSocket):
                         logger.info(f"[WS] Task update response sent - uid={uid}")
 
                     # ============================================
+                    # APPROVAL EVENTS
+                    # ============================================
+                    elif msg_type == "approval.list":
+                        from .wrappers.approval_handlers import handle_approval_list
+                        response = await handle_approval_list(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Approval list response sent - uid={uid}")
+
+                    elif msg_type == "approval.send_router":
+                        from .wrappers.approval_handlers import handle_send_router
+                        response = await handle_send_router(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Approval send_router response sent - uid={uid}")
+
+                    elif msg_type == "approval.send_banker":
+                        from .wrappers.approval_handlers import handle_send_banker
+                        response = await handle_send_banker(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Approval send_banker response sent - uid={uid}")
+
+                    elif msg_type == "approval.send_apbookeeper":
+                        from .wrappers.approval_handlers import handle_send_apbookeeper
+                        response = await handle_send_apbookeeper(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Approval send_apbookeeper response sent - uid={uid}")
+
+                    elif msg_type == "approval.save_changes":
+                        from .wrappers.approval_handlers import handle_save_approval_changes
+                        response = await handle_save_approval_changes(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Approval save_changes response sent - uid={uid}")
+
+                    # ============================================
                     # BALANCE EVENTS (account top-up and refresh)
                     # ============================================
                     elif msg_type == "balance.top_up":
@@ -2241,6 +2294,16 @@ async def websocket_endpoint(ws: WebSocket):
                         )
                         await ws.send_text(_json.dumps(response))
                         logger.info(f"[WS] Chat card_clicked response sent - uid={uid}")
+
+                    elif msg_type == "chat.onboarding_job_stop":
+                        from .frontend.pages.chat.orchestration import handle_onboarding_job_stop
+                        response = await handle_onboarding_job_stop(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Chat onboarding_job_stop response sent - uid={uid}")
 
                     elif msg_type == "chat.start_onboarding":
                         # Start onboarding chat after company creation
@@ -2737,6 +2800,33 @@ async def websocket_endpoint(ws: WebSocket):
                             payload=msg_payload
                         )
                         logger.info(f"[WS] Banking delete handled - uid={uid}")
+
+                    # ============================================
+                    # INSTRUCTION TEMPLATES CRUD (shared handler, 3 pages)
+                    # ============================================
+                    elif msg_type in ("routing.templates_list", "invoices.templates_list", "banking.templates_list"):
+                        page_name = msg_type.split(".")[0]
+                        from .frontend.pages.shared.instruction_templates_handlers import handle_templates_list
+                        await handle_templates_list(uid, session_id, msg_payload, page_name)
+                        logger.info(f"[WS] {page_name}.templates_list handled - uid={uid}")
+
+                    elif msg_type in ("routing.templates_create", "invoices.templates_create", "banking.templates_create"):
+                        page_name = msg_type.split(".")[0]
+                        from .frontend.pages.shared.instruction_templates_handlers import handle_templates_create
+                        await handle_templates_create(uid, session_id, msg_payload, page_name)
+                        logger.info(f"[WS] {page_name}.templates_create handled - uid={uid}")
+
+                    elif msg_type in ("routing.templates_update", "invoices.templates_update", "banking.templates_update"):
+                        page_name = msg_type.split(".")[0]
+                        from .frontend.pages.shared.instruction_templates_handlers import handle_templates_update
+                        await handle_templates_update(uid, session_id, msg_payload, page_name)
+                        logger.info(f"[WS] {page_name}.templates_update handled - uid={uid}")
+
+                    elif msg_type in ("routing.templates_delete", "invoices.templates_delete", "banking.templates_delete"):
+                        page_name = msg_type.split(".")[0]
+                        from .frontend.pages.shared.instruction_templates_handlers import handle_templates_delete
+                        await handle_templates_delete(uid, session_id, msg_payload, page_name)
+                        logger.info(f"[WS] {page_name}.templates_delete handled - uid={uid}")
 
                     # ============================================
                     # HR EVENTS (Human Resources - PostgreSQL Neon)

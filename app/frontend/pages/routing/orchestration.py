@@ -56,7 +56,7 @@ def _get_company_context(uid: str, company_id: str) -> Dict[str, Any]:
 
     Cache hierarchy (tries in order):
     1. Level 2: company:{uid}:{company_id}:context (full company_data)
-    2. Legacy: company:{uid}:selected (minimal fallback)
+    2. Fallback Firebase: fetch_all_mandates_light → repopulate Level 2
 
     Returns:
         Dict with: mandate_path, client_uuid, input_drive_doc_id, etc.
@@ -78,9 +78,28 @@ def _get_company_context(uid: str, company_id: str) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"[ROUTING] Level 2 context read error: {e}")
 
-    # Si Level 2 n'existe pas, retourner un dict vide
-    # (pas de fallback legacy - utiliser uniquement Niveau 2)
-    logger.warning(f"[ROUTING] No company context found for uid={uid}, company={company_id}")
+    # 2. Fallback Firebase: Level 2 expiré ou absent → récupérer depuis Firebase
+    logger.warning(f"[ROUTING] Level 2 cache MISS for uid={uid}, company={company_id} — fetching from Firebase...")
+    try:
+        from app.firebase_providers import get_firebase_management
+        from app.wrappers.dashboard_orchestration_handlers import set_selected_company
+
+        firebase = get_firebase_management()
+        mandates = firebase.fetch_all_mandates_light(uid)
+        for m in (mandates or []):
+            m_ids = (m.get("contact_space_id"), m.get("id"), m.get("contact_space_name"))
+            if company_id in m_ids:
+                m["company_id"] = company_id
+                set_selected_company(uid, company_id, m)
+                logger.info(
+                    f"[ROUTING] Context repopulated from Firebase: "
+                    f"mandate_path={m.get('mandate_path', '')[:30]}..."
+                )
+                return m
+    except Exception as e:
+        logger.error(f"[ROUTING] Firebase fallback failed: {e}")
+
+    logger.error(f"[ROUTING] No company context found for uid={uid}, company={company_id}")
     return {}
 
 
@@ -199,6 +218,18 @@ async def handle_routing_orchestrate_init(
             logger.warning(f"[ROUTING] No input_drive_doc_id in session context - skipping Drive fetch")
 
         # ════════════════════════════════════════════════════════════
+        # STEP 1B: Fetch instruction templates
+        # ════════════════════════════════════════════════════════════
+        instruction_templates = []
+        try:
+            from app.firebase_providers import get_firebase_management
+            firebase = get_firebase_management()
+            instruction_templates = firebase.fetch_instruction_templates(mandate_path, "routing")
+            logger.info(f"[ROUTING] Loaded {len(instruction_templates)} instruction templates")
+        except Exception as tpl_err:
+            logger.warning(f"[ROUTING] Failed to load instruction templates: {tpl_err}")
+
+        # ════════════════════════════════════════════════════════════
         # STEP 2: Build combined routing data structure
         # ════════════════════════════════════════════════════════════
         routing_data = {
@@ -236,6 +267,7 @@ async def handle_routing_orchestrate_init(
                 "input_drive_id": input_drive_id,
                 "client_uuid": client_uuid,
             },
+            "instruction_templates": instruction_templates,
             "meta": {
                 "loaded_at": datetime.utcnow().isoformat() + "Z",
                 "version": "1.0",
@@ -519,7 +551,8 @@ async def handle_routing_restart(
                 "payload": {
                     "success": True,
                     "job_id": job_id,
-                    "message": result.get("message", f"Job {job_id} has been successfully reset")
+                    "message": result.get("message", f"Job {job_id} has been successfully reset"),
+                    "_optimistic_update_id": payload.get("_optimistic_update_id"),
                 }
             })
             logger.info(f"[ROUTING] ──────────────────────────────────────────────────────")
@@ -690,7 +723,8 @@ async def handle_routing_delete(
                     "success": True,
                     "job_ids": result.get("deleted_jobs", job_ids),
                     "moved_to_todo": result.get("moved_to_todo", []),
-                    "message": result.get("message", f"{len(job_ids)} documents deleted")
+                    "message": result.get("message", f"{len(job_ids)} documents deleted"),
+                    "_optimistic_update_id": payload.get("_optimistic_update_id"),
                 }
             })
             logger.info(f"[ROUTING] ──────────────────────────────────────────────────────")

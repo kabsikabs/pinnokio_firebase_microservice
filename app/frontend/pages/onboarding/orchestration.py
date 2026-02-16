@@ -811,24 +811,9 @@ async def _continue_dms_creation(
             return
 
         # ═══════════════════════════════════════════════════════════════════════
-        # Company Setup - completed (AFTER all orchestration steps are done)
-        # Frontend will receive this AFTER:
-        # - company.list
-        # - company.details
-        # - Level 1 + Level 2 cached
-        # - llm.session_ready
+        # Complete onboarding (mandate update) - STILL in_progress for the user
+        # We keep the progress spinner visible until redirect is ready
         # ═══════════════════════════════════════════════════════════════════════
-        logger.info("[ONBOARDING FLOW] 📤 Envoi PROGRESS company_setup=completed")
-        await hub.broadcast(uid, {
-            "type": WS_EVENTS.ONBOARDING.PROGRESS,
-            "payload": {
-                "step": "company_setup",
-                "status": "completed",
-                "message": "Company ready"
-            }
-        })
-
-        # Complete onboarding
         logger.info("[ONBOARDING FLOW] 🏁 Appel complete_onboarding...")
         complete_result = await handlers.complete_onboarding(
             user_id=uid,
@@ -846,7 +831,21 @@ async def _continue_dms_creation(
             redirect_url = complete_result.get("redirect_url", "/chat")
             logger.warning(f"[ONBOARDING FLOW] ⚠️ Pas de job_id, fallback: {redirect_url}")
 
-        # Send onboarding complete
+        # ═══════════════════════════════════════════════════════════════════════
+        # NOW mark company_setup as completed + send onboarding.complete together
+        # This ensures the progress spinner stays visible until redirect is ready
+        # ═══════════════════════════════════════════════════════════════════════
+        logger.info("[ONBOARDING FLOW] 📤 Envoi PROGRESS company_setup=completed")
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.ONBOARDING.PROGRESS,
+            "payload": {
+                "step": "company_setup",
+                "status": "completed",
+                "message": "Company ready"
+            }
+        })
+
+        # Send onboarding complete immediately after (no gap)
         logger.info("[ONBOARDING FLOW] 📤 Envoi COMPLETE event")
         await hub.broadcast(uid, {
             "type": WS_EVENTS.ONBOARDING.COMPLETE,

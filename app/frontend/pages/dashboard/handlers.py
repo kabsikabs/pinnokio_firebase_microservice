@@ -174,7 +174,7 @@ class DashboardHandlers:
                 self._get_jobs_by_category(user_id, company_id),
                 self._get_pending_approvals(user_id, company_id),
                 self._get_tasks(user_id, company_id, mandate_path),  # Pass mandate_path for tasks from {mandate_path}/tasks
-                self._get_expenses(user_id, company_id, mandate_path),  # Pass mandate_path for expenses
+                self._get_expenses(user_id, company_id, mandate_path, force_refresh=force_refresh),  # Pass mandate_path + force_refresh for expenses
                 self._get_activity(user_id, company_id, activity_limit) if include_activity else asyncio.coroutine(lambda: [])(),
                 self._get_alerts(user_id, company_id),
                 self._get_balance_info(user_id, company_id, mandate_path),  # Billing with mandate_path
@@ -865,7 +865,8 @@ class DashboardHandlers:
         self,
         user_id: str,
         company_id: str,
-        mandate_path: Optional[str] = None
+        mandate_path: Optional[str] = None,
+        force_refresh: bool = False
     ) -> Dict[str, Any]:
         """
         Récupère les expenses depuis task_manager (comme Reflex JobHistory.fetch_expenses).
@@ -923,16 +924,21 @@ class DashboardHandlers:
             from .cache.unified_cache_manager import get_firebase_cache_manager
             from .firebase_providers import get_firebase_management
 
-            # 1. Tentative de récupération depuis le cache Redis
+            # 1. Tentative de récupération depuis le cache Redis (sauf force_refresh)
             # billing_history (PAS expenses) = Historique des dépenses (task_manager)
             cache = get_firebase_cache_manager()
-            cached = await cache.get_cached_data(
-                user_id,
-                company_id,
-                "billing_history",
-                "details",
-                ttl_seconds=1800  # 30 minutes TTL
-            )
+
+            if not force_refresh:
+                cached = await cache.get_cached_data(
+                    user_id,
+                    company_id,
+                    "billing_history",
+                    "details",
+                    ttl_seconds=1800  # 30 minutes TTL
+                )
+            else:
+                cached = None
+                logger.info(f"_get_expenses: force_refresh - skipping billing_history cache")
 
             if cached:
                 # Handle both WRAPPED format (from unified_cache_manager.set_cached_data)

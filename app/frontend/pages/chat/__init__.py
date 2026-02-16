@@ -36,6 +36,7 @@ from .orchestration import (
     handle_workflow_checklist_set,
     handle_workflow_step_update,
     handle_card_clicked,
+    handle_onboarding_job_stop,
     CHAT_MODES,
 )
 
@@ -57,6 +58,8 @@ __all__ = [
     "handle_workflow_step_update",
     # Interactive cards
     "handle_card_clicked",
+    # Onboarding job management
+    "handle_onboarding_job_stop",
     # Constants
     "CHAT_MODES",
 ]

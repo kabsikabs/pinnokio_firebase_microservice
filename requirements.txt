@@ -15,9 +15,8 @@ tenacity==9.1.2
 telethon==1.42.0
 pydantic>=2.11.0
 python-dotenv==1.1.1
-# ChromaDB dependencies (version 0.4.24 - compatible avec serveur actuel)
-# Note: AsyncHttpClient nécessite version >= 0.4.0 (supporté par 0.4.24)
-chromadb==0.4.14
+# ChromaDB (client only - server runs on AWS 1.0.0)
+chromadb-client==1.0.0
 
 # Additional dependencies for ChromaDB
 numpy>=1.24.0
@@ -47,7 +46,7 @@ boto3>=1.35.0
 # PostgreSQL async driver pour Neon (module HR)
 asyncpg>=0.29.0
 # HTTP async client pour Jobber HR
-httpx>=0.27.0
+httpx==0.27.0
 # pytest-asyncio pour tests asynchrones
 pytest>=7.0.0
 pytest-asyncio>=0.23.0

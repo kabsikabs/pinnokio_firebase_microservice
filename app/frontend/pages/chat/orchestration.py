@@ -25,12 +25,14 @@ Created: 2026-01-19
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from app.redis_client import get_redis
 from app.ws_events import WS_EVENTS
 from app.ws_hub import hub
 from app.wrappers.page_state_manager import get_page_state_manager
+from app.firebase_providers import get_firebase_management
+from app.active_job_manager import ActiveJobManager
 
 from .handlers import get_chat_handlers
 
@@ -171,6 +173,12 @@ async def _run_chat_orchestration(
         logger.info(f"[CHAT] Loaded {len(tasks)} tasks")
 
         # ─────────────────────────────────────────────────
+        # Step 2.5: Check for pending onboarding job
+        # ─────────────────────────────────────────────────
+        pending_jobs = await _check_pending_jobs(uid=uid, mandate_path=mandate_path)
+        logger.info(f"[CHAT] Step 2.5: Found {len(pending_jobs)} pending jobs")
+
+        # ─────────────────────────────────────────────────
         # Step 3: Load selected session history (if provided)
         # ─────────────────────────────────────────────────
         messages = []
@@ -201,6 +209,7 @@ async def _run_chat_orchestration(
         full_data = {
             "sessions": sessions,
             "tasks": tasks,
+            "pending_jobs": pending_jobs,
             "current_session": current_session,
             "messages": messages,
             "company_id": company_id,
@@ -993,6 +1002,126 @@ async def handle_card_clicked(
 
 
 # ============================================
+# PENDING JOBS HELPERS
+# ============================================
+
+async def _check_pending_jobs(uid: str, mandate_path: str) -> List[Dict[str, Any]]:
+    """
+    Check clients/{uid}/temp_data/onboarding + active_jobs/onboarding status.
+
+    Returns a list of pending job descriptors for the frontend sidebar.
+    """
+    firebase = get_firebase_management()
+    pending_jobs: List[Dict[str, Any]] = []
+
+    try:
+        # 1. Read temp_data/onboarding
+        onboarding_doc = await asyncio.to_thread(
+            firebase.get_document, f"clients/{uid}/temp_data/onboarding"
+        )
+        if not onboarding_doc:
+            return pending_jobs
+
+        # 2. Check active_jobs/onboarding for running status
+        queue_status = await asyncio.to_thread(
+            ActiveJobManager.get_queue_status, mandate_path, "onboarding",
+        )
+        running = queue_status.get("running_count", 0)
+        pending = queue_status.get("pending_count", 0)
+
+        if running > 0:
+            job_status = "running"
+        elif pending > 0:
+            job_status = "queued"
+        elif onboarding_doc.get("job_active", False):
+            job_status = "running"  # Legacy flag still active
+        else:
+            job_status = "idle"
+
+        job_id = onboarding_doc.get("job_id", f"onboarding_{uid}")
+        pending_jobs.append({
+            "type": "onboarding",
+            "job_id": job_id,
+            "name": "Company Onboarding",
+            "description": "Setup Chart of Accounts, ERP connections, and document management",
+            "status": job_status,
+            "mandate_path": mandate_path,
+            "config": {
+                "analysis_method": onboarding_doc.get("analysis_method"),
+                "accounting_systems": onboarding_doc.get("accounting_systems"),
+                "initial_context_data": onboarding_doc.get("initial_context_data", ""),
+            },
+        })
+    except Exception as e:
+        logger.warning(f"[CHAT] Error checking pending jobs: {e}")
+
+    return pending_jobs
+
+
+# ============================================
+# ONBOARDING JOB HANDLERS
+# ============================================
+
+async def handle_onboarding_job_stop(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Handle chat.onboarding_job_stop WebSocket event.
+
+    Sends stop signal via ActiveJobManager.request_stop().
+    """
+    mandate_path = payload.get("mandate_path")
+    company_id = payload.get("company_id")
+    job_id = payload.get("job_id")
+
+    if not mandate_path or not job_id:
+        return {
+            "type": "chat.onboarding_job_stop",
+            "payload": {"success": False, "error": "Missing mandate_path or job_id"},
+        }
+
+    logger.info(f"[CHAT] Onboarding job stop: uid={uid} job_id={job_id}")
+
+    try:
+        from app.wrappers.job_actions_handler import handle_job_stop
+
+        company_data = {
+            "company_id": company_id,
+            "mandate_path": mandate_path,
+        }
+
+        result = await handle_job_stop(
+            uid=uid,
+            job_type="onboarding",
+            payload={"job_ids": [job_id]},
+            company_data=company_data,
+        )
+
+        # Broadcast status update
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.CHAT.ONBOARDING_JOB_STATUS,
+            "payload": {
+                "job_id": job_id,
+                "status": "stopping",
+            },
+        })
+
+        return {
+            "type": "chat.onboarding_job_stop",
+            "payload": result,
+        }
+
+    except Exception as e:
+        logger.error(f"[CHAT] Onboarding job stop error: {e}", exc_info=True)
+        return {
+            "type": "chat.onboarding_job_stop",
+            "payload": {"success": False, "error": str(e)},
+        }
+
+
+# ============================================
 # EXPORTS
 # ============================================
 
@@ -1007,5 +1136,6 @@ __all__ = [
     "handle_workflow_checklist_set",
     "handle_workflow_step_update",
     "handle_card_clicked",
+    "handle_onboarding_job_stop",
     "CHAT_MODES",
 ]

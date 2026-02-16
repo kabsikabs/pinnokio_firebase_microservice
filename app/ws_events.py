@@ -219,6 +219,16 @@ class InvoiceEvents:
     INSTRUCTIONS_SAVE = "invoices.instructions_save"
     INSTRUCTIONS_SAVED = "invoices.instructions_saved"
 
+    # Instruction Templates CRUD
+    TEMPLATES_LIST = "invoices.templates_list"
+    TEMPLATES_DATA = "invoices.templates_data"
+    TEMPLATES_CREATE = "invoices.templates_create"
+    TEMPLATES_CREATED = "invoices.templates_created"
+    TEMPLATES_UPDATE = "invoices.templates_update"
+    TEMPLATES_UPDATED = "invoices.templates_updated"
+    TEMPLATES_DELETE = "invoices.templates_delete"
+    TEMPLATES_DELETED = "invoices.templates_deleted"
+
     # Incremental updates (optimistic/pessimistic status changes)
     ITEM_UPDATE = "invoices.item_update"             # Items moved between lists based on status
 
@@ -351,6 +361,10 @@ class ChatEvents:
     START_ONBOARDING = "chat.start_onboarding"           # Request to start onboarding chat
     ONBOARDING_STARTED = "chat.onboarding_started"       # Onboarding chat started confirmation
 
+    # Onboarding job management (sidebar card)
+    ONBOARDING_JOB_STOP = "chat.onboarding_job_stop"     # Stop onboarding job from sidebar
+    ONBOARDING_JOB_STATUS = "chat.onboarding_job_status" # Status update for onboarding job
+
     # Error
     ERROR = "chat.error"                           # Chat-specific error
 
@@ -386,6 +400,16 @@ class RoutingEvents:
     # Instructions
     INSTRUCTIONS_SAVE = "routing.instructions_save" # Save document instructions
     INSTRUCTIONS_SAVED = "routing.instructions_saved"  # Instructions saved
+
+    # Instruction Templates CRUD
+    TEMPLATES_LIST = "routing.templates_list"
+    TEMPLATES_DATA = "routing.templates_data"
+    TEMPLATES_CREATE = "routing.templates_create"
+    TEMPLATES_CREATED = "routing.templates_created"
+    TEMPLATES_UPDATE = "routing.templates_update"
+    TEMPLATES_UPDATED = "routing.templates_updated"
+    TEMPLATES_DELETE = "routing.templates_delete"
+    TEMPLATES_DELETED = "routing.templates_deleted"
 
     # Upload
     UPLOAD = "routing.upload"                       # Upload files for processing
@@ -714,6 +738,16 @@ class BankingEvents:
     # Instructions
     INSTRUCTIONS_SAVE = "banking.instructions_save"
     INSTRUCTIONS_SAVED = "banking.instructions_saved"
+
+    # Instruction Templates CRUD
+    TEMPLATES_LIST = "banking.templates_list"
+    TEMPLATES_DATA = "banking.templates_data"
+    TEMPLATES_CREATE = "banking.templates_create"
+    TEMPLATES_CREATED = "banking.templates_created"
+    TEMPLATES_UPDATE = "banking.templates_update"
+    TEMPLATES_UPDATED = "banking.templates_updated"
+    TEMPLATES_DELETE = "banking.templates_delete"
+    TEMPLATES_DELETED = "banking.templates_deleted"
 
     # Incremental updates (optimistic/pessimistic status changes)
     ITEM_UPDATE = "banking.item_update"             # Items moved between lists based on status

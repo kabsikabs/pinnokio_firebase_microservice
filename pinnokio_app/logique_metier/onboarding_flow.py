@@ -1086,7 +1086,7 @@ class ONBOARDING_MANAGEMENT:
         erp_data = {}
 
         if erp_type == 'odoo':
-            secret_name=create_secret(accounting_systems['accounting_api_key'])
+            secret_name=create_secret(accounting_systems['accounting_api_key'], erp_name=erp_type)
             print(f"   - Secret créé: {secret_name}")
             erp_data = {
                 'erp_type': 'odoo',

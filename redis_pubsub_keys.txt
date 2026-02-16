@@ -1,0 +1,78 @@
+FORMATS DES CLÉS (CHANNELS) ET PAYLOADS REDIS PUBSUB
+===================================================
+
+Ce fichier détaille comment formater les clés (channels) et les données (payloads JSON) pour qu'ils soient correctement traités par le système (notamment `RedisSubscriber`).
+
+1. Notifications Utilisateur (Niveau Global)
+--------------------------------------------
+Channel : user:{uid}/notifications
+Usage   : Notifications générales visibles par l'utilisateur quel que soit son contexte.
+Payload (JSON) :
+{
+  "type": "notification_type",  // Requis (ex: "notification_update", "job_created")
+  "job_id": "job_123",          // Requis
+  "status": "pending",          // Optionnel (sera normalisé)
+  "functionName": "routing",    // Optionnel (aide à la normalisation du statut)
+  ... autres données ...
+}
+
+2. Messages Directs (Niveau Global - Messenger)
+-----------------------------------------------
+Channel : user:{uid}/direct_message_notif
+Usage   : Notification prioritaire de nouveau message (chat direct).
+Payload (JSON) :
+{
+  "message_id": "msg_123",      // Requis
+  "action_type": "new_message", // Requis
+  "priority": "high",           // Optionnel (défaut: "normal")
+  ... données du message ...
+}
+
+3. Gestionnaire de Tâches (Niveau Business)
+-------------------------------------------
+Channel : user:{uid}/task_manager
+Usage   : Mises à jour pour le Task Manager (nécessite que l'utilisateur soit sur la page concernée).
+Payload (JSON) :
+{
+  "type": "task_updated",       // Requis (ex: "task_manager_created")
+  "job_id": "job_123",          // Requis
+  "department": "accounting",   // Requis (mappé vers un domaine: accounting->invoices, banking->bank, etc.)
+  "collection_id": "comp_123",  // Requis (ou "company_id") - Pour vérifier le contexte utilisateur
+  "status": "approved",         // Optionnel (sera normalisé)
+  ... autres données ...
+}
+
+4. Chat de Job (Jobbers -> LLM)
+-------------------------------
+Channel : user:{uid}/{collection}/job_chats/{job_id}/messages
+Usage   : Messages liés à un job spécifique, routés vers le `llm_gateway`.
+Payload (JSON) :
+{
+  "job_id": "job_123",          // Requis
+  "collection_name": "invoices",// Requis
+  "thread_key": "thread_abc",   // Optionnel (défaut = job_id)
+  "message": "Contenu du msg"   // Requis (ou tout le payload est considéré comme message)
+}
+
+5. Pending Approval (Validation - Destinataire Inconnu/Frontend ?)
+------------------------------------------------------------------
+Channel : user:{uid}/pending_approval
+Usage   : Mises à jour d'approbation. 
+Note    : Ce format est publié par `FirebaseManagement` mais N'EST PAS traité par `RedisSubscriber` (tombe en "UNKNOWN CHANNEL"). Il est probablement destiné au Frontend directement ou à un autre service.
+Payload publié (JSON) :
+{
+  "type": "pending_approval_updated",
+  "action": "update",           // "add", "update", "remove"
+  "department": "routing",
+  "job_id": "item_123",
+  "company_id": "comp_123",
+  "data": { ... },
+  "timestamp": "ISO8601"
+}
+
+Règles Générales
+----------------
+- Tous les payloads doivent être des chaînes JSON valides.
+- Le subscriber écoute sur le pattern `user:*`.
+- Les messages sont ignorés si l'UID ne peut pas être extrait du canal.
+- Les messages "Chat" généraux (`user:{uid}/*/messages`) sont explicitement ignorés car gérés ailleurs.

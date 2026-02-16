@@ -52,13 +52,14 @@ def _get_company_context(uid: str, company_id: str) -> Dict[str, Any]:
 
     Cache hierarchy (tries in order):
     1. Level 2: company:{uid}:{company_id}:context (full company_data)
+    2. Fallback Firebase: fetch_all_mandates_light → repopulate Level 2
 
     Returns:
         Dict with: mandate_path, client_uuid, bank_erp, etc.
     """
     redis_client = get_redis()
 
-    # Level 2 context key (full company_data)
+    # 1. Level 2 context key (full company_data)
     level2_key = f"company:{uid}:{company_id}:context"
     try:
         cached = redis_client.get(level2_key)
@@ -73,7 +74,28 @@ def _get_company_context(uid: str, company_id: str) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"[BANKING] Level 2 context read error: {e}")
 
-    logger.warning(f"[BANKING] No company context found for uid={uid}, company={company_id}")
+    # 2. Fallback Firebase: Level 2 expiré ou absent → récupérer depuis Firebase
+    logger.warning(f"[BANKING] Level 2 cache MISS for uid={uid}, company={company_id} — fetching from Firebase...")
+    try:
+        from app.firebase_providers import get_firebase_management
+        from app.wrappers.dashboard_orchestration_handlers import set_selected_company
+
+        firebase = get_firebase_management()
+        mandates = firebase.fetch_all_mandates_light(uid)
+        for m in (mandates or []):
+            m_ids = (m.get("contact_space_id"), m.get("id"), m.get("contact_space_name"))
+            if company_id in m_ids:
+                m["company_id"] = company_id
+                set_selected_company(uid, company_id, m)
+                logger.info(
+                    f"[BANKING] Context repopulated from Firebase: "
+                    f"mandate_path={m.get('mandate_path', '')[:30]}..."
+                )
+                return m
+    except Exception as e:
+        logger.error(f"[BANKING] Firebase fallback failed: {e}")
+
+    logger.error(f"[BANKING] No company context found for uid={uid}, company={company_id}")
     return {}
 
 
@@ -285,6 +307,18 @@ async def handle_banking_orchestrate_init(
             })
 
         # ════════════════════════════════════════════════════════════
+        # STEP 3B: Fetch instruction templates
+        # ════════════════════════════════════════════════════════════
+        instruction_templates = []
+        try:
+            from app.firebase_providers import get_firebase_management
+            firebase = get_firebase_management()
+            instruction_templates = firebase.fetch_instruction_templates(mandate_path, "banking")
+            logger.info(f"[BANKING] Loaded {len(instruction_templates)} instruction templates")
+        except Exception as tpl_err:
+            logger.warning(f"[BANKING] Failed to load instruction templates: {tpl_err}")
+
+        # ════════════════════════════════════════════════════════════
         # STEP 4: Build combined banking data structure
         # ════════════════════════════════════════════════════════════
         banking_data = {
@@ -321,6 +355,7 @@ async def handle_banking_orchestrate_init(
                 "id": company_id,
                 "mandate_path": mandate_path,
             },
+            "instruction_templates": instruction_templates,
             "meta": {
                 "loaded_at": datetime.utcnow().isoformat() + "Z",
                 "version": "1.0",
@@ -603,9 +638,11 @@ async def handle_banking_stop(
             batch_ids=batch_ids
         )
 
+        stopped_payload = dict(result) if isinstance(result, dict) else {"success": True}
+        stopped_payload["_optimistic_update_id"] = payload.get("_optimistic_update_id")
         await hub.broadcast(uid, {
             "type": WS_EVENTS.BANKING.STOPPED,
-            "payload": result
+            "payload": stopped_payload
         })
 
     except Exception as e:
@@ -643,9 +680,11 @@ async def handle_banking_delete(
             transaction_ids
         )
 
+        deleted_payload = dict(result) if isinstance(result, dict) else {"success": True}
+        deleted_payload["_optimistic_update_id"] = payload.get("_optimistic_update_id")
         await hub.broadcast(uid, {
             "type": WS_EVENTS.BANKING.DELETED,
-            "payload": result
+            "payload": deleted_payload
         })
 
     except Exception as e:

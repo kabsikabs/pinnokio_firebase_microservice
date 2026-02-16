@@ -5436,6 +5436,7 @@ class FirebaseManagement:
             # Construire la structure de base du mandat
             mandate = {
                 "id": mandate_doc.id,
+                "mandate_path": mandate_path,
                 "contact_space_name": doc_data.get('contact_space_name', ""),
                 "contact_space_id": doc_data.get('contact_space_id', ""),
                 "bank_erp": doc_data.get('bank_erp', ""),
@@ -7288,7 +7289,7 @@ class FirebaseManagement:
             current_data = job_doc.to_dict()
             print(f"Current document data before deletion: {list(current_data.keys())}")
             
-            # Suppression des champs APBookeeper_step_status, current_step et Document_information en une seule opération
+            # Suppression des champs dynamiques ajoutés pendant le traitement
             fields_to_delete = {}
             # Note: Le champ s'appelle APBookeeper avec un seul 'k', pas APBookkeeper
             if 'APBookeeper_step_status' in current_data:
@@ -7302,6 +7303,10 @@ class FirebaseManagement:
             if 'Document_information' in current_data:
                 fields_to_delete['Document_information'] = firestore.DELETE_FIELD
                 print(f"Marking Document_information for deletion")
+            
+            if 'status' in current_data:
+                fields_to_delete['status'] = firestore.DELETE_FIELD
+                print(f"Marking status for deletion (was: {current_data.get('status')})")
             
             # Exécuter la suppression si des champs existent
             if fields_to_delete:
@@ -11307,6 +11312,100 @@ class FirebaseRealtimeChat:
         except Exception as e:
             print(f"Erreur lors de la récupération des messages: {e}")
             return []
+
+    # ════════════════════════════════════════════════════════════
+    # Instruction Templates CRUD
+    # Path: {mandate_path}/working_doc/instruction_templates/{page_name}/{template_id}
+    # ════════════════════════════════════════════════════════════
+
+    def fetch_instruction_templates(self, mandate_path: str, page_name: str) -> List[Dict]:
+        """
+        Retourne tous les instruction templates pour une page donnée.
+
+        Args:
+            mandate_path: Chemin du mandat
+            page_name: "routing" | "invoices" | "banking"
+
+        Returns:
+            Liste de dicts [{id, title, content, created_at}, ...]
+        """
+        try:
+            collection_path = f"{mandate_path}/working_doc/instruction_templates/{page_name}/items"
+            docs = self.db.collection(collection_path).stream()
+            templates = [{"id": doc.id, **doc.to_dict()} for doc in docs]
+            print(f"✅ [FIREBASE] Fetched {len(templates)} instruction templates for {page_name}")
+            return templates
+        except Exception as e:
+            print(f"❌ [FIREBASE] Error fetching instruction templates for {page_name}: {e}")
+            return []
+
+    def create_instruction_template(self, mandate_path: str, page_name: str, template_data: Dict) -> Dict:
+        """
+        Crée un nouveau instruction template. Génère l'ID côté serveur.
+
+        Args:
+            mandate_path: Chemin du mandat
+            page_name: "routing" | "invoices" | "banking"
+            template_data: {title, content, created_at}
+
+        Returns:
+            {id, title, content, created_at} ou {} en cas d'erreur
+        """
+        try:
+            collection_path = f"{mandate_path}/working_doc/instruction_templates/{page_name}/items"
+            doc_ref = self.db.collection(collection_path).document()
+            doc_ref.set(template_data)
+            result = {"id": doc_ref.id, **template_data}
+            print(f"✅ [FIREBASE] Created instruction template {doc_ref.id} for {page_name}")
+            return result
+        except Exception as e:
+            print(f"❌ [FIREBASE] Error creating instruction template for {page_name}: {e}")
+            return {}
+
+    def update_instruction_template(self, mandate_path: str, page_name: str, template_id: str, update_data: Dict) -> bool:
+        """
+        Met à jour un instruction template existant.
+
+        Args:
+            mandate_path: Chemin du mandat
+            page_name: "routing" | "invoices" | "banking"
+            template_id: ID du template
+            update_data: Champs à mettre à jour {title?, content?}
+
+        Returns:
+            True si succès, False sinon
+        """
+        try:
+            collection_path = f"{mandate_path}/working_doc/instruction_templates/{page_name}/items"
+            doc_ref = self.db.collection(collection_path).document(template_id)
+            doc_ref.update(update_data)
+            print(f"✅ [FIREBASE] Updated instruction template {template_id} for {page_name}")
+            return True
+        except Exception as e:
+            print(f"❌ [FIREBASE] Error updating instruction template {template_id} for {page_name}: {e}")
+            return False
+
+    def delete_instruction_template(self, mandate_path: str, page_name: str, template_id: str) -> bool:
+        """
+        Supprime un instruction template par ID.
+
+        Args:
+            mandate_path: Chemin du mandat
+            page_name: "routing" | "invoices" | "banking"
+            template_id: ID du template
+
+        Returns:
+            True si succès, False sinon
+        """
+        try:
+            collection_path = f"{mandate_path}/working_doc/instruction_templates/{page_name}/items"
+            doc_ref = self.db.collection(collection_path).document(template_id)
+            doc_ref.delete()
+            print(f"✅ [FIREBASE] Deleted instruction template {template_id} for {page_name}")
+            return True
+        except Exception as e:
+            print(f"❌ [FIREBASE] Error deleting instruction template {template_id} for {page_name}: {e}")
+            return False
 
 def get_firebase_management() -> FirebaseManagement:
     global _FIREBASE_MANAGEMENT_SINGLETON

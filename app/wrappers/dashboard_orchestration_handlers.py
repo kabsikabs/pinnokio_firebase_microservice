@@ -526,6 +526,28 @@ async def handle_refresh(
     # Get mandate_path from company_data if available
     mandate_path = company_data.get("mandate_path", "") if company_data else ""
 
+    # Fallback: si mandate_path vide (cache Level 2 expiré), récupérer depuis Firebase
+    if not mandate_path and company_id:
+        try:
+            firebase_mgmt = FirebaseManagement()
+            mandates = await asyncio.to_thread(firebase_mgmt.fetch_all_mandates_light, uid)
+            for m in (mandates or []):
+                m_ids = (m.get("contact_space_id"), m.get("id"), m.get("contact_space_name"))
+                if company_id in m_ids:
+                    mandate_path = m.get("mandate_path", "")
+                    if mandate_path:
+                        if company_data is None:
+                            company_data = {}
+                        company_data["mandate_path"] = mandate_path
+                        # Re-cache Level 2 pour éviter ce problème à nouveau
+                        set_selected_company(uid, company_id, company_data)
+                        logger.info(f"[ORCHESTRATION] Refresh: mandate_path recovered from Firebase: {mandate_path[:50]}...")
+                        break
+            if not mandate_path:
+                logger.warning(f"[ORCHESTRATION] Refresh: mandate_path STILL EMPTY after fallback for company_id={company_id}")
+        except Exception as fb_err:
+            logger.warning(f"[ORCHESTRATION] Refresh: mandate_path fallback failed: {fb_err}")
+
     # Re-populate domain caches from sources BEFORE reading metrics
     # Without this, full_data would read stale domain caches
     if company_data:
@@ -566,6 +588,26 @@ async def handle_refresh(
         "type": WS_EVENTS.DASHBOARD.FULL_DATA,
         "payload": result
     })
+
+    # Refresh approvals (same as Step 3.5 in initial orchestration)
+    if mandate_path:
+        try:
+            from .approval_handlers import get_approval_handlers
+            approval_handlers = get_approval_handlers()
+            approvals_result = await approval_handlers.get_pending_approvals(
+                user_id=uid,
+                company_id=company_id,
+                mandate_path=mandate_path,
+                force_refresh=True,
+            )
+            if approvals_result.get("success"):
+                await hub.broadcast(uid, {
+                    "type": WS_EVENTS.DASHBOARD.APPROVALS_UPDATE,
+                    "payload": approvals_result
+                })
+                logger.info(f"[ORCHESTRATION] Refresh: Approvals reloaded")
+        except Exception as approvals_err:
+            logger.warning(f"[ORCHESTRATION] Refresh: Approvals reload error (non-blocking): {approvals_err}")
 
     return {
         "type": "dashboard.refresh",

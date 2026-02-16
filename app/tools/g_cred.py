@@ -81,7 +81,7 @@ def get_secret(secret_name: str) -> str:
     return _access_secret(client, secret_name)
 
 
-def create_secret(secret_data: str) -> str:
+def create_secret(secret_data: str, erp_name: str = "unknown") -> str:
     project_id = os.getenv("GOOGLE_PROJECT_ID")
     if not project_id:
         raise RuntimeError("GOOGLE_PROJECT_ID requis")
@@ -89,7 +89,7 @@ def create_secret(secret_data: str) -> str:
 
     import uuid
 
-    secret_id = f"created-{uuid.uuid4().hex[:8]}"
+    secret_id = f"erp_{erp_name}_code_{uuid.uuid4().hex[:8]}"
     parent = f"projects/{project_id}"
     secret = client.create_secret(
         request={
@@ -101,7 +101,7 @@ def create_secret(secret_data: str) -> str:
     client.add_secret_version(
         request={"parent": secret.name, "payload": {"data": secret_data.encode("utf-8")}}
     )
-    return secret.name
+    return secret_id
 
 
 def delete_secret(secret_name: str) -> bool:

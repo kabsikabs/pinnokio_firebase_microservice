@@ -60,6 +60,7 @@ from app.realtime.contextual_publisher import (
     _get_ttl_for_cache,
 )
 from app.status_normalization import StatusNormalizer
+from app.active_job_manager import ActiveJobManager
 from app.llm_service.redis_namespaces import (
     build_business_key,
     get_ttl_for_domain,
@@ -95,6 +96,24 @@ def _extract_uid_from_channel(channel: str) -> Optional[str]:
     return None
 
 
+def _extract_active_job_type(department: str) -> Optional[str]:
+    """
+    Map department name to active_jobs job_type.
+    Returns None if the department doesn't map to an active_jobs type.
+    """
+    mapping = {
+        "router": "router",
+        "routing": "router",
+        "apbookeeper": "apbookeeper",
+        "accounting": "apbookeeper",
+        "banker": "banker",
+        "bankbookeeper": "banker",
+        "banking": "banker",
+        "onboarding": "onboarding",
+    }
+    return mapping.get(department.lower()) if department else None
+
+
 def _extract_department_to_domain(department: str) -> str:
     """
     Convertit un department en domaine métier.
@@ -116,11 +135,13 @@ def _extract_department_to_domain(department: str) -> str:
         "apbookeeper": "invoices",  # Workers envoient "APbookeeper"
         "banking": "bank",
         "banker": "bank",           # Workers envoient "Banker"
+        "bankbookeeper": "bank",    # Backend _persist_jobs écrit "Bankbookeeper"
         "routing": "routing",
         "router": "routing",
         "hr": "hr",
         "expenses": "expenses",
         "coa": "coa",
+        "onboarding": "onboarding",
     }
     return department_map.get(department.lower(), department.lower())
 
@@ -363,6 +384,10 @@ class RedisSubscriber:
                 logger.debug("[REDIS_SUBSCRIBER] → routing to: job_chat handler")
                 await self._handle_job_chat_message(uid, channel, message_data)
 
+            elif channel.endswith("/pending_approval"):
+                logger.debug("[REDIS_SUBSCRIBER] → routing to: pending_approval handler")
+                await self._handle_pending_approval_message(uid, channel, message_data)
+
             elif "/messages" in channel:
                 logger.debug("[REDIS_SUBSCRIBER] → routing to: IGNORE (chat handled by llm_manager)")
                 # Chat déjà géré par llm_manager, ne rien faire
@@ -415,19 +440,43 @@ class RedisSubscriber:
             is_connected = hub.is_user_connected(uid)
             logger.debug("[REDIS_SUBSCRIBER] → user_connected=%s", is_connected)
 
-            # Étape 1: Mise à jour du cache USER (TOUJOURS)
-            logger.info("[REDIS_SUBSCRIBER] → Step 1: Updating USER cache...")
+            # Étape 1: Mise à jour du cache USER — upsert par docId (TOUJOURS)
+            logger.info("[REDIS_SUBSCRIBER] → Step 1: Updating USER cache (upsert by docId)...")
+            ws_action = "new"
             try:
-                cache_key = _get_cache_key(CacheLevel.USER, uid, cache_subkey="notifications")
+                cache_key = _get_cache_key(CacheLevel.USER, uid, subkey="notifications")
                 ttl = _get_ttl_for_cache(CacheLevel.USER)
 
-                # Préparer le payload pour le cache
-                cache_payload = {
-                    "action": "new" if msg_type in ["notification_update", "job_created"] else "update",
-                    "data": message_data
-                }
-                _update_cache(CacheLevel.USER, cache_key, cache_payload, ttl)
-                logger.debug("[REDIS_SUBSCRIBER] → cache_key=%s", cache_key)
+                redis = get_redis()
+                raw_notif = redis.get(cache_key)
+                notif_cache = {}
+                if raw_notif:
+                    try:
+                        notif_cache = json.loads(raw_notif) if isinstance(raw_notif, str) else json.loads(raw_notif.decode())
+                    except json.JSONDecodeError:
+                        notif_cache = {}
+                if isinstance(notif_cache, list):
+                    notif_cache = {"items": notif_cache}
+                notif_items = notif_cache.get("items", [])
+
+                # Upsert: supprimer l'ancienne entrée si même docId
+                doc_id = message_data.get("docId") or message_data.get("doc_id")
+                if doc_id:
+                    original_len = len(notif_items)
+                    notif_items = [
+                        item for item in notif_items
+                        if item.get("docId") != doc_id and item.get("doc_id") != doc_id
+                    ]
+                    if len(notif_items) < original_len:
+                        ws_action = "update"
+
+                # Insérer en tête (la notification complète, pas le wrapper)
+                notif_items.insert(0, message_data)
+                notif_cache["items"] = notif_items[:100]
+                redis.setex(cache_key, ttl, json.dumps(notif_cache))
+
+                logger.debug("[REDIS_SUBSCRIBER] → notification upserted: docId=%s ws_action=%s total=%d",
+                             doc_id, ws_action, len(notif_items))
 
             except Exception as cache_error:
                 logger.error("[REDIS_SUBSCRIBER] cache_update_failed uid=%s error=%s", uid, str(cache_error), exc_info=True)
@@ -437,7 +486,7 @@ class RedisSubscriber:
                 logger.info("[REDIS_SUBSCRIBER] → Step 2: Publishing via WebSocket...")
                 try:
                     event_type = WS_EVENTS.NOTIFICATION.DELTA
-                    payload = {"action": "new", "data": message_data}
+                    payload = {"action": ws_action, "data": message_data}
 
                     # Publier via contextual_publisher (niveau USER)
                     published = await publish_user_event(
@@ -501,7 +550,7 @@ class RedisSubscriber:
             # Étape 1: Mise à jour du cache USER (TOUJOURS)
             logger.info("[REDIS_SUBSCRIBER] → Step 1: Updating USER cache (messages)...")
             try:
-                cache_key = _get_cache_key(CacheLevel.USER, uid, cache_subkey="messages")
+                cache_key = _get_cache_key(CacheLevel.USER, uid, subkey="messages")
                 ttl = _get_ttl_for_cache(CacheLevel.USER)
 
                 # Préparer le payload pour le cache
@@ -734,6 +783,20 @@ class RedisSubscriber:
                 uid, domain, str(e), exc_info=True
             )
 
+    @staticmethod
+    def _normalize_department(dept: str) -> str:
+        """Normalise le nom du département pour cohérence avec _get_expenses() dans handlers.py."""
+        dept_lower = (dept or "").lower().strip()
+        if dept_lower in ("apbookeeper", "ap_bookeeper"):
+            return "APBookkeeper"
+        elif dept_lower == "router":
+            return "Router"
+        elif dept_lower in ("banker", "bank"):
+            return "Banker"
+        elif dept_lower in ("chat", "chat_usage", "chat_daily"):
+            return "Chat"
+        return dept or "Other"
+
     def _update_billing_history_cache(
         self,
         uid: str,
@@ -775,37 +838,61 @@ class RedisSubscriber:
                     break
 
             if existing_item is None:
-                logger.warning(
-                    "[REDIS_SUBSCRIBER] billing_history item NOT FOUND job_id=%s in %d items (cache may not have it yet)",
+                # Item pas encore dans le cache — le créer depuis les données PubSub
+                logger.info(
+                    "[REDIS_SUBSCRIBER] billing_history item NOT FOUND job_id=%s in %d items, creating from PubSub",
                     job_id, len(items_list)
                 )
-                # Log some jobIds for debugging
-                sample_ids = [item.get("jobId", item.get("id", "?")) for item in items_list[:5]]
-                logger.warning("[REDIS_SUBSCRIBER] billing_history sample jobIds: %s", sample_ids)
-                return None
+                item_data = message_data.get("data", message_data)
+                raw_dept = message_data.get("department") or item_data.get("department") or ""
+                existing_item = {
+                    "jobId": job_id,
+                    "id": job_id,
+                    "status": message_data.get("status", item_data.get("status", "unknown")),
+                    "department": self._normalize_department(raw_dept),
+                    "fileName": item_data.get("file_name", ""),
+                    "mandatePath": message_data.get("mandate_path", item_data.get("mandate_path", "")),
+                    "createdAt": item_data.get("started_at", item_data.get("last_event_time", "")),
+                    "timestamp": item_data.get("started_at") or item_data.get("last_event_time") or message_data.get("timestamp", ""),
+                    "totalTokens": 0,
+                    "cost": 0.0,
+                    "currency": "CHF",
+                    "currentStep": "",
+                    "lastMessage": "",
+                    "lastOutcome": "",
+                }
+                items_list.insert(0, existing_item)
 
             # Merger les champs du payload PubSub → ExpenseItem (camelCase)
-            # Champs directs task_manager
-            if "status" in message_data:
+            # Les champs peuvent être au top-level OU dans message_data["data"]
+            item_data = message_data.get("data", {})
+
+            # Status (top-level ou nested)
+            raw_status = message_data.get("status") or item_data.get("status")
+            if raw_status:
                 old_status = existing_item.get("status", "N/A")
-                existing_item["status"] = message_data["status"]
+                existing_item["status"] = raw_status
                 logger.info(
                     "[REDIS_SUBSCRIBER] billing_history STATUS CHANGE job_id=%s: '%s' → '%s'",
-                    job_id, old_status, message_data["status"]
+                    job_id, old_status, raw_status
                 )
-            if "current_step" in message_data:
-                existing_item["currentStep"] = message_data["current_step"]
-            if "last_message" in message_data:
-                existing_item["lastMessage"] = message_data["last_message"]
-            if "last_outcome" in message_data:
-                existing_item["lastOutcome"] = message_data["last_outcome"]
-            if "file_name" in message_data:
-                existing_item["fileName"] = message_data["file_name"]
-            if "uri_file_link" in message_data:
-                existing_item["uriFileLink"] = message_data["uri_file_link"]
+            for src_key, dst_key in (
+                ("current_step", "currentStep"),
+                ("last_message", "lastMessage"),
+                ("last_outcome", "lastOutcome"),
+                ("file_name", "fileName"),
+                ("uri_file_link", "uriFileLink"),
+            ):
+                val = message_data.get(src_key) or item_data.get(src_key)
+                if val:
+                    existing_item[dst_key] = val
+            # Department (normaliser pour cohérence avec _get_expenses() dans handlers.py)
+            dept = message_data.get("department") or item_data.get("department")
+            if dept:
+                existing_item["department"] = self._normalize_department(dept)
 
-            # Billing data
-            billing = message_data.get("billing")
+            # Billing data (top-level OU imbriqué dans data)
+            billing = message_data.get("billing") or item_data.get("billing")
             if isinstance(billing, dict):
                 if "total_tokens" in billing:
                     existing_item["totalTokens"] = int(billing["total_tokens"] or 0)
@@ -880,6 +967,111 @@ class RedisSubscriber:
             )
             return None
 
+    async def _handle_pending_approval_message(self, uid: str, channel: str, message_data: Dict[str, Any]) -> None:
+        """
+        Traite un message du canal pending_approval.
+
+        Canal: user:{uid}/pending_approval
+        Niveau: BUSINESS (dashboard)
+        Règle: Toujours invalider le cache approval + publier WS si utilisateur connecté sur la même company
+        """
+        try:
+            action = message_data.get("action", "add")
+            job_id = message_data.get("job_id", "unknown")
+            company_id = message_data.get("company_id", "")
+            raw_department = message_data.get("department", "")
+
+            # Normaliser le département pour le frontend (attend "router"|"banker"|"apbookeeper")
+            _PENDING_DEPT_MAP = {
+                "routing": "router",
+                "banking": "banker",
+                "bankbookeeper": "banker",
+                "accounting": "apbookeeper",
+            }
+            department = _PENDING_DEPT_MAP.get(raw_department.lower(), raw_department.lower()) if raw_department else ""
+
+            logger.info("[REDIS_SUBSCRIBER] handle_pending_approval START - uid=%s action=%s job_id=%s dept=%s(raw=%s)", uid, action, job_id, department, raw_department)
+
+            if not company_id:
+                logger.warning("[REDIS_SUBSCRIBER] → pending_approval: missing company_id, skipping")
+                return
+
+            # Toujours invalider le cache approval pour que le prochain chargement dashboard
+            # récupère les données fraîches depuis Firebase
+            try:
+                redis = get_redis()
+                cache_key = f"approvals:{company_id}"
+                redis.delete(cache_key)
+                logger.info("[REDIS_SUBSCRIBER] → pending_approval: cache invalidated key=%s", cache_key)
+            except Exception as cache_err:
+                logger.warning("[REDIS_SUBSCRIBER] → pending_approval: cache invalidation failed: %s", cache_err)
+
+            # Publier via WebSocket uniquement si l'utilisateur est sur le dashboard
+            # (les données approval sont chargées au mount du dashboard, les deltas ne servent
+            # qu'à mettre à jour le state pendant qu'on y est — même logique que billing_history)
+            is_connected = hub.is_user_connected(uid)
+            if is_connected:
+                context = _get_user_context(uid)
+                current_company = context.get("company_id")
+                current_domain = context.get("current_domain")
+
+                if current_company == company_id and current_domain == "dashboard":
+                    try:
+                        # Construire le payload au format attendu par le frontend
+                        # Transformer snake_case PubSub → camelCase matching _format_approval_item()
+                        # Référence: approval_handlers.py L250-277
+                        item_data = message_data.get("data", {})
+                        raw_years = item_data.get("available_years", [])
+                        available_years = [str(y) for y in raw_years] if raw_years else []
+                        confidence_score = item_data.get("confidence_score", 0)
+
+                        formatted_item = {
+                            "id": item_data.get("id", job_id),
+                            "fileName": item_data.get("file_name", ""),
+                            "account": item_data.get("account", ""),
+                            "agentNote": item_data.get("selected_motivation", "") or item_data.get("agent_note", ""),
+                            "confidenceScore": confidence_score,
+                            "confidenceScoreStr": f"{int(confidence_score * 100)}%" if confidence_score else "0%",
+                            "confidenceColor": "green" if confidence_score >= 0.8 else "yellow" if confidence_score >= 0.5 else "red",
+                            "driveFileId": item_data.get("drive_file_id", ""),
+                            "createdAt": item_data.get("timestamp", ""),
+                            "contextPayload": item_data.get("context_payload", {}),
+                            "availableServices": item_data.get("service_list", []),
+                            "availableYears": available_years,
+                            "selectedService": item_data.get("selected_service", "") or item_data.get("service", ""),
+                            "selectedFiscalYear": str(item_data.get("selected_fiscal_year", "")) if item_data.get("selected_fiscal_year") else "",
+                            "suggestedService": item_data.get("selected_service", "") or item_data.get("service", ""),
+                            "suggestedYear": str(item_data.get("selected_fiscal_year", "")) if item_data.get("selected_fiscal_year") else "",
+                            "instructions": item_data.get("instructions", ""),
+                            "jobId": item_data.get("job_id", job_id),
+                            "fileId": item_data.get("file_id", ""),
+                            "driveLink": item_data.get("drive_link", ""),
+                        }
+
+                        ws_payload = {
+                            "action": action,
+                            "item": formatted_item,
+                            "job_id": job_id,
+                            "department": department,
+                        }
+                        published = await publish_dashboard_event(
+                            uid=uid,
+                            company_id=company_id,
+                            event_type="dashboard.pending_approval_update",
+                            payload=ws_payload,
+                        )
+                        if published:
+                            logger.info("[REDIS_SUBSCRIBER] → pending_approval published to dashboard: action=%s dept=%s", action, department)
+                    except Exception as publish_error:
+                        logger.error("[REDIS_SUBSCRIBER] pending_approval publish_failed: %s", publish_error)
+                else:
+                    logger.debug("[REDIS_SUBSCRIBER] → pending_approval: user not on dashboard (domain=%s), skipping WS (cache already invalidated)", current_domain)
+
+            logger.info("[REDIS_SUBSCRIBER] handle_pending_approval DONE")
+
+        except Exception as e:
+            logger.error("[REDIS_SUBSCRIBER] pending_approval error: %s", e, exc_info=True)
+
     async def _handle_task_manager_message(self, uid: str, channel: str, message_data: Dict[str, Any]) -> None:
         """
         Traite un message du canal task_manager.
@@ -948,6 +1140,28 @@ class RedisSubscriber:
                 is_new=is_new
             )
 
+            # Étape 1a: Mise à jour active_jobs (suivi par-job)
+            # Non-bloquant: met à jour jobs_status dans le document on_process
+            active_job_type = _extract_active_job_type(department)
+            if active_job_type and raw_status:
+                try:
+                    batch_id = (
+                        item_data.get("batch_id")
+                        or message_data.get("data", {}).get("batch_id")
+                    )
+                    ActiveJobManager.update_job_status_in_active(
+                        job_type=active_job_type,
+                        mandate_path=message_data.get("mandate_path", ""),
+                        job_id=job_id,
+                        new_status=raw_status,
+                        batch_id=batch_id,
+                    )
+                except Exception as active_err:
+                    logger.warning(
+                        "[REDIS_SUBSCRIBER] → Step 1a: active_jobs update failed: %s",
+                        active_err
+                    )
+
             # Étape 1b: Mise à jour du billing_history cache (Historique des dépenses)
             # Merge les champs du payload PubSub dans l'ExpenseItem correspondant
             # Returns the updated item (for delta WS push) or None if not found
@@ -989,6 +1203,25 @@ class RedisSubscriber:
 
                     except Exception as publish_error:
                         logger.error("[REDIS_SUBSCRIBER] publish_failed uid=%s error=%s", uid, str(publish_error), exc_info=True)
+
+                elif current_company == company_id and domain == "onboarding" and current_domain == "chat":
+                    # Forwarding spécial: onboarding task_manager → chat page (carte onboarding)
+                    logger.info("[REDIS_SUBSCRIBER] → Forwarding onboarding update to chat page...")
+                    try:
+                        tm_status = (message_data.get("status") or "").lower()
+                        STATUS_MAP = {
+                            "in_queue": "queued", "processing": "running", "on_process": "running",
+                            "running": "running", "completed": "completed", "failed": "error",
+                            "stopped": "idle", "stopping": "stopping", "error": "error",
+                        }
+                        mapped = STATUS_MAP.get(tm_status, tm_status)
+                        await hub.broadcast(uid, {
+                            "type": WS_EVENTS.CHAT.ONBOARDING_JOB_STATUS,
+                            "payload": {"job_id": job_id, "status": mapped}
+                        })
+                        logger.info("[REDIS_SUBSCRIBER] → published chat.onboarding_job_status status=%s", mapped)
+                    except Exception as fwd_err:
+                        logger.error("[REDIS_SUBSCRIBER] onboarding_forward error: %s", fwd_err)
 
                 elif current_company == company_id and current_domain == "dashboard":
                     # Utilisateur sur le DASHBOARD → envoyer:

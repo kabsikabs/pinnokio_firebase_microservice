@@ -3,7 +3,7 @@ Job Actions Handler - Centralized Job Action Management
 ========================================================
 
 Central handler for managing job actions (process, stop, restart, delete) across
-different job types (Router, APbookeeper, Bankbookeeper).
+different job types (Router, APbookeeper, Bankbookeeper, Onboarding).
 
 This module provides:
 - Unified interface for job actions across all departments
@@ -21,6 +21,7 @@ Job Types:
     - router: Document routing from Drive to departments
     - apbookeeper: Invoice processing (AP)
     - bankbookeeper: Bank transaction matching
+    - onboarding: Client onboarding (COA setup)
 
 Author: Migration Agent
 Created: 2026-01-25
@@ -62,7 +63,7 @@ JOB_TYPE_CONFIG = {
         "process_endpoint": "/event-trigger",
         "stop_endpoint": "/stop_router",
         "local_port": 8080,
-        "department": "Router",
+        "department": "router",
         "domain": "routing",
         "approval_prefix": "router_",
     },
@@ -82,6 +83,14 @@ JOB_TYPE_CONFIG = {
         "domain": "bank",
         "approval_prefix": "bank_",
     },
+    "onboarding": {
+        "process_endpoint": "/onboarding_manager_agent",
+        "stop_endpoint": "/stop-onboarding",
+        "local_port": 8080,           # Same service as router (klk_router)
+        "department": "Onboarding",
+        "domain": "onboarding",       # No business cache for onboarding
+        "approval_prefix": "onboarding_",
+    },
 }
 
 # Mapping from job_type to active_jobs collection name
@@ -89,6 +98,7 @@ ACTIVE_JOB_TYPE_MAP = {
     "router": "router",
     "apbookeeper": "apbookeeper",
     "bankbookeeper": "banker",
+    "onboarding": "onboarding",
 }
 
 # Environment URLs
@@ -173,6 +183,21 @@ async def _apply_optimistic_list_change(
         if not initial_status:
             logger.warning(f"[JOB_ACTIONS] No initial status for action: {action}")
             return None
+
+        # Invalidate page_state FIRST to prevent race condition:
+        # A concurrent page.restore_state between our optimistic broadcast
+        # and cache save would serve stale data.
+        try:
+            from app.wrappers.page_state_manager import get_page_state_manager
+            page_manager = get_page_state_manager()
+            page_manager.invalidate_page_state(
+                uid=uid,
+                company_id=company_id,
+                page=domain,
+            )
+            logger.debug(f"[JOB_ACTIONS] page_state cache PRE-invalidated for page={domain}")
+        except Exception as ps_err:
+            logger.warning(f"[JOB_ACTIONS] Failed to pre-invalidate page_state: {ps_err}")
 
         # Get business cache
         redis = get_redis()
@@ -299,6 +324,27 @@ async def handle_job_process(
     mandate_path = company_data.get("mandate_path", "")
     company_name = company_data.get("company_name", company_id)
 
+    # Fallback: si mandate_path est vide, le récupérer depuis Firebase
+    if not mandate_path and uid and company_id:
+        logger.warning(
+            f"[JOB_ACTIONS] mandate_path EMPTY — fallback Firebase lookup uid={uid} company={company_id}"
+        )
+        try:
+            firebase = get_firebase_management()
+            mandates = await asyncio.to_thread(firebase.fetch_all_mandates_light, uid)
+            for m in (mandates or []):
+                m_ids = (m.get("contact_space_id"), m.get("id"), m.get("contact_space_name"))
+                if company_id in m_ids:
+                    mandate_path = m.get("mandate_path", "")
+                    if mandate_path:
+                        company_data["mandate_path"] = mandate_path
+                        logger.info(f"[JOB_ACTIONS] → mandate_path recovered from Firebase: {mandate_path[:50]}...")
+                        break
+            if not mandate_path:
+                logger.error(f"[JOB_ACTIONS] mandate_path STILL EMPTY after fallback — company_id={company_id} not found in mandates")
+        except Exception as fb_err:
+            logger.error(f"[JOB_ACTIONS] mandate_path fallback FAILED: {fb_err}")
+
     logger.info(
         f"[JOB_ACTIONS] ═══════════════════════════════════════════════════════════"
     )
@@ -311,7 +357,7 @@ async def handle_job_process(
         f"first_ids={document_ids[:3] if document_ids else []}"
     )
     logger.info(
-        f"[JOB_ACTIONS] → company_data: mandate_path={mandate_path[:50] if mandate_path else 'None'}..."
+        f"[JOB_ACTIONS] → company_data: mandate_path={mandate_path[:50] if mandate_path else 'EMPTY'}..."
     )
     logger.info(
         f"[JOB_ACTIONS] → config: domain={config['domain']} endpoint={config['process_endpoint']}"
@@ -391,13 +437,30 @@ async def handle_job_process(
             ],
         }
 
+        # Override for onboarding: flat payload format expected by DF_ANALYSER
+        if job_type == "onboarding":
+            first_job = jobs_data[0] if jobs_data else {}
+            jobbeur_payload = {
+                "firebase_user_id": uid,
+                "job_id": first_job.get("job_id", batch_id),
+                "mandate_path": mandate_path,
+                "mode": "onboarding",
+                "setup_coa_type": first_job.get("setup_coa_type"),
+                "erp_system": first_job.get("erp_system"),
+                "context": first_job.get("initial_context_data", ""),
+                "batch_id": batch_id,
+                "collection_name": str(company_id),
+            }
+            if traceability:
+                jobbeur_payload["traceability"] = traceability
+
         # Banker-specific extra fields
         if job_type == "bankbookeeper":
             jobbeur_payload["journal_name"] = payload.get("journal_name", "")
             jobbeur_payload["proxy"] = payload.get("proxy", False)
 
-        # Inject traceability if present (agentic source)
-        if traceability:
+        # Inject traceability if present (agentic source, non-onboarding)
+        if traceability and job_type != "onboarding":
             jobbeur_payload["traceability"] = traceability
 
         logger.info(f"[JOB_ACTIONS] → Step 1: Building jobbeur payload...")
@@ -444,11 +507,13 @@ async def handle_job_process(
         # ═══════════════════════════════════════════════════════════════════
         active_job_type = ACTIVE_JOB_TYPE_MAP.get(job_type, job_type)
         try:
-            reg_result = ActiveJobManager.register_batch(
+            # Store full jobbeur_payload so workers polling active_jobs
+            # get all required fields (mandates_path, collection_name, user_id, settings, etc.)
+            reg_result = ActiveJobManager.register_job(
                 mandate_path=mandate_path,
-                jobs_data=jobs_data,
+                job_data=jobbeur_payload,
+                job_key=batch_id,
                 job_type=active_job_type,
-                batch_id=batch_id,
             )
             logger.info(
                 f"[JOB_ACTIONS] → Step 1.5: active_jobs registered: "
@@ -562,6 +627,7 @@ async def handle_job_process(
                 company_data=company_data,
                 batch_id=batch_id,
                 payload=payload,
+                jobs_data=jobs_data,
             )
             logger.info(f"[JOB_ACTIONS] → Step 5b: task_manager persisted for {len(document_ids)} items")
         except Exception as tm_err:
@@ -679,6 +745,7 @@ async def handle_job_stop(
         # Write stop_requested directly in active_jobs (no HTTP to worker needed)
         active_job_type = ACTIVE_JOB_TYPE_MAP.get(job_type, job_type)
         transaction_ids = payload.get("transaction_ids")
+        job_ids_to_stop = payload.get("job_ids_to_stop")
 
         logger.info(
             f"[JOB_ACTIONS] → Step 1: Writing stop_requested to active_jobs "
@@ -691,15 +758,39 @@ async def handle_job_stop(
                 mandate_path=mandate_path,
                 job_type=active_job_type,
                 job_key=jid,
+                job_ids_to_stop=job_ids_to_stop,
                 transaction_ids=transaction_ids,
             )
             stop_results.append(stop_result)
 
         success_count = sum(1 for r in stop_results if r.get("success"))
 
+        # Step 2: Send synthetic stopped notifications for pending jobs removed directly
+        synthetic_count = 0
+        for stop_result in stop_results:
+            for stopped_job_id in stop_result.get("synthetic_stops", []):
+                try:
+                    await _send_synthetic_stopped_notification(
+                        uid=uid,
+                        job_type=job_type,
+                        job_id=stopped_job_id,
+                        mandate_path=mandate_path,
+                        company_data=company_data,
+                    )
+                    synthetic_count += 1
+                except Exception as synth_err:
+                    logger.warning(
+                        f"[JOB_ACTIONS] Synthetic stop notification failed for {stopped_job_id}: {synth_err}"
+                    )
+
+        if synthetic_count > 0:
+            logger.info(
+                f"[JOB_ACTIONS] → Step 2: Sent {synthetic_count} synthetic stopped notifications"
+            )
+
         logger.info(
             f"[JOB_ACTIONS] handle_job_stop SUCCESS - "
-            f"stopped={success_count}/{len(job_ids)}"
+            f"stopped={success_count}/{len(job_ids)} synthetic={synthetic_count}"
         )
         logger.info(
             f"[JOB_ACTIONS] ═══════════════════════════════════════════════════════════"
@@ -708,6 +799,7 @@ async def handle_job_stop(
         return {
             "success": True,
             "stopped_jobs": job_ids,
+            "synthetic_stops": synthetic_count,
             "message": f"Stop requested for {success_count}/{len(job_ids)} jobs via active_jobs",
         }
 
@@ -729,8 +821,16 @@ async def handle_job_restart(
     """
     Restart a job - Clean state and move back to to_process.
 
-    Cleans up the failed/stuck job state (Chroma, task_manager fields, RTDB chats)
-    and moves the item back to to_process list in the business cache.
+    Cleans up the failed/stuck job state and moves the item back to to_process.
+
+    Complete restart workflow:
+    1. Delete Chroma embeddings for this job
+    2. Delete approval_pendinglist entry (before task_manager reset)
+    3. Reset task_manager fields + delete events subcollection
+    4. Update notification status to to_process
+    5. Erase RTDB job_chats
+    6. Delete associated notifications
+    7. Move item to to_process in business cache
 
     Args:
         uid: Firebase user ID
@@ -777,27 +877,48 @@ async def handle_job_restart(
             from ..chroma_vector_service import get_chroma_vector_service
             chroma = get_chroma_vector_service()
             if chroma:
-                await asyncio.to_thread(
+                result = await asyncio.to_thread(
                     chroma.delete_documents,
                     company_id,
-                    {"job_id": {"$eq": job_id}},
+                    {"job_id": job_id},
                 )
-                logger.info(f"[JOB_ACTIONS] → Step 1: Chroma embeddings DELETED for job_id={job_id}")
+                if result.get("success"):
+                    logger.info(f"[JOB_ACTIONS] → Step 1: Chroma embeddings DELETED for job_id={job_id}")
+                else:
+                    logger.warning(f"[JOB_ACTIONS] → Step 1: Chroma deletion FAILED: {result.get('error', 'unknown error')}")
             else:
                 logger.info(f"[JOB_ACTIONS] → Step 1: Chroma service not available, skipping")
         except Exception as chroma_err:
             logger.warning(f"[JOB_ACTIONS] → Step 1: Chroma deletion SKIPPED: {chroma_err}")
 
-        # 2. Reset task_manager fields + delete events subcollection
-        logger.info(f"[JOB_ACTIONS] → Step 2: Resetting task_manager job data...")
+        # 2. Delete approval_pendinglist entry (before task_manager reset)
+        logger.info(f"[JOB_ACTIONS] → Step 2: Deleting approval_pendinglist entry...")
+        try:
+            file_name = payload.get("file_name", "")
+            await _delete_approval_pendinglist(
+                uid, job_type, [(job_id, file_name)], company_data
+            )
+            # Invalidate approvals cache so frontend picks up the deletion
+            try:
+                redis = get_redis()
+                redis.delete(f"approvals:{company_id}")
+                logger.debug(f"[JOB_ACTIONS] → Step 2: approvals cache invalidated for company_id={company_id}")
+            except Exception:
+                pass  # Non-blocking
+            logger.info(f"[JOB_ACTIONS] → Step 2: approval_pendinglist entry DELETED for job_id={job_id}")
+        except Exception as approval_err:
+            logger.warning(f"[JOB_ACTIONS] → Step 2: approval_pendinglist deletion SKIPPED: {approval_err}")
+
+        # 3. Reset task_manager fields + delete events subcollection
+        logger.info(f"[JOB_ACTIONS] → Step 3: Resetting task_manager job data...")
         try:
             await asyncio.to_thread(firebase.restart_job, uid, job_id)
-            logger.info(f"[JOB_ACTIONS] → Step 2: task_manager fields RESET for job_id={job_id}")
+            logger.info(f"[JOB_ACTIONS] → Step 3: task_manager fields RESET for job_id={job_id}")
         except Exception as fb_err:
-            logger.warning(f"[JOB_ACTIONS] → Step 2: task_manager reset SKIPPED: {fb_err}")
+            logger.warning(f"[JOB_ACTIONS] → Step 3: task_manager reset SKIPPED: {fb_err}")
 
-        # 3. Update notification status to to_process
-        logger.info(f"[JOB_ACTIONS] → Step 3: Resetting notification status...")
+        # 4. Update notification status to to_process
+        logger.info(f"[JOB_ACTIONS] → Step 4: Resetting notification status...")
         try:
             await asyncio.to_thread(
                 firebase.update_job_status,
@@ -806,32 +927,32 @@ async def handle_job_restart(
                 "to_process",
                 {"reset_at": datetime.now(timezone.utc).isoformat(), "reset_by": "user"},
             )
-            logger.info(f"[JOB_ACTIONS] → Step 3: Notification status RESET for job_id={job_id}")
+            logger.info(f"[JOB_ACTIONS] → Step 4: Notification status RESET for job_id={job_id}")
         except Exception as fb_err:
-            logger.warning(f"[JOB_ACTIONS] → Step 3: Notification status update SKIPPED: {fb_err}")
+            logger.warning(f"[JOB_ACTIONS] → Step 4: Notification status update SKIPPED: {fb_err}")
 
-        # 4. Erase RTDB job_chats for this job
-        logger.info(f"[JOB_ACTIONS] → Step 4: Erasing RTDB job_chats...")
+        # 5. Erase RTDB job_chats for this job
+        logger.info(f"[JOB_ACTIONS] → Step 5: Erasing RTDB job_chats...")
         try:
             await _delete_job_chat_threads(uid, company_id, job_id)
-            logger.info(f"[JOB_ACTIONS] → Step 4: RTDB job_chats erased")
+            logger.info(f"[JOB_ACTIONS] → Step 5: RTDB job_chats erased")
         except Exception as rtdb_err:
-            logger.warning(f"[JOB_ACTIONS] → Step 4: RTDB erase SKIPPED: {rtdb_err}")
+            logger.warning(f"[JOB_ACTIONS] → Step 5: RTDB erase SKIPPED: {rtdb_err}")
 
-        # 5. Delete associated notifications for this job
-        logger.info(f"[JOB_ACTIONS] → Step 5: Deleting job notifications...")
+        # 6. Delete associated notifications for this job
+        logger.info(f"[JOB_ACTIONS] → Step 6: Deleting job notifications...")
         await _delete_job_notifications(uid, mandate_path, job_id)
-        logger.info(f"[JOB_ACTIONS] → Step 5: Notifications cleanup completed")
+        logger.info(f"[JOB_ACTIONS] → Step 6: Notifications cleanup completed")
 
-        # 6. Move item to to_process in business cache
-        logger.info(f"[JOB_ACTIONS] → Step 6: Moving item to to_process in cache...")
+        # 7. Move item to to_process in business cache
+        logger.info(f"[JOB_ACTIONS] → Step 7: Moving item to to_process in cache...")
         try:
             await _move_to_list_in_cache(
                 uid, job_type, company_data, job_id, "to_process"
             )
-            logger.info(f"[JOB_ACTIONS] → Step 6: Item moved to to_process in cache ✓")
+            logger.info(f"[JOB_ACTIONS] → Step 7: Item moved to to_process in cache ✓")
         except Exception as cache_err:
-            logger.warning(f"[JOB_ACTIONS] → Step 6: Cache update SKIPPED: {cache_err}")
+            logger.warning(f"[JOB_ACTIONS] → Step 7: Cache update SKIPPED: {cache_err}")
 
         logger.info(
             f"[JOB_ACTIONS] handle_job_restart SUCCESS - job_id={job_id}"
@@ -915,6 +1036,7 @@ async def handle_job_delete(
     try:
         firebase = get_firebase_management()
         deleted_jobs = []
+        failed_jobs = []
         moved_to_todo = []
 
         # Normalize payload to get job_id and file_name pairs
@@ -945,15 +1067,17 @@ async def handle_job_delete(
                     uid, job_type, [(job_id, file_name)], company_data
                 )
 
-                # 5. For Router: Move file back to Drive (to_do)
-                if job_type == "router" and file_name:
-                    logger.info(f"[JOB_ACTIONS] →   Step 5: Moving file to Drive input: {file_name}")
+                # 5. For Router: Move file back to Drive input folder
+                if job_type == "router":
+                    logger.info(f"[JOB_ACTIONS] →   Step 5: Moving file to Drive input: {file_name or job_id}")
                     move_success = await _move_file_to_drive_input(
-                        uid, company_data, file_name
+                        uid, company_data, job_id, file_name
                     )
                     if move_success:
                         moved_to_todo.append({"job_id": job_id, "file_name": file_name})
                         logger.info(f"[JOB_ACTIONS] →   Step 5: File moved to Drive ✓")
+                    else:
+                        logger.warning(f"[JOB_ACTIONS] →   Step 5: Drive move FAILED for {job_id}")
 
                 deleted_jobs.append(job_id)
                 logger.info(f"[JOB_ACTIONS] →   Job {job_id} DELETE completed ✓")
@@ -962,6 +1086,7 @@ async def handle_job_delete(
                 logger.error(
                     f"[JOB_ACTIONS] →   Job {job_id} DELETE FAILED: {job_err}"
                 )
+                failed_jobs.append({"job_id": job_id, "error": str(job_err)})
 
         # 6. Update business cache
         logger.info(f"[JOB_ACTIONS] → Step 6: Updating business cache...")
@@ -986,20 +1111,70 @@ async def handle_job_delete(
                 await _add_to_routing_todo(uid, company_data, ap_moved)
                 logger.info(f"[JOB_ACTIONS] → Step 8: {len(ap_moved)} items added to routing to_do ✓")
 
+        # 9. Broadcast consolidated item_update (pessimistic: after all confirmations)
+        if deleted_jobs:
+            logger.info(f"[JOB_ACTIONS] → Step 9: Broadcasting item_update for delete...")
+            try:
+                redis = get_redis()
+                cache_key = f"business:{uid}:{company_id}:{config['domain']}"
+                cached = redis.get(cache_key)
+                counts = {}
+                if cached:
+                    cache_data = json.loads(cached if isinstance(cached, str) else cached.decode())
+                    counts = cache_data.get("counts", {})
+
+                # Determine source and target lists
+                # Router delete: items from processed/pending → to_process (Drive confirmed)
+                # Other domains: items removed from their list
+                to_list = "to_process" if moved_to_todo else None
+                new_status = "to_process" if moved_to_todo else None
+
+                ws_event_type = f"{config['domain']}.item_update"
+                await hub.broadcast(uid, {
+                    "type": ws_event_type,
+                    "payload": {
+                        "action": "delete",
+                        "trigger_action": "delete",
+                        "items": moved_to_todo if moved_to_todo else [],
+                        "item_ids": deleted_jobs,
+                        "from_list": "processed",
+                        "to_list": to_list,
+                        "new_status": new_status,
+                        "counts": counts,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                })
+                logger.info(
+                    f"[JOB_ACTIONS] → Step 9: Broadcasted {ws_event_type} "
+                    f"(deleted={len(deleted_jobs)}, moved_to_todo={len(moved_to_todo)})"
+                )
+            except Exception as broadcast_err:
+                logger.warning(f"[JOB_ACTIONS] → Step 9: Broadcast failed: {broadcast_err}")
+
         logger.info(
-            f"[JOB_ACTIONS] handle_job_delete SUCCESS - "
-            f"deleted={len(deleted_jobs)} moved_to_todo={len(moved_to_todo)}"
+            f"[JOB_ACTIONS] handle_job_delete {'SUCCESS' if not failed_jobs else 'PARTIAL'} - "
+            f"deleted={len(deleted_jobs)} failed={len(failed_jobs)} moved_to_todo={len(moved_to_todo)}"
         )
         logger.info(
             f"[JOB_ACTIONS] ═══════════════════════════════════════════════════════════"
         )
 
-        return {
-            "success": True,
+        result = {
+            "success": len(deleted_jobs) > 0,
             "deleted_jobs": deleted_jobs,
             "moved_to_todo": [item["file_name"] for item in moved_to_todo],
             "message": f"Deleted {len(deleted_jobs)} jobs",
         }
+
+        # Report partial failures so frontend can rollback selectively
+        if failed_jobs:
+            result["failed_jobs"] = failed_jobs
+            result["message"] = (
+                f"Deleted {len(deleted_jobs)} jobs, "
+                f"{len(failed_jobs)} failed: {', '.join(f['job_id'] for f in failed_jobs)}"
+            )
+
+        return result
 
     except Exception as e:
         logger.error(f"[JOB_ACTIONS] Delete failed: {e}", exc_info=True)
@@ -1158,7 +1333,23 @@ async def _create_batch_notifications(
 
         for index, job_item in enumerate(jobs_data, start=1):
             # Build notification depending on job_type
-            if job_type == "bankbookeeper":
+            if job_type == "onboarding":
+                notification_firebase = {
+                    "function_name": config["department"],  # "Onboarding"
+                    "aws_instance_id": aws_instance_id,
+                    "job_id": batch_id,
+                    "batch_id": batch_id,
+                    "status": "in queue",
+                    "read": False,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "collection_id": company_id,
+                    "collection_name": company_name,
+                    "batch_index": 1,
+                    "batch_total": 1,
+                }
+                upsert_key = "job_id"
+                display_name = "Onboarding"
+            elif job_type == "bankbookeeper":
                 # Banker: notification references the batch + transactions
                 notification_firebase = {
                     "function_name": config["department"],
@@ -1222,7 +1413,24 @@ async def _create_batch_notifications(
                     notification_ids.append(notification_id)
 
                     # Build camelCase notification for WebSocket
-                    if job_type == "bankbookeeper":
+                    if job_type == "onboarding":
+                        notification_ws = {
+                            "docId": notification_id,
+                            "functionName": config["department"],
+                            "awsInstanceId": aws_instance_id,
+                            "jobId": batch_id,
+                            "batchId": batch_id,
+                            "status": "in_queue",
+                            "read": False,
+                            "timestamp": notification_firebase["timestamp"],
+                            "collectionId": company_id,
+                            "collectionName": company_name,
+                            "batchIndex": 1,
+                            "batchTotal": 1,
+                            "message": "Onboarding - in queue",
+                            "hasAdditionalInfo": False,
+                        }
+                    elif job_type == "bankbookeeper":
                         notification_ws = {
                             "docId": notification_id,
                             "functionName": config["department"],
@@ -1398,13 +1606,14 @@ async def _delete_job_chat_threads(
 ) -> None:
     """Delete RTDB chat threads associated with a job.
 
-    Erases job_chats messages in RTDB:
+    Erases both job_chats and active_chats messages in RTDB:
       - Path: {company_id}/{job_id}/job_chats/messages
+      - Path: {company_id}/{job_id}/active_chats/messages
     """
     try:
         rtdb = get_firebase_realtime()
 
-        # Erase job_chats for this job (space_code=company_id, thread_key=job_id)
+        # Erase job_chats for this job
         await asyncio.to_thread(
             rtdb.erase_chat,
             company_id,  # space_code
@@ -1412,8 +1621,94 @@ async def _delete_job_chat_threads(
             'job_chats',  # mode
         )
         logger.debug(f"[JOB_ACTIONS] RTDB job_chats erased for job_id={job_id}")
+
+        # Erase active_chats for this job
+        await asyncio.to_thread(
+            rtdb.erase_chat,
+            company_id,  # space_code
+            job_id,       # thread_key
+            'active_chats',  # mode
+        )
+        logger.debug(f"[JOB_ACTIONS] RTDB active_chats erased for job_id={job_id}")
     except Exception as e:
         logger.warning(f"[JOB_ACTIONS] Failed to delete chat threads: {e}")
+
+
+# ============================================
+# SYNTHETIC STOP NOTIFICATION
+# ============================================
+
+
+async def _send_synthetic_stopped_notification(
+    uid: str,
+    job_type: str,
+    job_id: str,
+    mandate_path: str,
+    company_data: Dict[str, Any],
+) -> None:
+    """
+    Send a synthetic "stopped" notification for jobs removed directly from pending.
+
+    These jobs never reached the worker, so no worker notification will come.
+    We simulate the notification cascade:
+    1. Update task_manager → status: "stopped"
+    2. Update notifications → status: "stopped"
+    3. Publish Redis → triggers normal cascade (cache update, WS push)
+    """
+    firebase = get_firebase_management()
+    company_id = company_data.get("company_id", "")
+
+    # 1. Update task_manager
+    task_mgr_path = f"clients/{uid}/task_manager"
+    try:
+        await asyncio.to_thread(
+            firebase.add_or_update_job_by_job_id,
+            task_mgr_path,
+            {
+                "job_id": job_id,
+                "status": "stopped",
+                "stopped_at": datetime.now(timezone.utc).isoformat(),
+                "stopped_by": "user_pending_cancel",
+            },
+        )
+    except Exception as e:
+        logger.warning(f"[JOB_ACTIONS] Synthetic stop: task_manager update failed for {job_id}: {e}")
+
+    # 2. Update notification status
+    notifications_path = f"clients/{uid}/notifications"
+    try:
+        await asyncio.to_thread(
+            firebase.add_or_update_job_by_job_id,
+            notifications_path,
+            {
+                "job_id": job_id,
+                "status": "stopped",
+            },
+        )
+    except Exception as e:
+        logger.warning(f"[JOB_ACTIONS] Synthetic stop: notification update failed for {job_id}: {e}")
+
+    # 3. Publish to Redis → triggers normal cascade (cache + WS)
+    config = JOB_TYPE_CONFIG.get(job_type, JOB_TYPE_CONFIG["router"])
+    try:
+        redis = get_redis()
+        redis_payload = json.dumps({
+            "type": "task_manager_update",
+            "job_id": job_id,
+            "status": "stopped",
+            "department": config["department"],
+            "collection_id": company_id,
+            "mandate_path": mandate_path,
+            "data": {
+                "status": "stopped",
+                "stopped_by": "user_pending_cancel",
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        redis.publish(f"user:{uid}/task_manager", redis_payload)
+        logger.info(f"[JOB_ACTIONS] Synthetic stop published for {job_id}")
+    except Exception as e:
+        logger.warning(f"[JOB_ACTIONS] Synthetic stop: Redis publish failed for {job_id}: {e}")
 
 
 # ============================================
@@ -1477,11 +1772,12 @@ async def _delete_approval_pendinglist(
         for job_id, file_name in job_file_pairs:
             # Build the approval entry ID based on job type prefix
             approval_id = f"{config['approval_prefix']}{job_id}"
+            full_path = f"{pending_path}/{approval_id}"
 
             try:
                 await asyncio.to_thread(
-                    firebase.delete_document,
-                    f"{pending_path}/{approval_id}",
+                    firebase.delete_documents_by_full_paths,
+                    [full_path],
                 )
                 logger.debug(f"[JOB_ACTIONS] Deleted approval entry {approval_id}")
             except Exception:
@@ -1547,22 +1843,47 @@ async def _update_cache_after_delete(
 async def _move_file_to_drive_input(
     uid: str,
     company_data: Dict[str, Any],
-    file_name: str,
+    job_id: str,
+    file_name: str = "",
 ) -> bool:
     """
     Move a file back to Drive input folder (Router delete workflow).
 
-    This is called after a Router job is deleted to return the file
-    to the to_do state for potential reprocessing.
+    Uses DriveClientServiceSingleton.move_file() to move the file
+    (identified by job_id = Drive file ID) to the input_drive_doc_id folder
+    (from Level 2 cache).
+
+    Args:
+        uid: Firebase user ID (needed for Drive credentials)
+        company_data: Company context containing input_drive_doc_id
+        job_id: The Drive file ID (= job_id in router context)
+        file_name: Human-readable file name (for logging only)
 
     Returns:
         True if move successful, False otherwise
     """
     try:
-        # This would integrate with the Drive service
-        # For now, log and return success (actual implementation depends on Drive API)
-        logger.info(f"[JOB_ACTIONS] Would move file back to Drive input: {file_name}")
-        return True
+        input_drive_doc_id = company_data.get("input_drive_doc_id", "")
+        if not input_drive_doc_id:
+            logger.warning(f"[JOB_ACTIONS] No input_drive_doc_id in company_data, cannot move file")
+            return False
+
+        from ..driveClientService import get_drive_client_service
+        drive = get_drive_client_service()
+
+        result = await asyncio.to_thread(
+            drive.move_file,
+            uid,
+            job_id,               # Drive file ID
+            input_drive_doc_id,   # Destination folder ID from Level 2 cache
+        )
+
+        if result:
+            logger.info(f"[JOB_ACTIONS] Drive move confirmed for {file_name or job_id}: {result}")
+            return True
+        else:
+            logger.warning(f"[JOB_ACTIONS] Drive move returned None for {file_name or job_id}")
+            return False
     except Exception as e:
         logger.error(f"[JOB_ACTIONS] Failed to move file to Drive: {e}")
         return False
@@ -1676,15 +1997,49 @@ async def _move_to_list_in_cache(
         documents[target_list].insert(0, found_item)
 
         # Recalculate counts
+        counts = {}
         if "counts" in data:
             for list_name in all_lists:
                 if list_name in documents:
                     data["counts"][list_name] = len(documents[list_name])
+            counts = data["counts"]
 
         # Determine TTL based on domain
         ttl = 1800 if domain == "routing" else 2400
         redis.setex(cache_key, ttl, json.dumps(data))
         logger.info(f"[JOB_ACTIONS] Moved {job_id} from {source_list} to {target_list}")
+
+        # Invalidate page_state cache so that page.restore_state
+        # won't serve stale data (item still in old list)
+        try:
+            from app.wrappers.page_state_manager import get_page_state_manager
+            page_manager = get_page_state_manager()
+            page_manager.invalidate_page_state(
+                uid=uid,
+                company_id=company_id,
+                page=domain,  # "routing", "apbookeeper", etc.
+            )
+            logger.debug(f"[JOB_ACTIONS] page_state cache invalidated for page={domain}")
+        except Exception as ps_err:
+            logger.warning(f"[JOB_ACTIONS] Failed to invalidate page_state: {ps_err}")
+
+        # Broadcast item_update event so the frontend can sync its store
+        ws_event_type = f"{domain}.item_update"
+        await hub.broadcast(uid, {
+            "type": ws_event_type,
+            "payload": {
+                "action": "status_change",
+                "trigger_action": "restart",
+                "items": [found_item],
+                "item_ids": [job_id],
+                "from_list": source_list,
+                "to_list": target_list,
+                "new_status": target_status,
+                "counts": counts,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        })
+        logger.info(f"[JOB_ACTIONS] Broadcasted {ws_event_type} for restart: {source_list} → {target_list}")
 
     except Exception as e:
         logger.warning(f"[JOB_ACTIONS] Failed to move item in cache: {e}")
@@ -1701,6 +2056,7 @@ async def _persist_jobs_to_task_manager(
     company_data: Dict[str, Any],
     batch_id: str,
     payload: Dict[str, Any],
+    jobs_data: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """
     Persist initial job state to task_manager for cache-reload coherence.
@@ -1718,6 +2074,14 @@ async def _persist_jobs_to_task_manager(
     company_id = company_data.get("company_id", "")
     task_mgr_path = f"clients/{uid}/task_manager"
 
+    # Build file_name lookup from jobs_data
+    file_name_map = {}
+    if jobs_data:
+        for item in jobs_data:
+            jid = item.get("job_id") or item.get("drive_file_id") or ""
+            if jid:
+                file_name_map[str(jid)] = item.get("file_name", "")
+
     if job_type == "router":
         # Router: 1 doc par fichier, job_id = drive_file_id
         for file_id in document_ids:
@@ -1727,13 +2091,16 @@ async def _persist_jobs_to_task_manager(
                 {
                     "job_id": file_id,
                     "status": "in_queue",
-                    "department": "Router",
+                    "department": "router",
                     "mandate_path": mandate_path,
+                    "collection_id": company_id,
+                    "batch_id": batch_id,
+                    "file_name": file_name_map.get(file_id, ""),
                 }
             )
 
     elif job_type == "apbookeeper":
-        # AP: doc existe deja (cree par Router), juste update status
+        # AP: doc existe deja (cree par Router), juste update status + enrichir champs critiques
         for job_id in document_ids:
             await asyncio.to_thread(
                 firebase.add_or_update_job_by_job_id,
@@ -1741,6 +2108,9 @@ async def _persist_jobs_to_task_manager(
                 {
                     "job_id": job_id,
                     "status": "in_queue",
+                    "department": "apbookeeper",
+                    "collection_id": company_id,
+                    "batch_id": batch_id,
                 }
             )
 
@@ -1758,8 +2128,10 @@ async def _persist_jobs_to_task_manager(
                 {
                     "job_id": composite_key,
                     "status": "in_queue",
-                    "department": "Bankbookeeper",
+                    "department": "banker",
                     "mandate_path": mandate_path,
+                    "collection_id": company_id,
+                    "batch_id": batch_id,
                     "department_data": {
                         "banker": {
                             "batch_id": batch_id,
@@ -1767,6 +2139,21 @@ async def _persist_jobs_to_task_manager(
                             "transaction_id": move_id,
                         }
                     }
+                }
+            )
+
+    elif job_type == "onboarding":
+        for job_id_item in document_ids:
+            await asyncio.to_thread(
+                firebase.add_or_update_job_by_job_id,
+                task_mgr_path,
+                {
+                    "job_id": job_id_item,
+                    "status": "in_queue",
+                    "department": "onboarding",
+                    "mandate_path": mandate_path,
+                    "collection_id": company_id,
+                    "batch_id": batch_id,
                 }
             )
 

@@ -50,7 +50,7 @@ def _get_company_context(uid: str, company_id: str) -> Dict[str, Any]:
 
     Cache hierarchy (tries in order):
     1. Level 2: company:{uid}:{company_id}:context (full company_data)
-    2. Legacy: SessionStateManager (fallback)
+    2. Fallback Firebase: fetch_all_mandates_light → repopulate Level 2
 
     Returns:
         Dict with: mandate_path, client_uuid, etc.
@@ -71,8 +71,28 @@ def _get_company_context(uid: str, company_id: str) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"[INVOICES] Level 2 context read error: {e}")
 
-    # Si Level 2 n'existe pas, retourner un dict vide
-    logger.warning(f"[INVOICES] No company context found for uid={uid}, company={company_id}")
+    # 2. Fallback Firebase: Level 2 expiré ou absent → récupérer depuis Firebase
+    logger.warning(f"[INVOICES] Level 2 cache MISS for uid={uid}, company={company_id} — fetching from Firebase...")
+    try:
+        from app.firebase_providers import get_firebase_management
+        from app.wrappers.dashboard_orchestration_handlers import set_selected_company
+
+        firebase = get_firebase_management()
+        mandates = firebase.fetch_all_mandates_light(uid)
+        for m in (mandates or []):
+            m_ids = (m.get("contact_space_id"), m.get("id"), m.get("contact_space_name"))
+            if company_id in m_ids:
+                m["company_id"] = company_id
+                set_selected_company(uid, company_id, m)
+                logger.info(
+                    f"[INVOICES] Context repopulated from Firebase: "
+                    f"mandate_path={m.get('mandate_path', '')[:30]}..."
+                )
+                return m
+    except Exception as e:
+        logger.error(f"[INVOICES] Firebase fallback failed: {e}")
+
+    logger.error(f"[INVOICES] No company context found for uid={uid}, company={company_id}")
     return {}
 
 
@@ -184,6 +204,18 @@ async def handle_invoices_orchestrate_init(
             logger.error(f"[INVOICES] AP documents fetch error: {ap_error}")
 
         # ════════════════════════════════════════════════════════════
+        # STEP 1B: Fetch instruction templates
+        # ════════════════════════════════════════════════════════════
+        instruction_templates = []
+        try:
+            from app.firebase_providers import get_firebase_management
+            firebase = get_firebase_management()
+            instruction_templates = firebase.fetch_instruction_templates(mandate_path, "invoices")
+            logger.info(f"[INVOICES] Loaded {len(instruction_templates)} instruction templates")
+        except Exception as tpl_err:
+            logger.warning(f"[INVOICES] Failed to load instruction templates: {tpl_err}")
+
+        # ════════════════════════════════════════════════════════════
         # STEP 2: Build combined invoices data structure
         # ════════════════════════════════════════════════════════════
         invoices_data = {
@@ -216,6 +248,7 @@ async def handle_invoices_orchestrate_init(
                 "mandate_path": mandate_path,
                 "client_uuid": client_uuid,
             },
+            "instruction_templates": instruction_templates,
             "meta": {
                 "loaded_at": datetime.utcnow().isoformat() + "Z",
                 "version": "1.0",
@@ -404,7 +437,8 @@ async def handle_invoices_stop(
                 "payload": {
                     "success": True,
                     "job_ids": job_ids,
-                    "message": result.get("message", f"{len(job_ids)} jobs stopped")
+                    "message": result.get("message", f"{len(job_ids)} jobs stopped"),
+                    "_optimistic_update_id": payload.get("_optimistic_update_id"),
                 }
             })
         else:
@@ -475,7 +509,8 @@ async def handle_invoices_delete(
                 "payload": {
                     "success": True,
                     "job_ids": result.get("deleted_jobs", job_ids),
-                    "message": result.get("message", f"{len(job_ids)} documents deleted")
+                    "message": result.get("message", f"{len(job_ids)} documents deleted"),
+                    "_optimistic_update_id": payload.get("_optimistic_update_id"),
                 }
             })
         else:
@@ -546,7 +581,8 @@ async def handle_invoices_restart(
                 "payload": {
                     "success": True,
                     "job_id": job_id,
-                    "message": result.get("message", f"Job {job_id} has been successfully reset")
+                    "message": result.get("message", f"Job {job_id} has been successfully reset"),
+                    "_optimistic_update_id": payload.get("_optimistic_update_id"),
                 }
             })
         else:
