@@ -1,6 +1,7 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi import Header, HTTPException, status
 from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional, Tuple, Callable, List
 import json as _json
@@ -33,6 +34,14 @@ configure_logging()
 logger = logging.getLogger("listeners.app")
 
 app = FastAPI(title="listeners-service")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 START_TIME = time.time()
 VERSION = os.getenv("SERVICE_VERSION", "0.1.0")

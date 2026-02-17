@@ -1,5 +1,10 @@
 app/cred/*.json
 app/g_cred/*.json
+
+# Service account keys (NEVER commit)
+service_accountkey.json
+*serviceaccount*.json
+*service_account*.json
 **/__pycache__/
 *.pyc
 venv/
