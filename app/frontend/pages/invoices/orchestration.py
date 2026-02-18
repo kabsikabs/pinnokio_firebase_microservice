@@ -348,10 +348,19 @@ async def handle_invoices_process(
     document_instructions = payload.get("document_instructions", {})
     approval_states = payload.get("approval_states", {})
     workflow_states = payload.get("workflow_states", {})
+    optimistic_update_id = payload.get("_optimistic_update_id")
 
-    logger.info(f"[INVOICES] Process requested for {len(document_ids)} documents")
+    logger.info(f"[INVOICES] ──────────────────────────────────────────────────────")
+    logger.info(f"[INVOICES] handle_invoices_process - uid={uid} session={session_id}")
+    logger.info(
+        f"[INVOICES] → document_ids count={len(document_ids)} company_id={company_id}"
+        f"{f' optimistic_update_id={optimistic_update_id}' if optimistic_update_id else ''}"
+    )
 
     if not document_ids:
+        # Rollback optimistic update if present
+        if optimistic_update_id:
+            await _reject_optimistic_update(uid, optimistic_update_id, "invoices", "No documents selected")
         await hub.broadcast(uid, {
             "type": WS_EVENTS.INVOICES.ERROR,
             "payload": {
@@ -362,24 +371,82 @@ async def handle_invoices_process(
         return
 
     try:
-        # TODO: Integrate with actual APBookkeeper workflow
-        # For now, acknowledge the request and return success
+        # Get company context
+        context = _get_company_context(uid, company_id)
+        mandate_path = context.get("mandate_path", "")
 
-        await hub.broadcast(uid, {
-            "type": WS_EVENTS.INVOICES.PROCESSED,
-            "payload": {
-                "success": True,
-                "processed": document_ids,
-                "failed": [],
-                "summary": {
-                    "totalProcessed": len(document_ids),
-                    "totalFailed": 0
-                }
+        # Use centralized job actions handler
+        from app.wrappers.job_actions_handler import handle_job_process
+
+        result = await handle_job_process(
+            uid=uid,
+            job_type="apbookeeper",
+            payload=payload,
+            company_data={
+                "company_id": company_id,
+                "mandate_path": mandate_path,
+                "company_name": context.get("name", context.get("legal_name", company_id)),
+                "client_uuid": context.get("client_uuid", ""),
+                # Communication settings (for jobbeur payload)
+                "dms_type": context.get("dms_type", "odoo"),
+                "communication_mode": context.get("chat_type", "rag"),
+                "log_communication_mode": context.get("communication_log_type", "rag"),
+                # Workflow defaults — handle_job_process reads router_* keys for all job types
+                "router_approval_required": context.get("ap_approval_required", False),
+                "router_automated_workflow": context.get("ap_automated_workflow", True),
             }
-        })
+        )
+
+        if result.get("success"):
+            job_id = result.get("job_id")
+            logger.info(f"[INVOICES] → Process SUCCESS - job_id={job_id}")
+
+            # Broadcast success
+            logger.info(f"[INVOICES] → Broadcasting INVOICES.PROCESSED (request accepted)")
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.INVOICES.PROCESSED,
+                "payload": {
+                    "success": True,
+                    "processed": document_ids,
+                    "failed": [],
+                    "job_id": job_id,
+                    "summary": {
+                        "totalProcessed": len(document_ids),
+                        "totalFailed": 0
+                    },
+                    "_optimistic_update_id": optimistic_update_id,
+                }
+            })
+
+            # Confirm optimistic update if present
+            if optimistic_update_id:
+                logger.info(f"[INVOICES] → Confirming optimistic update: {optimistic_update_id}")
+                await _confirm_optimistic_update(uid, optimistic_update_id, "invoices", company_id, mandate_path)
+
+            logger.info(f"[INVOICES] ──────────────────────────────────────────────────────")
+        else:
+            logger.warning(f"[INVOICES] → Process FAILED - {result.get('error')}")
+
+            # Rollback optimistic update if present
+            if optimistic_update_id:
+                logger.info(f"[INVOICES] → Rejecting optimistic update: {optimistic_update_id}")
+                await _reject_optimistic_update(uid, optimistic_update_id, "invoices", result.get("error", "Process failed"))
+
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.INVOICES.ERROR,
+                "payload": {
+                    "error": result.get("error", "Process failed"),
+                    "code": result.get("code", "PROCESS_ERROR")
+                }
+            })
 
     except Exception as e:
-        logger.error(f"[INVOICES] Process failed: {e}", exc_info=True)
+        logger.error(f"[INVOICES] Process EXCEPTION: {e}", exc_info=True)
+
+        # Rollback optimistic update if present
+        if optimistic_update_id:
+            await _reject_optimistic_update(uid, optimistic_update_id, "invoices", str(e))
+
         await hub.broadcast(uid, {
             "type": WS_EVENTS.INVOICES.ERROR,
             "payload": {
@@ -632,7 +699,20 @@ async def handle_invoices_instructions_save(
         return
 
     try:
-        # TODO: Save instructions to Firebase/backend
+        # Persist instructions in unified cache (same pattern as routing/banking)
+        from app.cache.unified_cache_manager import get_firebase_cache_manager
+        cache = get_firebase_cache_manager()
+
+        await cache.set_cached_data(
+            uid,
+            company_id,
+            "invoices",
+            f"instructions_{document_id}",
+            {"instructions": instructions},
+            ttl_seconds=3600  # 1 hour
+        )
+
+        logger.info(f"[INVOICES] Instructions saved for document={document_id}")
 
         await hub.broadcast(uid, {
             "type": WS_EVENTS.INVOICES.INSTRUCTIONS_SAVED,
@@ -652,3 +732,64 @@ async def handle_invoices_instructions_save(
                 "code": "SAVE_INSTRUCTIONS_ERROR"
             }
         })
+
+
+# ============================================
+# OPTIMISTIC UPDATE HELPERS
+# ============================================
+
+async def _confirm_optimistic_update(
+    uid: str,
+    update_id: str,
+    module: str,
+    company_id: str,
+    mandate_path: str,
+) -> None:
+    """
+    Confirm an optimistic update after successful backend operation.
+
+    Fetches fresh metrics and sends metrics.update_confirmed event.
+    The frontend can then update its store with the actual counts.
+    """
+    try:
+        from ..metrics.orchestration import confirm_optimistic_update
+        from ..metrics.handlers import get_metrics_handlers
+
+        # Get fresh metrics after the operation
+        handlers = get_metrics_handlers()
+        result = await handlers.module_data(
+            user_id=uid,
+            company_id=company_id,
+            module=module,
+            mandate_path=mandate_path,
+            force_refresh=True,
+        )
+
+        new_counts = result.get("data", {}) if result.get("success") else {}
+
+        await confirm_optimistic_update(uid, update_id, module, new_counts)
+        logger.info(f"[INVOICES] Optimistic update confirmed: {update_id}")
+
+    except Exception as e:
+        logger.error(f"[INVOICES] Failed to confirm optimistic update: {e}")
+
+
+async def _reject_optimistic_update(
+    uid: str,
+    update_id: str,
+    module: str,
+    error: str,
+) -> None:
+    """
+    Reject an optimistic update after failed backend operation.
+
+    Triggers rollback on the frontend - the UI reverts to previous state.
+    """
+    try:
+        from ..metrics.orchestration import reject_optimistic_update
+
+        await reject_optimistic_update(uid, update_id, module, error)
+        logger.info(f"[INVOICES] Optimistic update rejected: {update_id}")
+
+    except Exception as e:
+        logger.error(f"[INVOICES] Failed to reject optimistic update: {e}")
