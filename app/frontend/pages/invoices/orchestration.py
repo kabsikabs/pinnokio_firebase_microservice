@@ -392,8 +392,8 @@ async def handle_invoices_process(
                 "communication_mode": context.get("chat_type", "rag"),
                 "log_communication_mode": context.get("communication_log_type", "rag"),
                 # Workflow defaults — handle_job_process reads router_* keys for all job types
-                "router_approval_required": context.get("ap_approval_required", False),
-                "router_automated_workflow": context.get("ap_automated_workflow", True),
+                "router_approval_required": context.get("workflow_params", {}).get("apbookeeper_approval_required", context.get("apbookeeper_approval_required", False)),
+                "router_automated_workflow": context.get("workflow_params", {}).get("apbookeeper_approval_contact_creation", False),
             }
         )
 
