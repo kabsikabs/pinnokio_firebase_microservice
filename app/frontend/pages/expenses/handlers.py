@@ -122,8 +122,8 @@ class ExpensesHandlers:
             except Exception as e:
                 logger.warning(f"[EXPENSES] Cache read error: {e}")
 
-        # 2. Fetch from Firebase
-        raw_data = await self._fetch_from_firebase(mandate_path)
+        # 2. Fetch from task_manager (primary source) with legacy fallback
+        raw_data = await self._fetch_from_task_manager(user_id, mandate_path)
 
         # 3. Transform (normalize status, group by status)
         transformed = self._transform_expenses(raw_data)
@@ -193,7 +193,7 @@ class ExpensesHandlers:
             }
         """
         try:
-            # 1. Update Firebase (source of truth)
+            # 1. Update legacy Firebase (backwards compat)
             from app.firebase_providers import get_firebase_management
             firebase = get_firebase_management()
 
@@ -203,6 +203,9 @@ class ExpensesHandlers:
 
             if not success:
                 return {"success": False, "error": "Failed to update expense in Firebase"}
+
+            # 1b. Update task_manager (source of truth)
+            self._update_task_manager(user_id, expense_id, {"status": "processed"})
 
             # 2. Apply optimistic update to business cache
             cache_result = self._apply_list_change(
@@ -279,6 +282,9 @@ class ExpensesHandlers:
             if not success:
                 logger.error(f"[EXPENSES][FLOW] ❌ Firebase update failed")
                 return {"success": False, "error": "Failed to reopen expense in Firebase"}
+
+            # Update task_manager (source of truth)
+            self._update_task_manager(user_id, expense_id, {"status": "to_process"})
 
             # Apply optimistic update to business cache
             logger.info(f"[EXPENSES][FLOW] STEP 2b: Applying list change via ListManager")
@@ -365,9 +371,21 @@ class ExpensesHandlers:
             if not success:
                 return {"success": False, "error": "Failed to update expense in Firebase"}
 
+            # Update task_manager (source of truth)
+            tm_updates = {}
+            new_status = safe_data.get("status")
+            if new_status:
+                tm_updates["status"] = self._normalize_status(new_status)
+            # Also cascade non-status fields into department_data.EXbookeeper
+            dept_fields = {k: v for k, v in safe_data.items() if k != "status"}
+            if dept_fields:
+                for k, v in dept_fields.items():
+                    tm_updates[f"department_data.EXbookeeper.{k}"] = v
+            if tm_updates:
+                self._update_task_manager(user_id, expense_id, tm_updates)
+
             # Apply optimistic update to business cache
             # If status changed, use ListManager to move between lists
-            new_status = safe_data.get("status")
             if new_status:
                 cache_result = self._apply_list_change(
                     user_id=user_id,
@@ -452,10 +470,8 @@ class ExpensesHandlers:
             if not success:
                 return {"success": False, "error": "Failed to delete expense from Firebase"}
 
-            # TODO: Implement full deletion logic:
-            # - Transfer Drive file to input folder using DriveClientService
-            # - Delete from ChromaDB using ASYNC_DELETE_MULTIPLE_JOBS
-            # - Delete from task_manager
+            # Delete from task_manager (source of truth)
+            self._delete_from_task_manager(user_id, expense_id)
 
             # Apply optimistic update to business cache (remove item)
             cache_result = self._remove_item_from_cache(
@@ -484,14 +500,74 @@ class ExpensesHandlers:
     # PRIVATE HELPERS
     # ===============================================
 
-    async def _fetch_from_firebase(self, mandate_path: str) -> Dict[str, Any]:
-        """Fetch expenses from Firebase."""
+    async def _fetch_from_task_manager(self, user_id: str, mandate_path: str) -> Dict[str, Any]:
+        """
+        Fetch expenses from task_manager (source unique de verite).
+
+        Queries clients/{uid}/task_manager where department=EXbookeeper
+        and mandate_path matches.
+
+        Falls back to legacy expenses_details if task_manager returns nothing.
+
+        Returns:
+            Dict {expense_id: expense_data} (same format as legacy for compatibility
+            with _transform_expenses).
+        """
         try:
+            from app.firebase_client import get_firestore
+            from google.cloud.firestore_v1.base_query import FieldFilter
+
+            db = get_firestore()
+            task_mgr_ref = db.collection(f"clients/{user_id}/task_manager")
+            query = task_mgr_ref.where(
+                filter=FieldFilter("department", "in", ["EXbookeeper", "exbookeeper"])
+            )
+
+            expenses_data = {}
+            for doc in query.stream():
+                data = doc.to_dict() or {}
+                doc_mandate = data.get("mandate_path", "")
+
+                # Filter by mandate_path (exact match)
+                if doc_mandate != mandate_path:
+                    continue
+
+                # Extract department_data.EXbookeeper as the expense content
+                dept_data = data.get("department_data", {})
+                expense_entry = (
+                    dept_data.get("EXbookeeper", {})
+                    or dept_data.get("exbookeeper", {})
+                    or {}
+                )
+
+                # Merge root-level fields into the expense entry
+                expense_entry["status"] = data.get("status", expense_entry.get("status", ""))
+                expense_entry["file_name"] = data.get("file_name", expense_entry.get("file_name", ""))
+                expense_entry["file_id"] = data.get("file_id", expense_entry.get("file_id", ""))
+                expense_entry["mandate_path"] = doc_mandate
+
+                expenses_data[doc.id] = expense_entry
+
+            if expenses_data:
+                logger.info(
+                    f"[EXPENSES] Fetched {len(expenses_data)} expenses from task_manager "
+                    f"(user={user_id}, mandate={mandate_path[-30:]}...)"
+                )
+                return expenses_data
+
+            # Fallback: legacy expenses_details collection
+            logger.warning(
+                f"[EXPENSES] task_manager returned 0 expenses, trying legacy collection"
+            )
             from app.firebase_providers import get_firebase_management
             firebase = get_firebase_management()
-            return firebase.fetch_expenses_by_mandate(mandate_path) or {}
+            legacy_data = firebase.fetch_expenses_by_mandate(mandate_path) or {}
+            if legacy_data:
+                logger.info(f"[EXPENSES] Legacy fallback returned {len(legacy_data)} expenses")
+            return legacy_data
+
         except Exception as e:
-            logger.error(f"[EXPENSES] Firebase fetch error: {e}")
+            logger.error(f"[EXPENSES] _fetch_from_task_manager error: {e}", exc_info=True)
             return {}
 
     def _transform_expenses(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -826,6 +902,53 @@ class ExpensesHandlers:
         except Exception as e:
             logger.error(f"[EXPENSES] _remove_item_from_cache failed: {e}", exc_info=True)
             return None
+
+    # ===============================================
+    # TASK_MANAGER WRITE HELPERS
+    # ===============================================
+
+    def _update_task_manager(self, user_id: str, expense_id: str, updates: Dict[str, Any]) -> None:
+        """
+        Update a document in task_manager (source of truth for expenses).
+
+        Args:
+            user_id: Firebase UID
+            expense_id: Document ID in task_manager
+            updates: Dict of fields to update (supports dot notation for nested fields)
+        """
+        try:
+            from app.firebase_client import get_firestore
+            db = get_firestore()
+            doc_ref = db.collection(f"clients/{user_id}/task_manager").document(expense_id)
+            doc = doc_ref.get()
+            if doc.exists:
+                doc_ref.update(updates)
+                logger.info(f"[EXPENSES] task_manager updated: {expense_id} fields={list(updates.keys())}")
+            else:
+                logger.warning(f"[EXPENSES] task_manager doc not found: {expense_id} (skip update)")
+        except Exception as e:
+            logger.error(f"[EXPENSES] task_manager update failed for {expense_id}: {e}")
+
+    def _delete_from_task_manager(self, user_id: str, expense_id: str) -> None:
+        """
+        Delete a document from task_manager.
+
+        Args:
+            user_id: Firebase UID
+            expense_id: Document ID in task_manager
+        """
+        try:
+            from app.firebase_client import get_firestore
+            db = get_firestore()
+            doc_ref = db.collection(f"clients/{user_id}/task_manager").document(expense_id)
+            doc = doc_ref.get()
+            if doc.exists:
+                doc_ref.delete()
+                logger.info(f"[EXPENSES] task_manager deleted: {expense_id}")
+            else:
+                logger.warning(f"[EXPENSES] task_manager doc not found for delete: {expense_id}")
+        except Exception as e:
+            logger.error(f"[EXPENSES] task_manager delete failed for {expense_id}: {e}")
 
     def _calculate_metrics(self, cache_data: Dict[str, Any]) -> Dict[str, Any]:
         """
