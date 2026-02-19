@@ -61,6 +61,7 @@ from app.realtime.contextual_publisher import (
 )
 from app.status_normalization import StatusNormalizer
 from app.active_job_manager import ActiveJobManager
+from app.firebase_providers import FirebaseManagement
 from app.llm_service.redis_namespaces import (
     build_business_key,
     get_ttl_for_domain,
@@ -109,6 +110,7 @@ def _extract_active_job_type(department: str) -> Optional[str]:
         "banker": "banker",
         "bankbookeeper": "banker",
         "banking": "banker",
+        "exbookeeper": "exbookeeper",
         "onboarding": "onboarding",
     }
     return mapping.get(department.lower()) if department else None
@@ -136,6 +138,7 @@ def _extract_department_to_domain(department: str) -> str:
         "banking": "bank",
         "banker": "bank",           # Workers envoient "Banker"
         "bankbookeeper": "bank",    # Backend _persist_jobs écrit "Bankbookeeper"
+        "exbookeeper": "expenses",  # Workers envoient "EXbookeeper"
         "routing": "routing",
         "router": "routing",
         "hr": "hr",
@@ -403,6 +406,115 @@ class RedisSubscriber:
             self._error_count += 1
             logger.error("[REDIS_SUBSCRIBER] unexpected_error channel=%s error=%s", channel, str(e), exc_info=True)
 
+    # ── Shared sanitization ──────────────────────────────────────────
+
+    @staticmethod
+    def _sanitize_value(v):
+        """
+        Sanitize a value that may contain Firestore sentinel strings.
+        Workers use json.dumps(default=str) which converts:
+          - firestore.SERVER_TIMESTAMP → "Sentinel: Value used to set a document field to ..."
+        """
+        if isinstance(v, str) and v.startswith("Sentinel:"):
+            from datetime import datetime, timezone
+            return datetime.now(timezone.utc).isoformat()
+        return v
+
+    def _resolve_notification_doc_id(self, message_data: Dict[str, Any]) -> str:
+        """
+        Resolve the Firestore document ID from a raw Redis notification payload.
+
+        Convention:
+          - Router stores notifications at /notifications/{drive_id}
+          - AP/Bank store notifications at /notifications/{job_id}
+        """
+        # Flatten nested to find drive_id if present
+        nested = message_data.get("update_data") or message_data.get("data")
+        if isinstance(nested, dict):
+            drive_id = nested.get("drive_id") or message_data.get("drive_id")
+        else:
+            drive_id = message_data.get("drive_id")
+        return drive_id or message_data.get("job_id", "")
+
+    # Mapping lowercase function_name → frontend NotificationFunctionName
+    # Frontend expects: 'Router' | 'APbookeeper' | 'Bankbookeeper'
+    FUNCTION_NAME_NORMALIZE = {
+        "router": "Router",
+        "apbookeeper": "APbookeeper",
+        "bankbookeeper": "Bankbookeeper",
+        "onboarding": "Onboarding",
+    }
+
+    @staticmethod
+    def _transform_notification(doc_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Transform a Firestore notification document to the frontend Notification
+        interface (types/notification.ts).
+
+        Same logic as subscription_manager._transform_notification but static
+        so it can be used from RedisSubscriber without SubscriptionManager instance.
+        """
+        additional_info = data.get("additional_info", "")
+        has_additional_info = False
+        additional_info_formatted = ""
+
+        if additional_info:
+            has_additional_info = True
+            if isinstance(additional_info, str):
+                try:
+                    parsed = json.loads(additional_info)
+                    additional_info_formatted = json.dumps(parsed, indent=2)
+                except json.JSONDecodeError:
+                    additional_info_formatted = additional_info
+            else:
+                additional_info_formatted = json.dumps(additional_info, indent=2)
+
+        # Serialize timestamp (Firestore DatetimeWithNanoseconds / datetime / string)
+        raw_ts = data.get("timestamp")
+        if raw_ts is None:
+            timestamp = ""
+        elif hasattr(raw_ts, "isoformat"):
+            timestamp = raw_ts.isoformat()
+        elif isinstance(raw_ts, str):
+            # Sanitize Sentinel strings that slipped through json.dumps(default=str)
+            timestamp = raw_ts if not raw_ts.startswith("Sentinel:") else ""
+        else:
+            timestamp = str(raw_ts)
+
+        # Normalize functionName to match frontend enum: Router | APbookeeper | Bankbookeeper
+        raw_fn = data.get("function_name", data.get("functionName", "Router"))
+        function_name = RedisSubscriber.FUNCTION_NAME_NORMALIZE.get(
+            raw_fn.lower() if isinstance(raw_fn, str) else "", raw_fn
+        )
+
+        # Build file name and status
+        file_name = data.get("file_name", data.get("fileName", ""))
+        status = data.get("status", "pending")
+
+        # Generate message if missing (notification docs often don't have a 'message' field)
+        message = data.get("message", "")
+        if not message and file_name:
+            message = f"{file_name} - {status}"
+
+        return {
+            "docId": doc_id,
+            "message": message,
+            "fileName": file_name,
+            "collectionId": data.get("collection_id", data.get("collectionId", "")),
+            "collectionName": data.get("collection_name", data.get("collectionName", "")),
+            "status": status,
+            "read": data.get("read", False),
+            "jobId": data.get("job_id", data.get("jobId", "")),
+            "fileId": data.get("file_id", data.get("fileId", "")),
+            "functionName": function_name,
+            "timestamp": timestamp,
+            "additionalInfo": additional_info,
+            "hasAdditionalInfo": has_additional_info,
+            "additionalInfoFormatted": additional_info_formatted,
+            "driveLink": data.get("drive_link", data.get("driveLink", "")),
+            "batchId": data.get("batch_id", data.get("batchId", "")),
+        }
+
     async def _handle_notification_message(self, uid: str, channel: str, message_data: Dict[str, Any]) -> None:
         """
         Traite un message du canal notifications.
@@ -410,6 +522,12 @@ class RedisSubscriber:
         Canal: user:{uid}/notifications
         Niveau: USER (global)
         Règle: Publier si utilisateur connecté uniquement
+
+        Architecture:
+        - Le PubSub delta est un SIGNAL (seuls les champs modifiés).
+        - On re-lit la notification COMPLÈTE depuis Firebase (source de vérité).
+        - On transforme vers le format frontend via _transform_notification().
+        - On cache et publie le document complet au frontend.
 
         Args:
             uid: User ID
@@ -426,22 +544,51 @@ class RedisSubscriber:
             logger.info("[REDIS_SUBSCRIBER] handle_notification START - uid=%s channel=%s", uid, channel)
             logger.info("[REDIS_SUBSCRIBER] → notification_type=%s job_id=%s", msg_type, job_id)
 
-            # Normalisation du status (si présent)
-            raw_status = message_data.get("status")
-            if raw_status:
-                function_name = message_data.get("functionName", "")
-                normalized_status = StatusNormalizer.normalize_for_function(function_name, raw_status)
-                category = StatusNormalizer.get_category(normalized_status)
-                message_data["status"] = normalized_status
-                message_data["status_category"] = category
-                logger.debug("[REDIS_SUBSCRIBER] → status normalized: %s → %s (category=%s)", raw_status, normalized_status, category)
+            # ── Step 0: Resolve the Firestore document ID from the PubSub signal ──
+            doc_id = self._resolve_notification_doc_id(message_data)
+            if not doc_id:
+                logger.warning("[REDIS_SUBSCRIBER] → cannot resolve docId from payload, skipping")
+                return
+
+            logger.info("[REDIS_SUBSCRIBER] → resolved docId=%s", doc_id)
+
+            # ── Step 1: Re-read the FULL notification from Firebase ──
+            # The PubSub message only has the changed fields;
+            # Firebase has the complete document (source of truth).
+            notification_data = None
+            doc_path = f"clients/{uid}/notifications/{doc_id}"
+            try:
+                firebase = FirebaseManagement()
+                raw_doc = await asyncio.to_thread(firebase.get_document, doc_path)
+                if raw_doc:
+                    notification_data = self._transform_notification(doc_id, raw_doc)
+                    logger.info(
+                        "[REDIS_SUBSCRIBER] → fetched from Firebase: fileName=%s status=%s functionName=%s",
+                        notification_data.get("fileName", "?"),
+                        notification_data.get("status", "?"),
+                        notification_data.get("functionName", "?"),
+                    )
+                else:
+                    logger.warning("[REDIS_SUBSCRIBER] → doc not found in Firebase: %s", doc_path)
+            except Exception as fb_err:
+                logger.error("[REDIS_SUBSCRIBER] → Firebase fetch failed: %s", fb_err)
+
+            # Fallback: if Firebase read failed, build minimal notification from PubSub delta
+            if notification_data is None:
+                logger.warning("[REDIS_SUBSCRIBER] → using PubSub delta as fallback (Firebase unavailable)")
+                nested = message_data.get("update_data") or message_data.get("data")
+                flat = dict(message_data)
+                if isinstance(nested, dict):
+                    for k, v in nested.items():
+                        if k not in flat:
+                            flat[k] = v
+                notification_data = self._transform_notification(doc_id, flat)
 
             # Vérification connexion
             is_connected = hub.is_user_connected(uid)
-            logger.debug("[REDIS_SUBSCRIBER] → user_connected=%s", is_connected)
 
-            # Étape 1: Mise à jour du cache USER — upsert par docId (TOUJOURS)
-            logger.info("[REDIS_SUBSCRIBER] → Step 1: Updating USER cache (upsert by docId)...")
+            # ── Step 2: Update notification cache (upsert by docId) ──
+            logger.info("[REDIS_SUBSCRIBER] → Step 2: Updating USER cache (upsert by docId)...")
             ws_action = "new"
             try:
                 cache_key = _get_cache_key(CacheLevel.USER, uid, subkey="notifications")
@@ -459,19 +606,18 @@ class RedisSubscriber:
                     notif_cache = {"items": notif_cache}
                 notif_items = notif_cache.get("items", [])
 
-                # Upsert: supprimer l'ancienne entrée si même docId
-                doc_id = message_data.get("docId") or message_data.get("doc_id")
+                # Remove existing entry with same docId (dedup)
                 if doc_id:
                     original_len = len(notif_items)
                     notif_items = [
                         item for item in notif_items
-                        if item.get("docId") != doc_id and item.get("doc_id") != doc_id
+                        if item.get("docId") != doc_id
                     ]
                     if len(notif_items) < original_len:
                         ws_action = "update"
 
-                # Insérer en tête (la notification complète, pas le wrapper)
-                notif_items.insert(0, message_data)
+                # Insert the FULL transformed notification at head
+                notif_items.insert(0, notification_data)
                 notif_cache["items"] = notif_items[:100]
                 redis.setex(cache_key, ttl, json.dumps(notif_cache))
 
@@ -481,32 +627,40 @@ class RedisSubscriber:
             except Exception as cache_error:
                 logger.error("[REDIS_SUBSCRIBER] cache_update_failed uid=%s error=%s", uid, str(cache_error), exc_info=True)
 
-            # Étape 2: Publication WebSocket si connecté
+            # ── Step 3: Publish to frontend via WebSocket ──
+            # Use hub.broadcast directly (not publish_user_event) to avoid
+            # double cache writes — we already manage our own notification cache above.
             if is_connected:
-                logger.info("[REDIS_SUBSCRIBER] → Step 2: Publishing via WebSocket...")
+                logger.info("[REDIS_SUBSCRIBER] → Step 3: Publishing via WebSocket...")
                 try:
                     event_type = WS_EVENTS.NOTIFICATION.DELTA
-                    payload = {"action": ws_action, "data": message_data}
+                    payload = {"action": ws_action, "data": notification_data}
 
-                    # Publier via contextual_publisher (niveau USER)
-                    published = await publish_user_event(
-                        uid=uid,
-                        event_type=event_type,
-                        payload=payload,
-                        cache_subkey="notifications"
+                    # Log the exact payload for debugging
+                    logger.info(
+                        "[REDIS_SUBSCRIBER] → WS payload: action=%s docId=%s functionName=%s fileName=%s status=%s message=%s",
+                        ws_action,
+                        notification_data.get("docId", "?"),
+                        notification_data.get("functionName", "?"),
+                        notification_data.get("fileName", "?")[:40],
+                        notification_data.get("status", "?"),
+                        notification_data.get("message", "?")[:40],
                     )
 
-                    if published:
-                        logger.info("[REDIS_SUBSCRIBER] → published event_type=%s", event_type)
-                        logger.info("[REDIS_SUBSCRIBER] handle_notification SUCCESS - published to connected user")
-                    else:
-                        logger.warning("[REDIS_SUBSCRIBER] → publish_failed (user disconnected during processing)")
+                    # Broadcast directly to WebSocket (skip publish_user_event cache)
+                    await hub.broadcast(uid, {
+                        "type": event_type,
+                        "payload": payload
+                    })
+
+                    logger.info("[REDIS_SUBSCRIBER] → published event_type=%s ws_action=%s docId=%s", event_type, ws_action, doc_id)
+                    logger.info("[REDIS_SUBSCRIBER] handle_notification SUCCESS - published to connected user")
 
                 except Exception as publish_error:
                     logger.error("[REDIS_SUBSCRIBER] publish_failed uid=%s error=%s", uid, str(publish_error), exc_info=True)
 
             else:
-                logger.info("[REDIS_SUBSCRIBER] → Step 2: Skipping WebSocket publish (user not connected)")
+                logger.info("[REDIS_SUBSCRIBER] → Step 3: Skipping WebSocket publish (user not connected)")
                 logger.info("[REDIS_SUBSCRIBER] handle_notification SUCCESS - cache updated, no WS publish")
 
             duration_ms = (time.time() - start_time) * 1000
@@ -607,6 +761,7 @@ class RedisSubscriber:
         "routing": ["to_process", "in_process", "pending", "processed"],
         "invoices": ["to_process", "in_process", "pending", "processed"],
         "bank": ["to_process", "in_process", "pending", "processed"],
+        "expenses": ["to_process", "in_process", "pending", "processed"],
     }
 
     # Mapping status → catégorie universelle (to_process, in_process, pending, processed)
@@ -681,10 +836,6 @@ class RedisSubscriber:
             is_wrapped = "cache_version" in cache_data and "data" in cache_data
             inner_data = cache_data.get("data", cache_data) if is_wrapped else cache_data
 
-            # Déterminer le nouveau status et la clé de catégorie concrète pour CE domaine
-            new_status = (item_data.get("status") or "").lower()
-            target_category = self._get_target_category_key(domain, new_status)
-
             # Récupérer les clés de catégorie pour ce domaine
             category_keys = self.DOMAIN_CATEGORY_KEYS.get(
                 domain, self.DOMAIN_CATEGORY_KEYS.get("routing", [])
@@ -709,6 +860,13 @@ class RedisSubscriber:
                             break
                     if existing_item:
                         break
+
+                # Déterminer le nouveau status: si le delta n'a pas de status,
+                # conserver le status de l'item existant pour la catégorisation
+                new_status = (item_data.get("status") or "").lower()
+                if not new_status and existing_item:
+                    new_status = (existing_item.get("status") or "").lower()
+                target_category = self._get_target_category_key(domain, new_status)
 
                 # Étape 2: Retirer l'item de toutes les listes
                 for cat_key in category_keys:
@@ -1096,6 +1254,14 @@ class RedisSubscriber:
             logger.info("[REDIS_SUBSCRIBER] ═══════════════════════════════════════════════════════")
             logger.info("[REDIS_SUBSCRIBER] handle_task_manager START - uid=%s channel=%s", uid, channel)
             logger.info("[REDIS_SUBSCRIBER] → task_type=%s job_id=%s department=%s", task_type, job_id, department)
+
+            # ── Sanitize Sentinel values from all levels ──
+            for k in list(message_data.keys()):
+                message_data[k] = self._sanitize_value(message_data[k])
+            nested_data = message_data.get("data")
+            if isinstance(nested_data, dict):
+                for k in list(nested_data.keys()):
+                    nested_data[k] = self._sanitize_value(nested_data[k])
 
             # Extraction contexte
             company_id = message_data.get("collection_id") or message_data.get("company_id")

@@ -94,13 +94,15 @@ class ExpensesHandlers:
             {
                 "success": True,
                 "data": {
-                    "open": [...],
-                    "running": [...],
-                    "closed": [...],
+                    "to_process": [...],
+                    "in_process": [...],
+                    "pending": [...],
+                    "processed": [...],
                     "metrics": {
-                        "totalOpen": int,
-                        "totalRunning": int,
-                        "totalClosed": int,
+                        "totalToProcess": int,
+                        "totalInProcess": int,
+                        "totalPending": int,
+                        "totalProcessed": int,
                         "totalAmount": float
                     }
                 },
@@ -496,14 +498,16 @@ class ExpensesHandlers:
         """
         Transform and normalize expenses data.
 
-        Groups expenses by status:
-        - open: to_process, open, draft
-        - running: running, in_process, processing
-        - closed: close, closed, completed
+        Groups expenses by normalized status:
+        - to_process: to_process, open, draft
+        - in_process: running, in_process, processing
+        - pending: pending
+        - processed: close, closed, completed
         """
-        open_list: List[Dict] = []
-        running_list: List[Dict] = []
-        closed_list: List[Dict] = []
+        to_process_list: List[Dict] = []
+        in_process_list: List[Dict] = []
+        pending_list: List[Dict] = []
+        processed_list: List[Dict] = []
         total_amount = 0.0
 
         for expense_id, expense in raw_data.items():
@@ -517,13 +521,15 @@ class ExpensesHandlers:
                 "status": status,
             }
 
-            if status == "close":
-                closed_list.append(item)
-            elif status == "running":
-                running_list.append(item)
+            if status == "processed":
+                processed_list.append(item)
+            elif status == "in_process":
+                in_process_list.append(item)
+            elif status == "pending":
+                pending_list.append(item)
             else:
-                open_list.append(item)
-                # Sum amounts for open expenses
+                to_process_list.append(item)
+                # Sum amounts for to_process expenses
                 try:
                     amount = float(expense.get("amount", 0) or 0)
                     total_amount += amount
@@ -531,20 +537,22 @@ class ExpensesHandlers:
                     pass
 
         # Sort by date (most recent first)
-        for lst in [open_list, running_list, closed_list]:
+        for lst in [to_process_list, in_process_list, pending_list, processed_list]:
             lst.sort(
                 key=lambda x: x.get("date") or x.get("created_at") or "",
                 reverse=True
             )
 
         return {
-            "open": open_list,
-            "running": running_list,
-            "closed": closed_list,
+            "to_process": to_process_list,
+            "in_process": in_process_list,
+            "pending": pending_list,
+            "processed": processed_list,
             "metrics": {
-                "totalOpen": len(open_list),
-                "totalRunning": len(running_list),
-                "totalClosed": len(closed_list),
+                "totalToProcess": len(to_process_list),
+                "totalInProcess": len(in_process_list),
+                "totalPending": len(pending_list),
+                "totalProcessed": len(processed_list),
                 "totalAmount": round(total_amount, 2),
             }
         }
@@ -554,19 +562,22 @@ class ExpensesHandlers:
         Normalize status to canonical values.
 
         Maps:
-        - to_process, open, draft -> to_process (displayed as "open")
-        - running, in_process, processing -> running
-        - close, closed, completed -> close (displayed as "closed")
+        - to_process, open, draft -> to_process
+        - running, in_process, processing -> in_process
+        - pending -> pending
+        - close, closed, completed -> processed
         """
         if not status:
             return "to_process"
 
         status_lower = status.lower().strip()
 
-        if status_lower in ("close", "closed", "completed"):
-            return "close"
+        if status_lower in ("close", "closed", "completed", "processed"):
+            return "processed"
         elif status_lower in ("running", "in_process", "processing"):
-            return "running"
+            return "in_process"
+        elif status_lower == "pending":
+            return "pending"
         else:
             return "to_process"
 
@@ -624,13 +635,14 @@ class ExpensesHandlers:
 
             # Log current state BEFORE change
             logger.info(f"[EXPENSES][FLOW] Cache BEFORE ListManager:")
-            logger.info(f"[EXPENSES][FLOW]   open: {len(cache_data.get('open', []))} items")
-            logger.info(f"[EXPENSES][FLOW]   running: {len(cache_data.get('running', []))} items")
-            logger.info(f"[EXPENSES][FLOW]   closed: {len(cache_data.get('closed', []))} items")
+            logger.info(f"[EXPENSES][FLOW]   to_process: {len(cache_data.get('to_process', []))} items")
+            logger.info(f"[EXPENSES][FLOW]   in_process: {len(cache_data.get('in_process', []))} items")
+            logger.info(f"[EXPENSES][FLOW]   pending: {len(cache_data.get('pending', []))} items")
+            logger.info(f"[EXPENSES][FLOW]   processed: {len(cache_data.get('processed', []))} items")
             logger.info(f"[EXPENSES][FLOW]   metrics: {cache_data.get('metrics', {})}")
 
             # Log expense_ids in each list for debugging
-            for list_name in ['open', 'running', 'closed']:
+            for list_name in ['to_process', 'in_process', 'pending', 'processed']:
                 ids = [item.get('expense_id') for item in cache_data.get(list_name, [])]
                 logger.info(f"[EXPENSES][FLOW]   {list_name} expense_ids: {ids[:5]}{'...' if len(ids) > 5 else ''}")
 
@@ -662,9 +674,10 @@ class ExpensesHandlers:
 
             # Log state AFTER change
             logger.info(f"[EXPENSES][FLOW] Cache AFTER ListManager:")
-            logger.info(f"[EXPENSES][FLOW]   open: {len(cache_data.get('open', []))} items")
-            logger.info(f"[EXPENSES][FLOW]   running: {len(cache_data.get('running', []))} items")
-            logger.info(f"[EXPENSES][FLOW]   closed: {len(cache_data.get('closed', []))} items")
+            logger.info(f"[EXPENSES][FLOW]   to_process: {len(cache_data.get('to_process', []))} items")
+            logger.info(f"[EXPENSES][FLOW]   in_process: {len(cache_data.get('in_process', []))} items")
+            logger.info(f"[EXPENSES][FLOW]   pending: {len(cache_data.get('pending', []))} items")
+            logger.info(f"[EXPENSES][FLOW]   processed: {len(cache_data.get('processed', []))} items")
             logger.info(f"[EXPENSES][FLOW]   metrics: {metrics}")
 
             # 4. Save updated cache back to Redis
@@ -719,7 +732,7 @@ class ExpensesHandlers:
 
             # Find and update item in all lists
             found = False
-            for list_name in ["open", "running", "closed"]:
+            for list_name in ["to_process", "in_process", "pending", "processed"]:
                 items = cache_data.get(list_name, [])
                 for item in items:
                     if item.get("expense_id") == expense_id:
@@ -781,7 +794,7 @@ class ExpensesHandlers:
 
             # Remove item from all lists
             found = False
-            for list_name in ["open", "running", "closed"]:
+            for list_name in ["to_process", "in_process", "pending", "processed"]:
                 items = cache_data.get(list_name, [])
                 original_len = len(items)
                 cache_data[list_name] = [
@@ -819,18 +832,19 @@ class ExpensesHandlers:
         Calculate metrics from cache data.
 
         Args:
-            cache_data: Cache data with open, running, closed lists
+            cache_data: Cache data with to_process, in_process, pending, processed lists
 
         Returns:
-            Metrics dict with totalOpen, totalRunning, totalClosed, totalAmount
+            Metrics dict with totalToProcess, totalInProcess, totalPending, totalProcessed, totalAmount
         """
-        open_list = cache_data.get("open", [])
-        running_list = cache_data.get("running", [])
-        closed_list = cache_data.get("closed", [])
+        to_process_list = cache_data.get("to_process", [])
+        in_process_list = cache_data.get("in_process", [])
+        pending_list = cache_data.get("pending", [])
+        processed_list = cache_data.get("processed", [])
 
-        # Calculate total amount from open expenses
+        # Calculate total amount from to_process expenses
         total_amount = 0.0
-        for item in open_list:
+        for item in to_process_list:
             try:
                 amount = float(item.get("amount", 0) or 0)
                 total_amount += amount
@@ -838,8 +852,9 @@ class ExpensesHandlers:
                 pass
 
         return {
-            "totalOpen": len(open_list),
-            "totalRunning": len(running_list),
-            "totalClosed": len(closed_list),
+            "totalToProcess": len(to_process_list),
+            "totalInProcess": len(in_process_list),
+            "totalPending": len(pending_list),
+            "totalProcessed": len(processed_list),
             "totalAmount": round(total_amount, 2),
         }

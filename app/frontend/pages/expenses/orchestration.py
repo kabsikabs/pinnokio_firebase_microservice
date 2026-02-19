@@ -21,7 +21,7 @@ Flow (3-Level Architecture):
 
 ARCHITECTURE (3-Level Cache):
     - Level 2: company:{uid}:{cid}:context -> Full company_data (mandate_path, client_uuid, etc.)
-    - Level 3: business:{uid}:{cid}:expenses -> { open, running, closed, metrics }
+    - Level 3: business:{uid}:{cid}:expenses -> { to_process, in_process, pending, processed, metrics }
 
 Integration with Dashboard:
     All actions that modify expenses (close, reopen, update, delete, refresh)
@@ -170,7 +170,7 @@ async def handle_expenses_orchestrate_init(
         # Uses handlers.list_expenses which:
         # - Checks Redis cache first
         # - On miss: fetches from Firebase
-        # - Returns: open, running, closed (correctly sorted)
+        # - Returns: to_process, in_process, pending, processed (correctly sorted)
         # ════════════════════════════════════════════════════════════
         handlers = get_expenses_handlers()
         result = await handlers.list_expenses(
@@ -193,9 +193,10 @@ async def handle_expenses_orchestrate_init(
 
         logger.info(
             f"[EXPENSES] Data loaded: "
-            f"open={len(expenses_data.get('open', []))}, "
-            f"running={len(expenses_data.get('running', []))}, "
-            f"closed={len(expenses_data.get('closed', []))} "
+            f"to_process={len(expenses_data.get('to_process', []))}, "
+            f"in_process={len(expenses_data.get('in_process', []))}, "
+            f"pending={len(expenses_data.get('pending', []))}, "
+            f"processed={len(expenses_data.get('processed', []))} "
             f"from_cache={result.get('from_cache', False)}"
         )
 
@@ -248,7 +249,7 @@ async def handle_expenses_orchestrate_init(
 
         logger.info(
             f"[EXPENSES] Orchestration completed for company={company_id}: "
-            f"total={expenses_data.get('metrics', {}).get('totalOpen', 0) + expenses_data.get('metrics', {}).get('totalRunning', 0) + expenses_data.get('metrics', {}).get('totalClosed', 0)} expenses"
+            f"total={expenses_data.get('metrics', {}).get('totalToProcess', 0) + expenses_data.get('metrics', {}).get('totalInProcess', 0) + expenses_data.get('metrics', {}).get('totalPending', 0) + expenses_data.get('metrics', {}).get('totalProcessed', 0)} expenses"
         )
 
     except Exception as e:

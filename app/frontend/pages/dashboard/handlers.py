@@ -111,11 +111,15 @@ class DashboardHandlers:
                     "approvals": [...],
                     "tasks": [...],
                     "expenses": {
-                        "open": [...],
-                        "closed": [...],
+                        "to_process": [...],
+                        "in_process": [...],
+                        "pending": [...],
+                        "processed": [...],
                         "metrics": {
-                            "totalOpen": 5,
-                            "totalClosed": 12,
+                            "totalToProcess": 5,
+                            "totalInProcess": 0,
+                            "totalPending": 0,
+                            "totalProcessed": 12,
                             "totalAmount": 15000.00
                         }
                     },
@@ -618,10 +622,10 @@ class DashboardHandlers:
                     cached_metrics = expenses_data.get("metrics", {})
 
                     # Map to dashboard metrics format
-                    # Note: business cache has totalOpen, totalRunning, totalClosed
+                    # Note: business cache has totalToProcess, totalInProcess, totalPending, totalProcessed
                     # Dashboard metrics use: open, closed, pendingApproval
-                    open_count = cached_metrics.get("totalOpen", 0) + cached_metrics.get("totalRunning", 0)
-                    closed_count = cached_metrics.get("totalClosed", 0)
+                    open_count = cached_metrics.get("totalToProcess", 0) + cached_metrics.get("totalInProcess", 0) + cached_metrics.get("totalPending", 0)
+                    closed_count = cached_metrics.get("totalProcessed", 0)
 
                     metrics["expenses"]["open"] = open_count
                     metrics["expenses"]["closed"] = closed_count
@@ -882,11 +886,15 @@ class DashboardHandlers:
         Returns:
             Dict avec structure:
             {
-                "open": [...],      # Liste des expenses ouvertes (status != completed)
-                "closed": [...],    # Liste des expenses fermées (status == completed)
+                "to_process": [...],
+                "in_process": [...],
+                "pending": [...],
+                "processed": [...],
                 "metrics": {
-                    "totalOpen": 5,
-                    "totalClosed": 12,
+                    "totalToProcess": 5,
+                    "totalInProcess": 0,
+                    "totalPending": 0,
+                    "totalProcessed": 12,
                     "totalAmount": 15000.00,
                     "totalTokens": 125000
                 }
@@ -1061,7 +1069,7 @@ class DashboardHandlers:
                 department_data = task_data.get("department_data", {})
                 ap_data = department_data.get("APbookeeper", {}) or department_data.get("Apbookeeper", {}) or {}
                 router_data = department_data.get("Router", {}) or department_data.get("router", {}) or {}
-                banker_data = department_data.get("Banker", {}) or department_data.get("banker", {}) or {}
+                banker_data = department_data.get("Bankbookeeper", {}) or department_data.get("Banker", {}) or department_data.get("banker", {}) or {}
 
                 # Override currency with department-specific currency (invoice currency)
                 if ap_data.get("currency"):
