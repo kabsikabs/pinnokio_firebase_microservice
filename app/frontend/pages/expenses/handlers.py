@@ -193,18 +193,17 @@ class ExpensesHandlers:
             }
         """
         try:
-            # 1. Update legacy Firebase (backwards compat)
+            # 1. Best-effort: update legacy Firebase (may not exist for migrated expenses)
             from app.firebase_providers import get_firebase_management
             firebase = get_firebase_management()
 
-            success = firebase.update_expense_in_firebase(
+            legacy_ok = firebase.update_expense_in_firebase(
                 mandate_path, expense_id, {"status": "close"}
             )
+            if not legacy_ok:
+                logger.warning(f"[EXPENSES] Legacy Firebase update skipped for {expense_id} (migrated?)")
 
-            if not success:
-                return {"success": False, "error": "Failed to update expense in Firebase"}
-
-            # 1b. Update task_manager (source of truth)
+            # 1b. Source de vérité: task_manager (TOUJOURS exécuté)
             self._update_task_manager(user_id, expense_id, {"status": "processed"})
 
             # 2. Apply optimistic update to business cache
@@ -273,17 +272,16 @@ class ExpensesHandlers:
             from app.firebase_providers import get_firebase_management
             firebase = get_firebase_management()
 
-            logger.info(f"[EXPENSES][FLOW] STEP 2a: Updating Firebase (status -> to_process)")
-            success = firebase.update_expense_in_firebase(
+            # Best-effort: update legacy Firebase (may not exist for migrated expenses)
+            logger.info(f"[EXPENSES][FLOW] STEP 2a: Updating legacy Firebase (status -> to_process)")
+            legacy_ok = firebase.update_expense_in_firebase(
                 mandate_path, expense_id, {"status": "to_process"}
             )
-            logger.info(f"[EXPENSES][FLOW] Firebase update result: {success}")
+            logger.info(f"[EXPENSES][FLOW] Legacy Firebase update result: {legacy_ok}")
+            if not legacy_ok:
+                logger.warning(f"[EXPENSES][FLOW] Legacy Firebase update skipped for {expense_id} (migrated?)")
 
-            if not success:
-                logger.error(f"[EXPENSES][FLOW] ❌ Firebase update failed")
-                return {"success": False, "error": "Failed to reopen expense in Firebase"}
-
-            # Update task_manager (source of truth)
+            # Source de vérité: task_manager (TOUJOURS exécuté)
             self._update_task_manager(user_id, expense_id, {"status": "to_process"})
 
             # Apply optimistic update to business cache
@@ -364,14 +362,14 @@ class ExpensesHandlers:
             from app.firebase_providers import get_firebase_management
             firebase = get_firebase_management()
 
-            success = firebase.update_expense_in_firebase(
+            # Best-effort: update legacy Firebase (may not exist for migrated expenses)
+            legacy_ok = firebase.update_expense_in_firebase(
                 mandate_path, expense_id, safe_data
             )
+            if not legacy_ok:
+                logger.warning(f"[EXPENSES] Legacy Firebase update skipped for {expense_id} (migrated?)")
 
-            if not success:
-                return {"success": False, "error": "Failed to update expense in Firebase"}
-
-            # Update task_manager (source of truth)
+            # Source de vérité: task_manager (TOUJOURS exécuté)
             tm_updates = {}
             new_status = safe_data.get("status")
             if new_status:
@@ -464,11 +462,15 @@ class ExpensesHandlers:
             from app.firebase_providers import get_firebase_management
             firebase = get_firebase_management()
 
-            # Delete from Firebase
-            success = firebase.delete_expense_from_firebase(mandate_path, expense_id)
+            # BEFORE remove: retrieve item info for cross-update
+            item_info = self._find_item_in_cache(user_id, company_id, expense_id)
+            file_name = (item_info or {}).get("file_name", "")
+            effective_drive_id = drive_file_id or (item_info or {}).get("drive_file_id")
 
-            if not success:
-                return {"success": False, "error": "Failed to delete expense from Firebase"}
+            # Best-effort: delete from legacy Firebase (may not exist for migrated expenses)
+            legacy_ok = firebase.delete_expense_from_firebase(mandate_path, expense_id)
+            if not legacy_ok:
+                logger.warning(f"[EXPENSES] Legacy Firebase delete skipped for {expense_id} (migrated?)")
 
             # Delete from task_manager (source of truth)
             self._delete_from_task_manager(user_id, expense_id)
@@ -480,9 +482,16 @@ class ExpensesHandlers:
                 expense_id=expense_id,
             )
 
+            # Cross-update routing cache if doc has a real Drive file ID
+            if effective_drive_id and not effective_drive_id.startswith("klk_"):
+                self._cross_update_routing_cache(
+                    user_id, company_id, file_name, effective_drive_id
+                )
+
             logger.info(
                 f"[EXPENSES] Deleted expense: {expense_id} "
-                f"cache_update={cache_result is not None}"
+                f"cache_update={cache_result is not None} "
+                f"routing_cross_update={bool(effective_drive_id and not (effective_drive_id or '').startswith('klk_'))}"
             )
 
             return {
@@ -949,6 +958,77 @@ class ExpensesHandlers:
                 logger.warning(f"[EXPENSES] task_manager doc not found for delete: {expense_id}")
         except Exception as e:
             logger.error(f"[EXPENSES] task_manager delete failed for {expense_id}: {e}")
+
+    def _find_item_in_cache(
+        self,
+        user_id: str,
+        company_id: str,
+        expense_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Find an item across all lists in the expenses cache."""
+        cache_key = f"business:{user_id}:{company_id}:expenses"
+        try:
+            cached = self._redis.get(cache_key)
+            if not cached:
+                return None
+            data = json.loads(cached if isinstance(cached, str) else cached.decode())
+            for list_name in ["to_process", "in_process", "pending", "processed"]:
+                for item in data.get(list_name, []):
+                    if item.get("expense_id") == expense_id or item.get("id") == expense_id:
+                        return item
+            return None
+        except Exception as e:
+            logger.warning(f"[EXPENSES] _find_item_in_cache error: {e}")
+            return None
+
+    def _cross_update_routing_cache(
+        self,
+        user_id: str,
+        company_id: str,
+        file_name: str,
+        drive_file_id: str,
+    ) -> None:
+        """Add a deleted Drive doc back to the routing cache to_process list."""
+        cache_key = f"business:{user_id}:{company_id}:routing"
+        try:
+            cached = self._redis.get(cache_key)
+            if not cached:
+                logger.info(f"[EXPENSES] No routing cache to cross-update: {cache_key}")
+                return
+
+            data = json.loads(cached if isinstance(cached, str) else cached.decode())
+            documents = data.get("documents", data)
+            to_process = documents.get("to_process", [])
+
+            # Avoid duplicates
+            if any(item.get("drive_file_id") == drive_file_id for item in to_process):
+                logger.info(f"[EXPENSES] Drive file {drive_file_id} already in routing to_process")
+                return
+
+            new_item = {
+                "id": drive_file_id,
+                "file_name": file_name,
+                "drive_file_id": drive_file_id,
+                "status": "to_process",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            to_process.insert(0, new_item)
+            documents["to_process"] = to_process
+
+            # Update counts
+            counts = data.get("counts", data.get("metrics", {}))
+            if "to_process" in counts:
+                counts["to_process"] = len(to_process)
+            elif "totalToProcess" in counts:
+                counts["totalToProcess"] = len(to_process)
+
+            self._redis.setex(cache_key, 1800, json.dumps(data))
+            logger.info(
+                f"[EXPENSES] Cross-updated routing cache: added {drive_file_id} "
+                f"to to_process ({len(to_process)} items)"
+            )
+        except Exception as e:
+            logger.error(f"[EXPENSES] _cross_update_routing_cache error: {e}", exc_info=True)
 
     def _calculate_metrics(self, cache_data: Dict[str, Any]) -> Dict[str, Any]:
         """

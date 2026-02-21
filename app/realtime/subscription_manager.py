@@ -314,6 +314,14 @@ class RealtimeSubscriptionManager:
         # Fallback
         return str(value)
 
+    # Mapping lowercase function_name → frontend NotificationFunctionName
+    FUNCTION_NAME_NORMALIZE = {
+        "router": "Router",
+        "apbookeeper": "APbookeeper",
+        "bankbookeeper": "Bankbookeeper",
+        "onboarding": "Onboarding",
+    }
+
     def _transform_notification(
         self, doc_id: str, data: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -338,17 +346,32 @@ class RealtimeSubscriptionManager:
             else:
                 additional_info_formatted = json.dumps(additional_info, indent=2)
 
+        # Normalize functionName to match frontend enum: Router | APbookeeper | Bankbookeeper
+        raw_fn = data.get("function_name", data.get("functionName", "Router"))
+        function_name = self.FUNCTION_NAME_NORMALIZE.get(
+            raw_fn.lower() if isinstance(raw_fn, str) else "", raw_fn
+        )
+
+        # Build file name and status
+        file_name = data.get("file_name", data.get("fileName", ""))
+        status = data.get("status", "pending")
+
+        # Generate message if missing (notification docs often don't have a 'message' field)
+        message = data.get("message", "")
+        if not message and file_name:
+            message = f"{file_name} - {status}"
+
         return {
             "docId": doc_id,
-            "message": data.get("message", ""),
-            "fileName": data.get("file_name", data.get("fileName", "")),
+            "message": message,
+            "fileName": file_name,
             "collectionId": data.get("collection_id", data.get("collectionId", "")),
             "collectionName": data.get("collection_name", data.get("collectionName", "")),
-            "status": data.get("status", "pending"),
+            "status": status,
             "read": data.get("read", False),
             "jobId": data.get("job_id", data.get("jobId", "")),
             "fileId": data.get("file_id", data.get("fileId", "")),
-            "functionName": data.get("function_name", data.get("functionName", "Router")),
+            "functionName": function_name,
             "timestamp": self._serialize_timestamp(data.get("timestamp")),
             "additionalInfo": additional_info,
             "hasAdditionalInfo": has_additional_info,

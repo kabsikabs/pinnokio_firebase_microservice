@@ -63,7 +63,7 @@ JOB_TYPE_CONFIG = {
         "process_endpoint": "/event-trigger",
         "stop_endpoint": "/stop_router",
         "local_port": 8080,
-        "department": "router",
+        "department": "Router",
         "domain": "routing",
         "approval_prefix": "router_",
     },
@@ -420,6 +420,14 @@ async def handle_job_process(
                 }
                 jobs_data.append(job_item)
 
+        # log_communication_mode must be a valid GMS mode (google_chat, pinnokio, telegram)
+        # If not explicitly set or invalid, inherit from communication_mode (or default to pinnokio)
+        _valid_log_modes = ("google_chat", "pinnokio", "telegram")
+        _comm_mode = company_data.get("communication_mode", "pinnokio")
+        _log_mode = company_data.get("log_communication_mode", "")
+        if _log_mode not in _valid_log_modes:
+            _log_mode = _comm_mode if _comm_mode in _valid_log_modes else "pinnokio"
+
         # Build the jobbeur payload
         jobbeur_payload = {
             "collection_name": str(company_id),
@@ -431,8 +439,8 @@ async def handle_job_process(
             "mandates_path": mandate_path,
             "batch_id": batch_id,
             "settings": [
-                {"communication_mode": company_data.get("communication_mode", "rag")},
-                {"log_communication_mode": company_data.get("log_communication_mode", "rag")},
+                {"communication_mode": _comm_mode},
+                {"log_communication_mode": _log_mode},
                 {"dms_system": company_data.get("dms_type", "odoo")},
             ],
         }
@@ -525,18 +533,24 @@ async def handle_job_process(
             # Non-blocking: continue with HTTP dispatch
 
         # ═══════════════════════════════════════════════════════════════════
-        # Step 1.6: Ensure worker is running (ECS auto-start)
+        # Step 1.6: Ensure worker is running (ECS in PROD, subprocess in LOCAL)
         # ═══════════════════════════════════════════════════════════════════
         ecs_starting = False
         try:
-            from ..ecs_manager import ECSManager
-            ecs_status = ECSManager.ensure_worker_running(job_type)
-            logger.info(f"[JOB_ACTIONS] → Step 1.6: ECS status={ecs_status.get('status')}")
+            environment = os.environ.get("PINNOKIO_ENVIRONMENT", "PROD").upper()
+            if environment == "LOCAL":
+                from ..local_worker_manager import LocalWorkerManager
+                worker_status = LocalWorkerManager.ensure_worker_running(job_type)
+            else:
+                from ..ecs_manager import ECSManager
+                worker_status = ECSManager.ensure_worker_running(job_type)
 
-            if ecs_status.get("status") in ("starting", "provisioning"):
+            logger.info(f"[JOB_ACTIONS] → Step 1.6: Worker status={worker_status.get('status')} (env={environment})")
+
+            if worker_status.get("status") in ("starting", "provisioning"):
                 ecs_starting = True
         except Exception as ecs_err:
-            logger.warning(f"[JOB_ACTIONS] → Step 1.6: ECS check failed: {ecs_err}")
+            logger.warning(f"[JOB_ACTIONS] → Step 1.6: Worker check failed: {ecs_err}")
             # Non-blocking: continue with HTTP dispatch attempt
 
         # ═══════════════════════════════════════════════════════════════════
@@ -1046,6 +1060,13 @@ async def handle_job_delete(
         for idx, (job_id, file_name) in enumerate(job_file_pairs, 1):
             logger.info(f"[JOB_ACTIONS] → Processing job {idx}/{len(job_file_pairs)}: job_id={job_id}")
             try:
+                # 0. For AP: resolve drive_file_id BEFORE purge (Step 3 will erase the data)
+                drive_file_id = ""
+                resolved_name = ""
+                if job_type == "apbookeeper":
+                    drive_file_id, resolved_name = await _resolve_ap_drive_file_id(uid, job_id)
+                    logger.info(f"[JOB_ACTIONS] →   Step 0: Resolved drive_file_id={drive_file_id or '(empty)'} for {job_id}")
+
                 # 1. Delete notifications for this job
                 logger.debug(f"[JOB_ACTIONS] →   Step 1: Deleting notifications...")
                 await _delete_job_notifications(uid, mandate_path, job_id)
@@ -1079,6 +1100,53 @@ async def handle_job_delete(
                     else:
                         logger.warning(f"[JOB_ACTIONS] →   Step 5: Drive move FAILED for {job_id}")
 
+                # 5. For AP: Move file to Drive input, purge Router doc
+                elif job_type == "apbookeeper":
+                    if drive_file_id:
+                        # 5b: Move file back to Drive input folder
+                        logger.info(f"[JOB_ACTIONS] →   Step 5b: Moving file to Drive input: {resolved_name or drive_file_id}")
+                        move_success = await _move_file_to_drive_input(
+                            uid, company_data, drive_file_id, resolved_name
+                        )
+                        if move_success:
+                            moved_to_todo.append({
+                                "job_id": drive_file_id,
+                                "file_name": resolved_name,
+                                "drive_file_id": drive_file_id,
+                            })
+                            logger.info(f"[JOB_ACTIONS] →   Step 5b: File moved to Drive ✓")
+                        else:
+                            logger.warning(f"[JOB_ACTIONS] →   Step 5b: Drive move FAILED for {drive_file_id}")
+
+                        # 5c: Reset Router task_manager/{drive_file_id} to status=to_process
+                        #     NE PAS purger : le klk_router vérifie l'existence de klk_job_id
+                        #     dans ce document pour éviter la duplication.
+                        try:
+                            router_doc_ref = firebase.db.collection(
+                                f"clients/{uid}/task_manager"
+                            ).document(drive_file_id)
+                            router_doc = await asyncio.to_thread(router_doc_ref.get)
+                            if router_doc.exists:
+                                await asyncio.to_thread(
+                                    router_doc_ref.update,
+                                    {"status": "to_process"}
+                                )
+                                # Enrichir moved_to_todo avec les champs du doc Router
+                                router_data = router_doc.to_dict() or {}
+                                moved_to_todo[-1]["klk_job_id"] = router_data.get("klk_job_id", "")
+                                moved_to_todo[-1]["collection_id"] = router_data.get("collection_id", "")
+                                moved_to_todo[-1]["mandate_path"] = router_data.get("mandate_path", "")
+                                logger.info(
+                                    f"[JOB_ACTIONS] →   Step 5c: Router task_manager/{drive_file_id} "
+                                    f"reset to to_process (klk_job_id={router_data.get('klk_job_id', 'N/A')}) ✓"
+                                )
+                            else:
+                                logger.info(f"[JOB_ACTIONS] →   Step 5c: Router doc {drive_file_id} not found, skip")
+                        except Exception as reset_err:
+                            logger.warning(f"[JOB_ACTIONS] →   Step 5c: Router reset skipped: {reset_err}")
+                    else:
+                        logger.warning(f"[JOB_ACTIONS] →   Step 5: No drive_file_id found for AP job {job_id}, skipping Drive move")
+
                 deleted_jobs.append(job_id)
                 logger.info(f"[JOB_ACTIONS] →   Job {job_id} DELETE completed ✓")
 
@@ -1096,6 +1164,28 @@ async def handle_job_delete(
             )
             logger.info(f"[JOB_ACTIONS] → Step 6: Cache updated for {len(deleted_jobs)} deleted jobs")
 
+        # 6b. Remove deleted jobs from billing_history cache + notify dashboard
+        if deleted_jobs:
+            logger.info(f"[JOB_ACTIONS] → Step 6b: Updating billing_history cache...")
+            removed_billing = await _remove_from_billing_history_cache(
+                uid, company_id, deleted_jobs
+            )
+            if removed_billing > 0:
+                try:
+                    await hub.broadcast(uid, {
+                        "type": WS_EVENTS.DASHBOARD.BILLING_ITEM_UPDATE,
+                        "payload": {
+                            "action": "delete",
+                            "item_ids": deleted_jobs,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                    })
+                    logger.info(f"[JOB_ACTIONS] → Step 6b: Removed {removed_billing} items from billing_history, WSS broadcasted")
+                except Exception as billing_broadcast_err:
+                    logger.warning(f"[JOB_ACTIONS] → Step 6b: Billing WSS broadcast failed: {billing_broadcast_err}")
+            else:
+                logger.info(f"[JOB_ACTIONS] → Step 6b: No billing_history items to remove")
+
         # 7. If Router and files were moved, add to routing to_do
         if job_type == "router" and moved_to_todo:
             logger.info(f"[JOB_ACTIONS] → Step 7: Adding {len(moved_to_todo)} items to routing to_do...")
@@ -1103,13 +1193,39 @@ async def handle_job_delete(
             logger.info(f"[JOB_ACTIONS] → Step 7: Items added to routing to_do ✓")
 
         # 8. If Invoice/AP deleted, also add files back to routing to_do
-        #    (document pushed back to doc_to_do = reappears in Router "A traiter")
-        if job_type == "apbookeeper" and deleted_jobs:
+        #    AND broadcast routing.item_update so the Router frontend store is updated
+        if job_type == "apbookeeper" and moved_to_todo:
             logger.info(f"[JOB_ACTIONS] → Step 8: Cross-updating routing cache for AP delete...")
-            ap_moved = [{"job_id": jid, "file_name": fn} for jid, fn in job_file_pairs if fn]
-            if ap_moved:
-                await _add_to_routing_todo(uid, company_data, ap_moved)
-                logger.info(f"[JOB_ACTIONS] → Step 8: {len(ap_moved)} items added to routing to_do ✓")
+            await _add_to_routing_todo(uid, company_data, moved_to_todo)
+            logger.info(f"[JOB_ACTIONS] → Step 8: {len(moved_to_todo)} items added to routing to_do ✓")
+
+            # 8b: Broadcast routing.item_update (cross-domain WSS notification)
+            try:
+                redis_r = get_redis()
+                routing_cache_key = f"business:{uid}:{company_id}:routing"
+                routing_cached = redis_r.get(routing_cache_key)
+                routing_counts = {}
+                if routing_cached:
+                    rc_data = json.loads(routing_cached if isinstance(routing_cached, str) else routing_cached.decode())
+                    rc_inner = rc_data.get("data", rc_data) if "cache_version" in rc_data else rc_data
+                    routing_counts = rc_inner.get("counts", {})
+
+                await hub.broadcast(uid, {
+                    "type": "routing.item_update",
+                    "payload": {
+                        "action": "add",
+                        "trigger_action": "delete_cross_domain",
+                        "items": moved_to_todo,
+                        "item_ids": [item.get("drive_file_id") or item.get("job_id") for item in moved_to_todo],
+                        "to_list": "to_process",
+                        "new_status": "to_process",
+                        "counts": routing_counts,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                })
+                logger.info(f"[JOB_ACTIONS] → Step 8b: Broadcasted routing.item_update (add {len(moved_to_todo)} items)")
+            except Exception as routing_broadcast_err:
+                logger.warning(f"[JOB_ACTIONS] → Step 8b: Routing broadcast failed: {routing_broadcast_err}")
 
         # 9. Broadcast consolidated item_update (pessimistic: after all confirmations)
         if deleted_jobs:
@@ -1813,31 +1929,139 @@ async def _update_cache_after_delete(
         if not cached:
             return
 
-        data = json.loads(cached if isinstance(cached, str) else cached.decode())
+        raw_data = json.loads(cached if isinstance(cached, str) else cached.decode())
         deleted_ids = {job_id for job_id, _ in job_file_pairs}
 
+        # Unwrap unified cache manager envelope if present
+        is_wrapped = isinstance(raw_data, dict) and "cache_version" in raw_data and "data" in raw_data
+        data = raw_data["data"] if is_wrapped else raw_data
+
+        # Cache structure: lists under "documents" (routing) OR flat at root (invoices/bank)
+        docs_container = data.get("documents", data)
+
         # Remove deleted items from each category
+        actually_removed = 0
         for category in ["in_process", "pending", "processed", "to_process"]:
-            if category in data.get("documents", {}):
-                data["documents"][category] = [
+            if category in docs_container:
+                before = len(docs_container[category])
+                docs_container[category] = [
                     item
-                    for item in data["documents"][category]
+                    for item in docs_container[category]
                     if item.get("job_id") not in deleted_ids
                     and item.get("id") not in deleted_ids
                 ]
+                actually_removed += before - len(docs_container[category])
 
         # Update counts
         if "counts" in data:
-            for category in data["counts"]:
-                if category in data.get("documents", {}):
-                    data["counts"][category] = len(data["documents"][category])
+            for category in ["in_process", "pending", "processed", "to_process"]:
+                if category in docs_container:
+                    data["counts"][category] = len(docs_container[category])
 
-        # Save updated cache
-        redis.setex(cache_key, 1800, json.dumps(data))
-        logger.info(f"[JOB_ACTIONS] Cache updated - removed {len(deleted_ids)} items")
+        # Save back (preserve wrapper if present)
+        if is_wrapped:
+            raw_data["data"] = data
+            redis.setex(cache_key, 1800, json.dumps(raw_data))
+        else:
+            redis.setex(cache_key, 1800, json.dumps(data))
+        logger.info(f"[JOB_ACTIONS] Cache updated - removed {actually_removed} items from {domain} (wrapped={is_wrapped})")
 
     except Exception as e:
         logger.warning(f"[JOB_ACTIONS] Failed to update cache: {e}")
+
+
+async def _remove_from_billing_history_cache(
+    uid: str,
+    company_id: str,
+    deleted_job_ids: List[str],
+) -> int:
+    """
+    Remove deleted jobs from the billing_history cache.
+
+    Returns the number of items actually removed.
+    Handles unified cache wrapper (cache_version/data envelope).
+    """
+    try:
+        redis = get_redis()
+        cache_key = f"business:{uid}:{company_id}:billing_history"
+
+        raw = redis.get(cache_key)
+        if not raw:
+            return 0
+
+        cache_data = json.loads(raw if isinstance(raw, str) else raw.decode())
+
+        # Unwrap unified cache manager envelope if present
+        is_wrapped = isinstance(cache_data, dict) and "cache_version" in cache_data and "data" in cache_data
+        inner_data = cache_data.get("data", cache_data) if is_wrapped else cache_data
+
+        items_list = inner_data.get("items", [])
+        deleted_set = set(deleted_job_ids)
+        original_count = len(items_list)
+
+        # Filter out deleted items (match by jobId or id)
+        items_list = [
+            item for item in items_list
+            if item.get("jobId") not in deleted_set
+            and item.get("id") not in deleted_set
+        ]
+
+        removed = original_count - len(items_list)
+        if removed > 0:
+            inner_data["items"] = items_list
+            if is_wrapped:
+                cache_data["data"] = inner_data
+                redis.setex(cache_key, 1800, json.dumps(cache_data))
+            else:
+                redis.setex(cache_key, 1800, json.dumps(inner_data))
+            logger.info(
+                f"[JOB_ACTIONS] billing_history cache: removed {removed} items "
+                f"(remaining={len(items_list)}, wrapped={is_wrapped})"
+            )
+        return removed
+
+    except Exception as e:
+        logger.warning(f"[JOB_ACTIONS] Failed to update billing_history cache: {e}")
+        return 0
+
+
+async def _resolve_ap_drive_file_id(uid: str, job_id: str) -> Tuple[str, str]:
+    """
+    For an AP job, read task_manager/{job_id} and extract:
+    - drive_file_id from department_data.APbookeeper.file_id
+    - file_name from department_data.APbookeeper.file_name (or top-level)
+
+    Returns: (drive_file_id, file_name) — ("", "") if not found.
+    Non-blocking: returns ("", "") on error.
+    """
+    try:
+        firebase = get_firebase_management()
+        doc = await asyncio.to_thread(
+            lambda: firebase.db.collection(f"clients/{uid}/task_manager").document(job_id).get()
+        )
+        if not doc.exists:
+            logger.warning(f"[JOB_ACTIONS] _resolve_ap_drive_file_id: doc {job_id} not found")
+            return ("", "")
+
+        data = doc.to_dict() or {}
+
+        # file_id can be at root level (written by update_job_status)
+        # or in department_data.APbookeeper (denormalized)
+        drive_file_id = data.get("file_id", "")
+
+        if not drive_file_id:
+            dept_data = data.get("department_data", {})
+            # Try casing variants: APbookeeper, Apbookeeper, apbookeeper
+            ap_data = dept_data.get("APbookeeper") or dept_data.get("Apbookeeper") or dept_data.get("apbookeeper") or {}
+            drive_file_id = ap_data.get("file_id", "")
+
+        file_name = data.get("file_name", "")
+
+        return (drive_file_id, file_name)
+
+    except Exception as e:
+        logger.warning(f"[JOB_ACTIONS] _resolve_ap_drive_file_id FAILED for {job_id}: {e}")
+        return ("", "")
 
 
 async def _move_file_to_drive_input(
@@ -1895,9 +2119,11 @@ async def _add_to_routing_todo(
     moved_items: List[Dict[str, str]],
 ) -> None:
     """
-    Add items back to routing to_do after Drive move confirmation.
+    Move items back to routing to_process after Drive move confirmation.
 
-    This updates the cache to show the files are available for reprocessing.
+    If the item already exists in another list (e.g. processed), it is MOVED
+    to to_process with status reset. Otherwise a new item is added.
+    Handles unified cache wrapper (cache_version/data envelope).
     """
     if not moved_items:
         return
@@ -1912,29 +2138,92 @@ async def _add_to_routing_todo(
         if not cached:
             return
 
-        data = json.loads(cached if isinstance(cached, str) else cached.decode())
+        raw_data = json.loads(cached if isinstance(cached, str) else cached.decode())
 
-        # Add moved items to to_process
-        to_process = data.get("documents", {}).get("to_process", [])
+        # Unwrap unified cache manager envelope if present
+        is_wrapped = isinstance(raw_data, dict) and "cache_version" in raw_data and "data" in raw_data
+        data = raw_data["data"] if is_wrapped else raw_data
 
+        # Cache routing: listes à la racine OU sous "documents" (selon le domaine)
+        docs_container = data.get("documents", data)
+        to_process = docs_container.get("to_process", [])
+
+        moved = 0
         for item in moved_items:
-            new_item = {
-                "id": item.get("file_name", ""),
-                "file_name": item.get("file_name", ""),
-                "status": "to_process",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-            to_process.append(new_item)
+            drive_id = item.get("drive_file_id") or item.get("job_id", "")
+            if not drive_id:
+                continue
 
-        data["documents"]["to_process"] = to_process
+            # 1. Remove from ALL other lists (processed, in_process, pending)
+            found_existing = None
+            for list_name in ["processed", "in_process", "pending"]:
+                lst = docs_container.get(list_name, [])
+                for existing in lst:
+                    if existing.get("drive_file_id") == drive_id or existing.get("id") == drive_id or existing.get("job_id") == drive_id:
+                        found_existing = existing
+                        break
+                if found_existing:
+                    docs_container[list_name] = [
+                        e for e in lst
+                        if e.get("drive_file_id") != drive_id and e.get("id") != drive_id and e.get("job_id") != drive_id
+                    ]
+                    break
+
+            # 2. Check if already in to_process
+            already_in_to_process = None
+            for existing in to_process:
+                if existing.get("drive_file_id") == drive_id or existing.get("id") == drive_id or existing.get("job_id") == drive_id:
+                    already_in_to_process = existing
+                    break
+
+            if already_in_to_process:
+                # Update status in-place
+                already_in_to_process["status"] = "to_process"
+                already_in_to_process["timestamp"] = datetime.now(timezone.utc).isoformat()
+                moved += 1
+            elif found_existing:
+                # Move from other list: update status and append to to_process
+                found_existing["status"] = "to_process"
+                found_existing["timestamp"] = datetime.now(timezone.utc).isoformat()
+                to_process.append(found_existing)
+                moved += 1
+            else:
+                # Not found anywhere: create new item
+                new_item = {
+                    "id": drive_id,
+                    "job_id": drive_id,
+                    "file_name": item.get("file_name", ""),
+                    "drive_file_id": drive_id,
+                    "status": "to_process",
+                    "source": "drive",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                if item.get("klk_job_id"):
+                    new_item["klk_job_id"] = item["klk_job_id"]
+                if item.get("collection_id"):
+                    new_item["collection_id"] = item["collection_id"]
+                if item.get("mandate_path"):
+                    new_item["mandate_path"] = item["mandate_path"]
+                to_process.append(new_item)
+                moved += 1
+
+        docs_container["to_process"] = to_process
+        # Recalculate ALL counts
         if "counts" in data:
-            data["counts"]["to_process"] = len(to_process)
+            for cat in ["to_process", "in_process", "pending", "processed"]:
+                if cat in docs_container:
+                    data["counts"][cat] = len(docs_container[cat])
 
-        redis.setex(cache_key, 1800, json.dumps(data))
-        logger.info(f"[JOB_ACTIONS] Added {len(moved_items)} items to routing to_do")
+        # Save back (preserve wrapper if present)
+        if is_wrapped:
+            raw_data["data"] = data
+            redis.setex(cache_key, 1800, json.dumps(raw_data))
+        else:
+            redis.setex(cache_key, 1800, json.dumps(data))
+        logger.info(f"[JOB_ACTIONS] Moved {moved} items to routing to_process (wrapped={is_wrapped})")
 
     except Exception as e:
-        logger.warning(f"[JOB_ACTIONS] Failed to add items to routing todo: {e}")
+        logger.warning(f"[JOB_ACTIONS] Failed to move items to routing to_process: {e}")
 
 
 async def _move_to_list_in_cache(
@@ -1961,8 +2250,12 @@ async def _move_to_list_in_cache(
         if not cached:
             return
 
-        data = json.loads(cached if isinstance(cached, str) else cached.decode())
-        documents = data.get("documents", data.get("data", data))
+        raw_data = json.loads(cached if isinstance(cached, str) else cached.decode())
+
+        # Unwrap unified cache manager envelope if present
+        is_wrapped = isinstance(raw_data, dict) and "cache_version" in raw_data and "data" in raw_data
+        data = raw_data["data"] if is_wrapped else raw_data
+        documents = data.get("documents", data)
 
         # Determine target list name from domain config
         domain_config = get_domain_config(domain)
@@ -2006,8 +2299,12 @@ async def _move_to_list_in_cache(
 
         # Determine TTL based on domain
         ttl = 1800 if domain == "routing" else 2400
-        redis.setex(cache_key, ttl, json.dumps(data))
-        logger.info(f"[JOB_ACTIONS] Moved {job_id} from {source_list} to {target_list}")
+        if is_wrapped:
+            raw_data["data"] = data
+            redis.setex(cache_key, ttl, json.dumps(raw_data))
+        else:
+            redis.setex(cache_key, ttl, json.dumps(data))
+        logger.info(f"[JOB_ACTIONS] Moved {job_id} from {source_list} to {target_list} (wrapped={is_wrapped})")
 
         # Invalidate page_state cache so that page.restore_state
         # won't serve stale data (item still in old list)
@@ -2091,7 +2388,7 @@ async def _persist_jobs_to_task_manager(
                 {
                     "job_id": file_id,
                     "status": "in_queue",
-                    "department": "router",
+                    "department": "Router",
                     "mandate_path": mandate_path,
                     "collection_id": company_id,
                     "batch_id": batch_id,
@@ -2108,7 +2405,7 @@ async def _persist_jobs_to_task_manager(
                 {
                     "job_id": job_id,
                     "status": "in_queue",
-                    "department": "apbookeeper",
+                    "department": "APbookeeper",
                     "collection_id": company_id,
                     "batch_id": batch_id,
                 }
@@ -2128,12 +2425,12 @@ async def _persist_jobs_to_task_manager(
                 {
                     "job_id": composite_key,
                     "status": "in_queue",
-                    "department": "banker",
+                    "department": "Bankbookeeper",
                     "mandate_path": mandate_path,
                     "collection_id": company_id,
                     "batch_id": batch_id,
                     "department_data": {
-                        "banker": {
+                        "Bankbookeeper": {
                             "batch_id": batch_id,
                             "bank_account_id": acct_id,
                             "transaction_id": move_id,
@@ -2150,7 +2447,7 @@ async def _persist_jobs_to_task_manager(
                 {
                     "job_id": job_id_item,
                     "status": "in_queue",
-                    "department": "onboarding",
+                    "department": "Onboarding",
                     "mandate_path": mandate_path,
                     "collection_id": company_id,
                     "batch_id": batch_id,

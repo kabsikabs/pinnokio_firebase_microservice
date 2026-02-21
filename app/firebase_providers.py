@@ -433,7 +433,7 @@ class FirebaseManagement:
             # Comme mandate_path est stocké dans le doc, on peut filtrer dessus si indexé
             
             # Stratégie: Récupérer les tâches 'banker' et filtrer mandate_path en python
-            query = task_ref.where(filter=FieldFilter("department", "in", ["banker", "Banker"]))
+            query = task_ref.where(filter=FieldFilter("department", "in", ["Bankbookeeper", "banker", "Banker"]))
             docs = query.stream()
             
             for doc in docs:
@@ -446,7 +446,7 @@ class FirebaseManagement:
                     
                 status = data.get("status", "").lower()
                 department_data = data.get("department_data", {})
-                banker_data = department_data.get("banker", {}) or department_data.get("Banker", {})
+                banker_data = department_data.get("Bankbookeeper", {}) or department_data.get("banker", {}) or department_data.get("Banker", {})
                 
                 # Cas 1: Completed -> Processed
                 if status in ["completed", "close", "closed"]:
@@ -552,6 +552,10 @@ class FirebaseManagement:
                     continue
 
                 status = (data.get("status") or "").lower()
+
+                # Skip purged/incomplete documents (no status = billing skeleton after delete)
+                if not status:
+                    continue
                 department_data = data.get("department_data", {})
                 ap_data = department_data.get("APbookeeper", {}) or department_data.get("Apbookeeper", {}) or department_data.get("apbookeeper", {})
 
@@ -564,12 +568,18 @@ class FirebaseManagement:
                     date_str = parts[0].strip() if parts else str(raw_timestamp)
 
                 # Construire l'item standardisé
+                file_id = ap_data.get("file_id", "")
+                uri_link = data.get("uri_file_link", "") or data.get("drive_link", "")
+                if not uri_link and file_id:
+                    uri_link = f"https://drive.google.com/file/d/{file_id}/view"
+
                 item = {
                     "task_id": doc.id,
                     "job_id": ap_data.get("job_id", doc.id),
                     "file_name": ap_data.get("file_name", data.get("file_name", "")),
-                    "file_id": ap_data.get("file_id", ""),
-                    "uri_file_link": data.get("uri_file_link", ""),
+                    "file_id": file_id,
+                    "drive_file_id": file_id,
+                    "uri_drive_link": uri_link,
                     "date": date_str,
                     "current_step": data.get("current_step", ""),
                     "status": status,
@@ -583,8 +593,8 @@ class FirebaseManagement:
                 elif status in ["on_process", "processing", "in_progress", "in_queue", "running", "stopping"]:
                     result["in_process"].append(item)
                 else:
-                    # error, to_process, stopped ou inconnu → to_process
-                    if status not in ["error", "to_process", "stopped"]:
+                    # error, to_process, stopped, skipped ou inconnu → to_process
+                    if status not in ["error", "to_process", "stopped", "skipped"]:
                         item["status"] = "to_process"
                     result["to_process"].append(item)
 
@@ -4741,18 +4751,29 @@ class FirebaseManagement:
                 doc = doc_ref.get()
                 action = "update" if doc.exists else "new"
 
+                # Normalize functionName to match frontend enum: Router | APbookeeper | Bankbookeeper
+                _fn_normalize = {"router": "Router", "apbookeeper": "APbookeeper", "bankbookeeper": "Bankbookeeper", "onboarding": "Onboarding"}
+                raw_fn = job_data.get('function_name', 'Router')
+                normalized_fn = _fn_normalize.get(raw_fn.lower() if isinstance(raw_fn, str) else "", raw_fn)
+
+                file_name = job_data.get('file_name', '')
+                status = job_data.get('status', 'pending')
+                message = job_data.get('message', '')
+                if not message and file_name:
+                    message = f"{file_name} - {status}"
+
                 # Transformer job_data en format notification pour le frontend
                 notification_data = {
                     "docId": job_data.get('job_id') or job_data.get('file_id') or job_data.get('batch_id'),
-                    "message": job_data.get('message', ''),
-                    "fileName": job_data.get('file_name', ''),
+                    "message": message,
+                    "fileName": file_name,
                     "collectionId": job_data.get('collection_id', ''),
                     "collectionName": job_data.get('collection_name', ''),
-                    "status": job_data.get('status', 'pending'),
+                    "status": status,
                     "read": job_data.get('read', False),
                     "jobId": job_data.get('job_id', ''),
                     "fileId": job_data.get('file_id', ''),
-                    "functionName": job_data.get('function_name', 'Router'),
+                    "functionName": normalized_fn,
                     "timestamp": job_data.get('timestamp', datetime.now(timezone.utc).isoformat()),
                     "additionalInfo": job_data.get('additional_info', ''),
                     "driveLink": job_data.get('drive_link', ''),
@@ -9956,8 +9977,8 @@ class FirebaseManagement:
                 "job_id": item_id,
                 "file_id": drive_file_id,
                 "file_name": file_name,
-                "function_name": "router",
-                "status": "in queue",
+                "function_name": "Router",
+                "status": "in_queue",
                 "read": False,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "collection_id": company_id,

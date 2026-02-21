@@ -236,7 +236,8 @@ class FirebaseCacheHandlers:
 
                 for doc in query.stream():
                     data = doc.to_dict() or {}
-                    expense_entry = data.get("department_data", {}).get("EXbookeeper", {})
+                    dept_data = data.get("department_data", {})
+                    expense_entry = dept_data.get("EXbookeeper", {}) or dept_data.get("exbookeeper", {})
                     expense_entry["id"] = doc.id
                     expense_entry["job_id"] = data.get("job_id", doc.id)
                     expense_entry["status"] = data.get("status", "")
@@ -409,31 +410,6 @@ class FirebaseCacheHandlers:
             traceback.print_exc()
             return {"data": {"to_process": [], "in_process": [], "pending": [], "processed": [], "step_mapping": {}}, "error": str(e)}
 
-    def _organize_ap_documents_by_status(self, documents: List[Dict]) -> Dict[str, List]:
-        """Organize AP documents by status for metrics widget."""
-        organized = {
-            "to_process": [],
-            "in_process": [],
-            "pending": [],
-            "processed": []
-        }
-
-        for doc in documents:
-            status = doc.get("status", "").lower()
-            if status in ["to_do", "todo", "new", "unprocessed", "to_process"]:
-                organized["to_process"].append(doc)
-            elif status in ["in_process", "processing", "in_progress"]:
-                organized["in_process"].append(doc)
-            elif status in ["pending", "waiting", "approval"]:
-                organized["pending"].append(doc)
-            elif status in ["processed", "done", "completed", "booked"]:
-                organized["processed"].append(doc)
-            else:
-                # Default to to_process for unknown status
-                organized["to_process"].append(doc)
-
-        return organized
-
     # ═══════════════════════════════════════════════════════════════
     # BANK TRANSACTIONS
     # ═══════════════════════════════════════════════════════════════
@@ -572,7 +548,7 @@ class FirebaseCacheHandlers:
 
             def _normalize_from_task_manager(item, erp_tx=None, status="pending"):
                 """Normalise un item task_manager vers BankTransaction, enrichi par ERP si dispo."""
-                banker = item if "transaction_id" in item else item.get("department_data", {}).get("banker", {}) or item.get("department_data", {}).get("Banker", {})
+                banker = item if "transaction_id" in item else item.get("department_data", {}).get("Bankbookeeper", {}) or item.get("department_data", {}).get("banker", {}) or item.get("department_data", {}).get("Banker", {})
                 tx_id = str(banker.get("transaction_id") or item.get("task_id", ""))
 
                 if erp_tx:

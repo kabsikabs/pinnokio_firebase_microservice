@@ -317,14 +317,12 @@ async def handle_invoices_refresh(
 
     logger.info(f"[INVOICES] Refresh requested for company={company_id}, tab={tab}")
 
-    # Invalidate AP documents cache first
+    # Invalidate AP documents cache (business:{uid}:{cid}:invoices)
     try:
-        cache_handlers = get_firebase_cache_handlers()
-        await cache_handlers.invalidate_ap_cache(
-            user_id=uid,
-            company_id=company_id
-        )
-        logger.info(f"[INVOICES] AP cache invalidated")
+        redis_client = get_redis()
+        cache_key = f"business:{uid}:{company_id}:invoices"
+        deleted = redis_client.delete(cache_key)
+        logger.info(f"[INVOICES] AP cache invalidated: key={cache_key} deleted={deleted}")
     except Exception as e:
         logger.warning(f"[INVOICES] Failed to invalidate AP cache: {e}")
 
@@ -567,6 +565,7 @@ async def handle_invoices_delete(
             company_data={
                 "company_id": company_id,
                 "mandate_path": context.get("mandate_path", ""),
+                "input_drive_doc_id": context.get("input_drive_doc_id", ""),
             }
         )
 

@@ -981,7 +981,7 @@ class DashboardHandlers:
                 department_data = task_data.get("department_data", {})
                 ap_data = department_data.get("APbookeeper", {}) or department_data.get("Apbookeeper", {}) or {}
                 router_data = department_data.get("Router", {}) or department_data.get("router", {}) or {}
-                banker_data = department_data.get("Banker", {}) or department_data.get("banker", {}) or {}
+                banker_data = department_data.get("Bankbookeeper", {}) or department_data.get("Banker", {}) or department_data.get("banker", {}) or {}
 
                 # Override currency with department-specific currency (invoice currency)
                 if ap_data.get("currency"):

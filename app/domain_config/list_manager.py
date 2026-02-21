@@ -281,9 +281,23 @@ class ListManager:
         item: Dict[str, Any],
         list_name: str,
     ) -> None:
-        """Add an item to a specific list (at the beginning)."""
+        """Add an item to a specific list (at the beginning), deduplicating first."""
         if list_name not in cache_data:
             cache_data[list_name] = []
+
+        # Deduplicate: remove any existing item with the same IDs
+        item_id = item.get("id")
+        job_id = item.get("job_id")
+        expense_id = item.get("expense_id")
+        cache_data[list_name] = [
+            existing for existing in cache_data[list_name]
+            if not (
+                (item_id and existing.get("id") == item_id) or
+                (job_id and existing.get("job_id") == job_id) or
+                (expense_id and existing.get("expense_id") == expense_id)
+            )
+        ]
+
         cache_data[list_name].insert(0, item)
 
     @classmethod
