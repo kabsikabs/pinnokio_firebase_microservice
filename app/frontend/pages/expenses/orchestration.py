@@ -664,25 +664,31 @@ async def handle_expenses_delete(
     """
     Handle expenses.delete WebSocket event.
 
-    Deletes an expense.
+    Uses centralized handle_job_delete for full cleanup workflow
+    (notifications, chat threads, task_manager, approval, Drive move,
+    cache, billing_history, routing cross-update).
 
-    Args:
-        uid: Firebase user ID
-        session_id: WebSocket session ID
-        payload: {"company_id": str, "expense_id": str, "job_id"?: str, "drive_file_id"?: str}
+    Payload formats accepted:
+    - Legacy single: {"company_id": str, "expense_id": str}
+    - New batch:     {"company_id": str, "job_ids": [str, ...], "_optimistic_update_id"?: str}
     """
     company_id = payload.get("company_id")
-    expense_id = payload.get("expense_id")
-    job_id = payload.get("job_id")
-    drive_file_id = payload.get("drive_file_id")
 
-    logger.info(f"[EXPENSES] Delete requested for expense={expense_id}")
+    # Normalize: support both legacy single-item and new batch format
+    job_ids = payload.get("job_ids", [])
+    if not job_ids:
+        expense_id = payload.get("expense_id")
+        if expense_id:
+            job_ids = [expense_id]
+            payload["job_ids"] = job_ids
 
-    if not company_id or not expense_id:
+    logger.info(f"[EXPENSES] Delete requested for {len(job_ids)} items")
+
+    if not job_ids or not company_id:
         await hub.broadcast(uid, {
             "type": WS_EVENTS.EXPENSES.ERROR,
             "payload": {
-                "error": "Missing company_id or expense_id",
+                "error": "Missing company_id or expense_id/job_ids",
                 "code": "MISSING_PARAMS"
             }
         })
@@ -703,14 +709,17 @@ async def handle_expenses_delete(
         return
 
     try:
-        handlers = get_expenses_handlers()
-        result = await handlers.delete_expense(
-            user_id=uid,
-            company_id=company_id,
-            mandate_path=mandate_path,
-            expense_id=expense_id,
-            job_id=job_id,
-            drive_file_id=drive_file_id
+        from app.wrappers.job_actions_handler import handle_job_delete
+
+        result = await handle_job_delete(
+            uid=uid,
+            job_type="exbookeeper",
+            payload=payload,
+            company_data={
+                "company_id": company_id,
+                "mandate_path": mandate_path,
+                "input_drive_doc_id": context.get("input_drive_doc_id", ""),
+            }
         )
 
         if result.get("success"):
@@ -718,25 +727,37 @@ async def handle_expenses_delete(
                 "type": WS_EVENTS.EXPENSES.DELETED,
                 "payload": {
                     "success": True,
-                    "expense_id": expense_id,
-                    "message": "Expense deleted successfully"
+                    "job_ids": result.get("deleted_jobs", job_ids),
+                    # Backward compat: include expense_id for legacy consumers
+                    "expense_id": job_ids[0] if len(job_ids) == 1 else None,
+                    "message": result.get("message", f"{len(job_ids)} expenses deleted"),
+                    "_optimistic_update_id": payload.get("_optimistic_update_id"),
                 }
             })
 
-            # Broadcast dashboard metrics update for widget sync
-            metrics = result.get("metrics")
-            if metrics:
-                await hub.broadcast(uid, {
-                    "type": WS_EVENTS.DASHBOARD.EXPENSES_UPDATE,
-                    "payload": {"metrics": metrics}
-                })
-                logger.info(f"[EXPENSES] Dashboard metrics broadcasted after delete")
+            # Dashboard metrics update from cache
+            try:
+                redis_client = get_redis()
+                cache_key = f"business:{uid}:{company_id}:expenses"
+                cached = redis_client.get(cache_key)
+                if cached:
+                    import json
+                    cache_data = json.loads(cached if isinstance(cached, str) else cached.decode())
+                    metrics = cache_data.get("metrics", {})
+                    if metrics:
+                        await hub.broadcast(uid, {
+                            "type": WS_EVENTS.DASHBOARD.EXPENSES_UPDATE,
+                            "payload": {"metrics": metrics}
+                        })
+                        logger.info(f"[EXPENSES] Dashboard metrics broadcasted after delete")
+            except Exception as metrics_err:
+                logger.warning(f"[EXPENSES] Dashboard metrics broadcast failed: {metrics_err}")
         else:
             await hub.broadcast(uid, {
                 "type": WS_EVENTS.EXPENSES.ERROR,
                 "payload": {
-                    "error": result.get("error", "Failed to delete expense"),
-                    "code": "DELETE_ERROR"
+                    "error": result.get("error", "Delete failed"),
+                    "code": result.get("code", "DELETE_ERROR")
                 }
             })
 

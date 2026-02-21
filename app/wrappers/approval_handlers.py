@@ -358,63 +358,96 @@ class ApprovalHandlers:
         - invoice: Saisie de facture (invoice_details + accounting_lines)
         - supplier: Création de contact fournisseur (editable_fields)
         - asset: Création d'immobilisation (assets_to_create)
+
+        Note: Workers store data nested under context_payload, dropdown_options,
+        editable_fields. We read from nested first, with flat fallback.
         """
         # Serialize to handle Firestore DatetimeWithNanoseconds
         item = _serialize_value(item)
         base = self._format_approval_item(item)
-        
-        # Mode detection
-        approval_type = item.get("approval_type", "invoice")  # invoice | supplier | asset
-        
+
+        # Extract nested containers (worker stores data here)
+        ctx = item.get("context_payload", {})
+        dropdown = item.get("dropdown_options", {})
+        editable = item.get("editable_fields", {})
+
+        # Mode detection — check context_payload first, then flat
+        approval_type = (
+            item.get("approval_type")
+            or ctx.get("approval_type")
+            or "invoice"
+        )
+
         # APBookkeeper common fields
         base.update({
             "approvalType": approval_type,
-            "jobId": item.get("job_id", ""),
-            "batchId": item.get("batch_id", ""),
+            "jobId": item.get("job_id", "") or ctx.get("job_id", ""),
+            "batchId": item.get("batch_id", "") or ctx.get("batch_id", ""),
         })
-        
+
         # Invoice mode - Saisie de facture complète
         if approval_type == "invoice":
+            # Read from context_payload first (worker format), then flat (legacy)
+            invoice_details = ctx.get("invoice_details") or item.get("invoice_details", {})
+            accounting_lines = ctx.get("accounting_lines") or item.get("accounting_lines", [])
+            invoice_totals = ctx.get("invoice_totals") or item.get("invoice_totals", {})
+
+            # Compute totals if not provided
+            if not invoice_totals and accounting_lines:
+                total_ht = sum(
+                    (line.get("quantity", 1) or 1) * (line.get("price_unit", 0) or 0)
+                    for line in accounting_lines
+                )
+                total_vat = sum(line.get("tax_amount", 0) or 0 for line in accounting_lines)
+                total_ttc = total_ht + total_vat
+                expected_ttc = (
+                    invoice_details.get("amount_man")
+                    or invoice_details.get("amount_total")
+                    or total_ttc
+                )
+                invoice_totals = {
+                    "total_ht": round(total_ht, 2),
+                    "total_vat": round(total_vat, 2),
+                    "total_ttc": round(total_ttc, 2),
+                    "expected_ttc": round(float(expected_ttc), 2) if expected_ttc else round(total_ttc, 2),
+                    "is_balanced": abs(total_ttc - float(expected_ttc or total_ttc)) < 0.01,
+                }
+
+            # Dropdowns — from dropdown_options first, then flat
+            available_suppliers = dropdown.get("suppliers") or item.get("available_suppliers", [])
+            available_accounts = dropdown.get("accounts") or item.get("available_accounts", [])
+            available_taxes = dropdown.get("taxes") or item.get("available_taxes", [])
+            available_currencies = dropdown.get("currencies") or item.get("available_currencies", [])
+
             base.update({
-                # Invoice header (partner, ref, currency, dates)
-                "invoiceDetails": item.get("invoice_details", {}),
-                # Accounting lines with accounts, taxes, amounts
-                "accountingLines": item.get("accounting_lines", []),
-                # Calculated totals (total_ht, total_vat, total_ttc, expected_ttc, is_balanced)
-                "invoiceTotals": item.get("invoice_totals", {}),
-                # Metadata for dropdowns (suppliers, accounts, taxes, currencies)
-                "invoiceDetailsMeta": item.get("invoice_details_meta", {}),
-                "invoiceLinesMeta": item.get("invoice_lines_meta", {}),
-                # Options for dropdowns
-                "availableSuppliers": item.get("available_suppliers", []),
-                "availableAccounts": item.get("available_accounts", []),
-                "availableTaxes": item.get("available_taxes", []),
-                "availableCurrencies": item.get("available_currencies", []),
+                "invoiceDetails": invoice_details,
+                "accountingLines": accounting_lines,
+                "invoiceTotals": invoice_totals,
+                "invoiceDetailsMeta": ctx.get("invoice_details_meta") or item.get("invoice_details_meta", {}),
+                "invoiceLinesMeta": ctx.get("invoice_lines_meta") or item.get("invoice_lines_meta", {}),
+                "availableSuppliers": available_suppliers,
+                "availableAccounts": available_accounts,
+                "availableTaxes": available_taxes,
+                "availableCurrencies": available_currencies,
             })
-        
+
         # Supplier mode - Création de contact
         elif approval_type == "supplier":
             base.update({
-                # Dynamic editable fields (name, email, address, country_id, vat, etc.)
-                "editableFields": item.get("editable_fields", {}),
-                "supplierData": item.get("supplier_data", {}),
-                # Fields UI with types, labels, options
+                "editableFields": editable.get("supplier_data") or item.get("editable_fields", {}),
+                "supplierData": ctx.get("supplier_data") or item.get("supplier_data", {}),
                 "supplierFieldsUI": item.get("supplier_fields_ui", []),
-                # Country dropdown options
-                "availableCountries": item.get("available_countries", []),
+                "availableCountries": dropdown.get("countries") or item.get("available_countries", []),
             })
-        
+
         # Asset mode - Création d'immobilisation
         elif approval_type == "asset":
             base.update({
-                # List of assets to create (asset_name, model_id, acquisition_date, original_value, quantity, justification)
-                "assetsToCreate": item.get("assets_to_create", []),
-                # Asset models dropdown
-                "availableAssetModels": item.get("available_asset_models", []),
-                # Metadata
-                "assetsMeta": item.get("assets_meta", {}),
+                "assetsToCreate": ctx.get("assets_to_create") or item.get("assets_to_create", []),
+                "availableAssetModels": dropdown.get("asset_models") or item.get("available_asset_models", []),
+                "assetsMeta": ctx.get("assets_meta") or item.get("assets_meta", {}),
             })
-        
+
         return base
 
     # ============================================
@@ -742,7 +775,10 @@ class ApprovalHandlers:
                             firebase.process_apbookeeper_approval,
                             mandate_path=mandate_path,
                             item_id=item_id,
-                            user_id=user_id
+                            user_id=user_id,
+                            instructions=decision.get("instructions", ""),
+                            updated_data=decision.get("updatedData", {}),
+                            approval_type=decision.get("selectedMode", "invoice"),
                         )
                     else:
                         result = await asyncio.to_thread(

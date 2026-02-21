@@ -59,16 +59,28 @@ async def _listen_loop():
             )
 
             # Import here to avoid circular imports at module load time
-            from .job_actions_handler import handle_job_process
-
-            result = await handle_job_process(
-                uid=uid,
-                job_type=job_type,
-                payload=data.get("payload", {}),
-                company_data=data.get("company_data", {}),
-                source=source,
-                traceability=data.get("traceability"),
+            from .job_actions_handler import (
+                handle_job_process,
+                handle_reverse_reconciliation_dispatch,
             )
+
+            # Route reverse_reconciliation to dedicated handler (no notifs, no list changes)
+            if "reverse_reconciliation" in source:
+                result = await handle_reverse_reconciliation_dispatch(
+                    uid=uid,
+                    payload=data.get("payload", {}),
+                    company_data=data.get("company_data", {}),
+                    source=source,
+                )
+            else:
+                result = await handle_job_process(
+                    uid=uid,
+                    job_type=job_type,
+                    payload=data.get("payload", {}),
+                    company_data=data.get("company_data", {}),
+                    source=source,
+                    traceability=data.get("traceability"),
+                )
 
             if result.get("success"):
                 logger.info(

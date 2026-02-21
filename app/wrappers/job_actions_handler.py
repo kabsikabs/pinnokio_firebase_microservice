@@ -83,6 +83,14 @@ JOB_TYPE_CONFIG = {
         "domain": "bank",
         "approval_prefix": "bank_",
     },
+    "exbookeeper": {
+        "process_endpoint": None,
+        "stop_endpoint": None,
+        "local_port": None,
+        "department": "EXbookeeper",
+        "domain": "expenses",
+        "approval_prefix": "ex_",
+    },
     "onboarding": {
         "process_endpoint": "/onboarding_manager_agent",
         "stop_endpoint": "/stop-onboarding",
@@ -98,6 +106,7 @@ ACTIVE_JOB_TYPE_MAP = {
     "router": "router",
     "apbookeeper": "apbookeeper",
     "bankbookeeper": "banker",
+    "exbookeeper": "exbookeeper",
     "onboarding": "onboarding",
 }
 
@@ -1060,12 +1069,15 @@ async def handle_job_delete(
         for idx, (job_id, file_name) in enumerate(job_file_pairs, 1):
             logger.info(f"[JOB_ACTIONS] → Processing job {idx}/{len(job_file_pairs)}: job_id={job_id}")
             try:
-                # 0. For AP: resolve drive_file_id BEFORE purge (Step 3 will erase the data)
+                # 0. For AP/EX: resolve drive_file_id BEFORE purge (Step 3 will erase the data)
                 drive_file_id = ""
                 resolved_name = ""
                 if job_type == "apbookeeper":
                     drive_file_id, resolved_name = await _resolve_ap_drive_file_id(uid, job_id)
                     logger.info(f"[JOB_ACTIONS] →   Step 0: Resolved drive_file_id={drive_file_id or '(empty)'} for {job_id}")
+                elif job_type == "exbookeeper":
+                    drive_file_id, resolved_name = await _resolve_ex_drive_file_id(uid, job_id)
+                    logger.info(f"[JOB_ACTIONS] →   Step 0: Resolved drive_file_id={drive_file_id or '(empty)'} for EX {job_id}")
 
                 # 1. Delete notifications for this job
                 logger.debug(f"[JOB_ACTIONS] →   Step 1: Deleting notifications...")
@@ -1147,6 +1159,50 @@ async def handle_job_delete(
                     else:
                         logger.warning(f"[JOB_ACTIONS] →   Step 5: No drive_file_id found for AP job {job_id}, skipping Drive move")
 
+                # 5. For EXbookeeper: same as AP - move file to Drive input, reset Router doc
+                elif job_type == "exbookeeper":
+                    if drive_file_id and not drive_file_id.startswith("klk_"):
+                        # 5b: Move file back to Drive input folder
+                        logger.info(f"[JOB_ACTIONS] →   Step 5b: Moving EX file to Drive input: {resolved_name or drive_file_id}")
+                        move_success = await _move_file_to_drive_input(
+                            uid, company_data, drive_file_id, resolved_name
+                        )
+                        if move_success:
+                            moved_to_todo.append({
+                                "job_id": drive_file_id,
+                                "file_name": resolved_name,
+                                "drive_file_id": drive_file_id,
+                            })
+                            logger.info(f"[JOB_ACTIONS] →   Step 5b: EX file moved to Drive ✓")
+                        else:
+                            logger.warning(f"[JOB_ACTIONS] →   Step 5b: Drive move FAILED for EX {drive_file_id}")
+
+                        # 5c: Reset Router task_manager/{drive_file_id} to status=to_process
+                        try:
+                            router_doc_ref = firebase.db.collection(
+                                f"clients/{uid}/task_manager"
+                            ).document(drive_file_id)
+                            router_doc = await asyncio.to_thread(router_doc_ref.get)
+                            if router_doc.exists:
+                                await asyncio.to_thread(
+                                    router_doc_ref.update,
+                                    {"status": "to_process"}
+                                )
+                                router_data = router_doc.to_dict() or {}
+                                moved_to_todo[-1]["klk_job_id"] = router_data.get("klk_job_id", "")
+                                moved_to_todo[-1]["collection_id"] = router_data.get("collection_id", "")
+                                moved_to_todo[-1]["mandate_path"] = router_data.get("mandate_path", "")
+                                logger.info(
+                                    f"[JOB_ACTIONS] →   Step 5c: Router task_manager/{drive_file_id} "
+                                    f"reset to to_process ✓"
+                                )
+                            else:
+                                logger.info(f"[JOB_ACTIONS] →   Step 5c: Router doc {drive_file_id} not found, skip")
+                        except Exception as reset_err:
+                            logger.warning(f"[JOB_ACTIONS] →   Step 5c: Router reset skipped: {reset_err}")
+                    else:
+                        logger.info(f"[JOB_ACTIONS] →   Step 5: No real drive_file_id for EX job {job_id}, skipping Drive move")
+
                 deleted_jobs.append(job_id)
                 logger.info(f"[JOB_ACTIONS] →   Job {job_id} DELETE completed ✓")
 
@@ -1192,9 +1248,9 @@ async def handle_job_delete(
             await _add_to_routing_todo(uid, company_data, moved_to_todo)
             logger.info(f"[JOB_ACTIONS] → Step 7: Items added to routing to_do ✓")
 
-        # 8. If Invoice/AP deleted, also add files back to routing to_do
+        # 8. If Invoice/AP/EX deleted, also add files back to routing to_do
         #    AND broadcast routing.item_update so the Router frontend store is updated
-        if job_type == "apbookeeper" and moved_to_todo:
+        if job_type in ("apbookeeper", "exbookeeper") and moved_to_todo:
             logger.info(f"[JOB_ACTIONS] → Step 8: Cross-updating routing cache for AP delete...")
             await _add_to_routing_todo(uid, company_data, moved_to_todo)
             logger.info(f"[JOB_ACTIONS] → Step 8: {len(moved_to_todo)} items added to routing to_do ✓")
@@ -1949,14 +2005,27 @@ async def _update_cache_after_delete(
                     for item in docs_container[category]
                     if item.get("job_id") not in deleted_ids
                     and item.get("id") not in deleted_ids
+                    and item.get("expense_id") not in deleted_ids
                 ]
                 actually_removed += before - len(docs_container[category])
 
-        # Update counts
+        # Update counts (routing/invoices/bank structure)
         if "counts" in data:
             for category in ["in_process", "pending", "processed", "to_process"]:
                 if category in docs_container:
                     data["counts"][category] = len(docs_container[category])
+
+        # Update metrics (expenses structure: totalToProcess, totalInProcess, etc.)
+        if "metrics" in data:
+            metrics_key_map = {
+                "to_process": "totalToProcess",
+                "in_process": "totalInProcess",
+                "pending": "totalPending",
+                "processed": "totalProcessed",
+            }
+            for category, metric_key in metrics_key_map.items():
+                if category in docs_container and metric_key in data["metrics"]:
+                    data["metrics"][metric_key] = len(docs_container[category])
 
         # Save back (preserve wrapper if present)
         if is_wrapped:
@@ -2061,6 +2130,40 @@ async def _resolve_ap_drive_file_id(uid: str, job_id: str) -> Tuple[str, str]:
 
     except Exception as e:
         logger.warning(f"[JOB_ACTIONS] _resolve_ap_drive_file_id FAILED for {job_id}: {e}")
+        return ("", "")
+
+
+async def _resolve_ex_drive_file_id(uid: str, job_id: str) -> Tuple[str, str]:
+    """
+    For an EXbookeeper job, read task_manager/{job_id} and extract:
+    - drive_file_id from file_id (root) or department_data.EXbookeeper
+    - file_name from root level
+
+    Returns: (drive_file_id, file_name) — ("", "") if not found.
+    """
+    try:
+        firebase = get_firebase_management()
+        doc = await asyncio.to_thread(
+            lambda: firebase.db.collection(f"clients/{uid}/task_manager").document(job_id).get()
+        )
+        if not doc.exists:
+            logger.warning(f"[JOB_ACTIONS] _resolve_ex_drive_file_id: doc {job_id} not found")
+            return ("", "")
+
+        data = doc.to_dict() or {}
+
+        drive_file_id = data.get("file_id", "")
+        if not drive_file_id:
+            dept_data = data.get("department_data", {})
+            ex_data = dept_data.get("EXbookeeper") or dept_data.get("exbookeeper") or {}
+            drive_file_id = ex_data.get("drive_file_id", "") or ex_data.get("file_id", "")
+
+        file_name = data.get("file_name", "")
+
+        return (drive_file_id, file_name)
+
+    except Exception as e:
+        logger.warning(f"[JOB_ACTIONS] _resolve_ex_drive_file_id FAILED for {job_id}: {e}")
         return ("", "")
 
 
@@ -2456,6 +2559,111 @@ async def _persist_jobs_to_task_manager(
 
 
 # ============================================
+# REVERSE RECONCILIATION DISPATCH
+# ============================================
+
+
+async def handle_reverse_reconciliation_dispatch(
+    uid: str,
+    payload: Dict[str, Any],
+    company_data: Dict[str, Any],
+    source: str = "reverse_reconciliation",
+) -> Dict[str, Any]:
+    """
+    Dispatch a reverse reconciliation request to the Bank worker.
+
+    Simplified path compared to handle_job_process:
+    - HTTP POST to bankbookeeper /reverse-reconciliation-trigger
+    - No notifications created
+    - No optimistic list change
+    - No task_manager persistence (caller manages its own tracking)
+
+    Args:
+        uid: Firebase user ID
+        payload: Reverse reconciliation payload (items, request_id, etc.)
+        company_data: Company context (mandate_path, company_id)
+        source: Source identifier
+
+    Returns:
+        {success, request_id, dispatch_method}
+    """
+    request_id = payload.get("request_id", str(uuid.uuid4()))
+    company_id = company_data.get("company_id") or payload.get("collection_name")
+
+    logger.info(
+        f"[JOB_ACTIONS] ═══════════════════════════════════════════════════════════"
+    )
+    logger.info(
+        f"[JOB_ACTIONS] handle_reverse_reconciliation_dispatch START - "
+        f"uid={uid} request_id={request_id} company_id={company_id}"
+    )
+
+    try:
+        # Build URL for bankbookeeper worker
+        base_url = _get_base_url(job_type="bankbookeeper")
+        process_url = f"{base_url}/reverse-reconciliation-trigger"
+
+        # Build the jobbeur payload
+        jobbeur_payload = {
+            **payload,
+            "request_id": request_id,
+            "user_id": uid,
+            "collection_name": company_id,
+            "mandates_path": company_data.get("mandate_path", ""),
+            "source": source,
+        }
+
+        logger.info(
+            f"[JOB_ACTIONS] → Calling HTTP endpoint: {process_url}"
+        )
+
+        # HTTP POST to bank worker
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                process_url,
+                json=jobbeur_payload,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                status_code = response.status
+                response_text = await response.text()
+
+                if status_code in (200, 202):
+                    logger.info(
+                        f"[JOB_ACTIONS] handle_reverse_reconciliation_dispatch SUCCESS - "
+                        f"request_id={request_id} status={status_code}"
+                    )
+                    return {
+                        "success": True,
+                        "request_id": request_id,
+                        "dispatch_method": "http",
+                        "status_code": status_code,
+                    }
+                else:
+                    logger.error(
+                        f"[JOB_ACTIONS] handle_reverse_reconciliation_dispatch HTTP FAILED - "
+                        f"status={status_code} body={response_text[:200]}"
+                    )
+                    return {
+                        "success": False,
+                        "request_id": request_id,
+                        "error": f"HTTP {status_code}: {response_text[:200]}",
+                        "code": "HTTP_ERROR",
+                    }
+
+    except Exception as e:
+        logger.error(
+            f"[JOB_ACTIONS] handle_reverse_reconciliation_dispatch FAILED: {e}",
+            exc_info=True,
+        )
+        return {
+            "success": False,
+            "request_id": request_id,
+            "error": str(e),
+            "code": "DISPATCH_ERROR",
+        }
+
+
+# ============================================
 # EXPORTS
 # ============================================
 
@@ -2464,6 +2672,7 @@ __all__ = [
     "handle_job_stop",
     "handle_job_restart",
     "handle_job_delete",
+    "handle_reverse_reconciliation_dispatch",
     "create_and_publish_notification",
     "JOB_TYPE_CONFIG",
 ]

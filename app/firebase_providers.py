@@ -10128,7 +10128,8 @@ class FirebaseManagement:
         company_id: str,
         item_id: str,
         action: str,
-        data: dict = None
+        data: dict = None,
+        department: str = "routing"
     ):
         """
         Publie une mise à jour pending_approval sur Redis.
@@ -10139,6 +10140,7 @@ class FirebaseManagement:
             item_id: ID de l'item
             action: "add" | "update" | "remove"
             data: Données additionnelles (optionnel)
+            department: Département source ("routing", "bank", "invoices")
         """
         try:
             import json
@@ -10152,7 +10154,7 @@ class FirebaseManagement:
             payload = {
                 "type": f"pending_approval_{'deleted' if action == 'remove' else 'updated' if action == 'update' else 'created'}",
                 "action": action,
-                "department": "routing",
+                "department": department,
                 "job_id": item_id,
                 "company_id": company_id,
                 "data": data or {"id": item_id},
@@ -10160,10 +10162,383 @@ class FirebaseManagement:
             }
 
             redis.publish(channel, json.dumps(payload, default=str))
-            logger.info(f"[REDIS] Published pending_approval to {channel}: action={action}")
+            logger.info(f"[REDIS] Published pending_approval to {channel}: action={action}, dept={department}")
 
         except Exception as e:
             logger.warning(f"[REDIS] Error publishing pending_approval: {e}")
+
+    # ─────────────────────────────────────────────────────────────
+    # BANKER APPROVAL / REJECTION
+    # ─────────────────────────────────────────────────────────────
+
+    def process_banker_approval(
+        self,
+        mandate_path: str,
+        item_id: str,
+        user_id: str,
+        instructions: str = None,
+        **extra_fields
+    ) -> bool:
+        """
+        Traite l'approbation d'un item Banker.
+
+        1. Charge l'item depuis approval_pendinglist
+        2. Crée une notification avec approval_response_mode: true
+        3. Supprime l'item de approval_pendinglist
+        4. Publie sur Redis pour mise à jour temps réel
+        """
+        import uuid as uuid_mod
+        from datetime import datetime, timezone
+
+        try:
+            pending_path = f"{mandate_path}/approval_pendinglist/{item_id}"
+            logger.info(f"[APPROVAL] Processing banker approval: {pending_path}")
+
+            doc_ref = self.db.document(pending_path)
+            doc = doc_ref.get()
+
+            if not doc.exists:
+                logger.error(f"[APPROVAL] Item not found: {pending_path}")
+                return False
+
+            item_data = doc.to_dict()
+
+            # Extraire company_id depuis mandate_path
+            path_parts = mandate_path.split("/")
+            company_id = path_parts[-1] if len(path_parts) >= 4 else ""
+            client_uuid = path_parts[1] if len(path_parts) >= 2 else ""
+
+            # 2. Créer la notification avec approval_response_mode
+            notification_data = {
+                "job_id": item_id,
+                "file_id": item_data.get("transaction_id", item_id),
+                "file_name": item_data.get("file_name", item_data.get("transaction_name", "")),
+                "function_name": "Bankbookeeper",
+                "status": "in_queue",
+                "read": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "collection_id": company_id,
+                "collection_name": company_id,
+                "batch_id": item_data.get("batch_id", f"approval_batch_{uuid_mod.uuid4().hex[:10]}"),
+                "approval_response_mode": True,
+                "approval_status": "approved",
+                "instructions": instructions or "",
+                "user_id": user_id,
+                "client_uuid": client_uuid,
+                "mandates_path": mandate_path,
+            }
+
+            notification_path = f"clients/{user_id}/notifications"
+            self.db.collection(notification_path).document(item_id).set(notification_data)
+            logger.info(f"[APPROVAL] Banker notification created: {notification_path}/{item_id}")
+
+            # 3. Supprimer l'item de approval_pendinglist
+            doc_ref.delete()
+            logger.info(f"[APPROVAL] Item deleted from pendinglist: {pending_path}")
+
+            # 4. Cleanup approval_context
+            try:
+                ctx_ref = self.db.document(f"{mandate_path}/approval_context/{item_id}")
+                if ctx_ref.get().exists:
+                    ctx_ref.delete()
+            except Exception:
+                pass
+
+            # 5. Publish Redis (action: remove)
+            self._publish_pending_approval_redis(
+                user_id=user_id,
+                company_id=company_id,
+                item_id=item_id,
+                action="remove",
+                department="bank"
+            )
+
+            logger.info(f"[APPROVAL] Banker approval processed successfully: {item_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[APPROVAL] Error processing banker approval: {e}", exc_info=True)
+            return False
+
+    def process_banker_rejection(
+        self,
+        mandate_path: str,
+        item_id: str,
+        rejection_reason: str,
+        instructions: str = None,
+        close: bool = False,
+        user_id: str = None
+    ) -> bool:
+        """
+        Traite le rejet d'un item Banker.
+
+        Si close=True: Supprime l'item définitivement
+        Si close=False: Met à jour le statut en "rejected"
+        """
+        from datetime import datetime, timezone
+
+        try:
+            pending_path = f"{mandate_path}/approval_pendinglist/{item_id}"
+            logger.info(f"[APPROVAL] Processing banker rejection: {pending_path}, close={close}")
+
+            doc_ref = self.db.document(pending_path)
+            doc = doc_ref.get()
+
+            if not doc.exists:
+                logger.error(f"[APPROVAL] Item not found: {pending_path}")
+                return False
+
+            path_parts = mandate_path.split("/")
+            company_id = path_parts[-1] if len(path_parts) >= 4 else ""
+
+            if close:
+                doc_ref.delete()
+                try:
+                    ctx_ref = self.db.document(f"{mandate_path}/approval_context/{item_id}")
+                    if ctx_ref.get().exists:
+                        ctx_ref.delete()
+                except Exception:
+                    pass
+
+                self._publish_pending_approval_redis(
+                    user_id=user_id, company_id=company_id,
+                    item_id=item_id, action="remove", department="bank"
+                )
+            else:
+                update_data = {
+                    "status": "rejected",
+                    "rejection_reason": rejection_reason,
+                    "instructions": instructions or "",
+                    "rejected_by": user_id,
+                    "rejected_at": datetime.now(timezone.utc).isoformat(),
+                }
+                doc_ref.update(update_data)
+
+                self._publish_pending_approval_redis(
+                    user_id=user_id, company_id=company_id,
+                    item_id=item_id, action="update", department="bank",
+                    data={"status": "rejected", "rejection_reason": rejection_reason}
+                )
+
+            logger.info(f"[APPROVAL] Banker rejection processed: {item_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[APPROVAL] Error processing banker rejection: {e}", exc_info=True)
+            return False
+
+    # ─────────────────────────────────────────────────────────────
+    # APBOOKEEPER APPROVAL / REJECTION
+    # ─────────────────────────────────────────────────────────────
+
+    def process_apbookeeper_approval(
+        self,
+        mandate_path: str,
+        item_id: str,
+        user_id: str,
+        instructions: str = None,
+        updated_data: dict = None,
+        approval_type: str = "invoice",
+        **extra_fields
+    ) -> bool:
+        """
+        Traite l'approbation d'un item APBookkeeper.
+
+        1. Charge l'item depuis approval_pendinglist
+        2. Merge updated_data dans context_payload (mode PATCH)
+        3. Crée une notification avec approval_response_mode: true
+        4. Dispatch vers le worker via Redis queue
+        5. Supprime l'item de approval_pendinglist
+        6. Publie un delta PENDING_APPROVAL_UPDATE action=remove
+        """
+        import json as json_mod
+        import uuid as uuid_mod
+        from datetime import datetime, timezone
+
+        try:
+            pending_path = f"{mandate_path}/approval_pendinglist/{item_id}"
+            logger.info(f"[APPROVAL] Processing apbookeeper approval: {pending_path}")
+
+            doc_ref = self.db.document(pending_path)
+            doc = doc_ref.get()
+
+            if not doc.exists:
+                logger.error(f"[APPROVAL] Item not found: {pending_path}")
+                return False
+
+            item_data = doc.to_dict()
+
+            path_parts = mandate_path.split("/")
+            company_id = path_parts[-1] if len(path_parts) >= 4 else ""
+            client_uuid = path_parts[1] if len(path_parts) >= 2 else ""
+
+            # 2. Merge updated_data into context_payload (PATCH mode)
+            if updated_data:
+                ctx = item_data.get("context_payload", {})
+                # Merge invoice_details fields
+                if "invoice_details" in ctx and isinstance(updated_data, dict):
+                    invoice_edits = {
+                        k: v for k, v in updated_data.items()
+                        if k != "accounting_lines"
+                    }
+                    if invoice_edits:
+                        ctx["invoice_details"] = {**ctx.get("invoice_details", {}), **invoice_edits}
+                # Merge accounting_lines (full replace)
+                if "accounting_lines" in updated_data:
+                    ctx["accounting_lines"] = updated_data["accounting_lines"]
+                item_data["context_payload"] = ctx
+                logger.info(f"[APPROVAL] Merged updated_data into context_payload for {item_id}")
+
+            # 3. Créer la notification avec approval_response_mode
+            notification_data = {
+                "job_id": item_id,
+                "file_id": item_data.get("file_id", item_data.get("drive_file_id", item_id)),
+                "file_name": item_data.get("file_name", ""),
+                "function_name": "APbookeeper",
+                "status": "in_queue",
+                "read": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "collection_id": company_id,
+                "collection_name": company_id,
+                "batch_id": item_data.get("batch_id", f"approval_batch_{uuid_mod.uuid4().hex[:10]}"),
+                "approval_response_mode": True,
+                "approval_status": "approved",
+                "approval_type": approval_type,
+                "instructions": instructions or "",
+                "user_id": user_id,
+                "client_uuid": client_uuid,
+                "mandates_path": mandate_path,
+            }
+
+            # Include the merged context_payload so the worker has updated data
+            if updated_data:
+                notification_data["context_payload"] = item_data.get("context_payload", {})
+
+            notification_path = f"clients/{user_id}/notifications"
+            self.db.collection(notification_path).document(item_id).set(notification_data)
+            logger.info(f"[APPROVAL] APBookkeeper notification created: {notification_path}/{item_id}")
+
+            # 4. Dispatch to worker via Redis queue
+            try:
+                redis_client = self._get_redis()
+                if redis_client:
+                    dispatch_payload = {
+                        "job_id": item_id,
+                        "function_name": "APbookeeper",
+                        "mandate_path": mandate_path,
+                        "collection_id": company_id,
+                        "user_id": user_id,
+                        "client_uuid": client_uuid,
+                        "approval_response_mode": True,
+                        "approval_type": approval_type,
+                        "file_id": item_data.get("file_id", ""),
+                        "file_name": item_data.get("file_name", ""),
+                        "batch_id": notification_data["batch_id"],
+                        "context_payload": item_data.get("context_payload", {}),
+                        "instructions": instructions or "",
+                    }
+                    redis_client.lpush(
+                        "queue:agentic_dispatch",
+                        json_mod.dumps(dispatch_payload, default=str)
+                    )
+                    logger.info(f"[APPROVAL] Dispatched to queue:agentic_dispatch for {item_id}")
+            except Exception as redis_err:
+                logger.warning(f"[APPROVAL] Redis dispatch failed (notification still created): {redis_err}")
+
+            # 5. Supprimer l'item de approval_pendinglist
+            doc_ref.delete()
+            logger.info(f"[APPROVAL] Item deleted from pendinglist: {pending_path}")
+
+            # 6. Cleanup approval_context
+            try:
+                ctx_ref = self.db.document(f"{mandate_path}/approval_context/{item_id}")
+                if ctx_ref.get().exists:
+                    ctx_ref.delete()
+            except Exception:
+                pass
+
+            # 7. Publish Redis (action: remove)
+            self._publish_pending_approval_redis(
+                user_id=user_id,
+                company_id=company_id,
+                item_id=item_id,
+                action="remove",
+                department="invoices"
+            )
+
+            logger.info(f"[APPROVAL] APBookkeeper approval processed successfully: {item_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[APPROVAL] Error processing apbookeeper approval: {e}", exc_info=True)
+            return False
+
+    def process_apbookeeper_rejection(
+        self,
+        mandate_path: str,
+        item_id: str,
+        rejection_reason: str,
+        instructions: str = None,
+        close: bool = False,
+        user_id: str = None
+    ) -> bool:
+        """
+        Traite le rejet d'un item APBookkeeper.
+
+        Si close=True: Supprime l'item définitivement
+        Si close=False: Met à jour le statut en "rejected"
+        """
+        from datetime import datetime, timezone
+
+        try:
+            pending_path = f"{mandate_path}/approval_pendinglist/{item_id}"
+            logger.info(f"[APPROVAL] Processing apbookeeper rejection: {pending_path}, close={close}")
+
+            doc_ref = self.db.document(pending_path)
+            doc = doc_ref.get()
+
+            if not doc.exists:
+                logger.error(f"[APPROVAL] Item not found: {pending_path}")
+                return False
+
+            path_parts = mandate_path.split("/")
+            company_id = path_parts[-1] if len(path_parts) >= 4 else ""
+
+            if close:
+                doc_ref.delete()
+                try:
+                    ctx_ref = self.db.document(f"{mandate_path}/approval_context/{item_id}")
+                    if ctx_ref.get().exists:
+                        ctx_ref.delete()
+                except Exception:
+                    pass
+
+                self._publish_pending_approval_redis(
+                    user_id=user_id, company_id=company_id,
+                    item_id=item_id, action="remove", department="invoices"
+                )
+            else:
+                update_data = {
+                    "status": "rejected",
+                    "rejection_reason": rejection_reason,
+                    "instructions": instructions or "",
+                    "rejected_by": user_id,
+                    "rejected_at": datetime.now(timezone.utc).isoformat(),
+                }
+                doc_ref.update(update_data)
+
+                self._publish_pending_approval_redis(
+                    user_id=user_id, company_id=company_id,
+                    item_id=item_id, action="update", department="invoices",
+                    data={"status": "rejected", "rejection_reason": rejection_reason}
+                )
+
+            logger.info(f"[APPROVAL] APBookkeeper rejection processed: {item_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[APPROVAL] Error processing apbookeeper rejection: {e}", exc_info=True)
+            return False
 
 
 class FirebaseRealtimeChat:
