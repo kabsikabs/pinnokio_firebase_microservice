@@ -1,9 +1,12 @@
 name: Deploy to ECS (pinnokio_microservice)
 
+# DISABLED: auto-deploy disabled during development — re-enable when ready
+# on:
+#   push:
+#     branches: [ "master" ]
+#   workflow_dispatch:
 on:
-  push:
-    branches: [ "master" ]
-  workflow_dispatch:
+  workflow_dispatch:  # manual trigger only
 
 env:
   AWS_REGION: us-east-1
