@@ -618,6 +618,85 @@ async def handle_refresh(
     }
 
 
+async def handle_billing_refresh(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Handle dashboard.billing_refresh event.
+
+    Targeted refresh of billing_history only (not full dashboard).
+    Fetches expenses from task_manager source, updates cache, broadcasts result.
+    """
+    logger.info(f"[ORCHESTRATION] Billing refresh requested: uid={uid}")
+
+    company_id = get_selected_company_id(uid)
+    company_data = get_company_context(uid, company_id) if company_id else None
+
+    if not company_id:
+        return {
+            "type": WS_EVENTS.DASHBOARD.BILLING_REFRESH,
+            "payload": {"success": False, "error": "No company selected"}
+        }
+
+    mandate_path = company_data.get("mandate_path", "") if company_data else ""
+
+    # Fallback: recover mandate_path from Firebase if cache expired
+    if not mandate_path and company_id:
+        try:
+            firebase_mgmt = FirebaseManagement()
+            mandates = await asyncio.to_thread(firebase_mgmt.fetch_all_mandates_light, uid)
+            for m in (mandates or []):
+                m_ids = (m.get("contact_space_id"), m.get("id"), m.get("contact_space_name"))
+                if company_id in m_ids:
+                    mandate_path = m.get("mandate_path", "")
+                    if mandate_path:
+                        if company_data is None:
+                            company_data = {}
+                        company_data["mandate_path"] = mandate_path
+                        set_selected_company(uid, company_id, company_data)
+                        break
+        except Exception as fb_err:
+            logger.warning(f"[ORCHESTRATION] Billing refresh: mandate_path fallback failed: {fb_err}")
+
+    # Invalidate billing_history cache so _get_expenses fetches from source
+    try:
+        from ..redis_client import get_redis
+        redis_client = get_redis()
+        cache_key = f"business:{uid}:{company_id}:billing_history"
+        deleted = redis_client.delete(cache_key)
+        logger.info(f"[ORCHESTRATION] Billing refresh: cache invalidated key={cache_key} deleted={deleted}")
+    except Exception as cache_err:
+        logger.warning(f"[ORCHESTRATION] Billing refresh: cache invalidation failed: {cache_err}")
+
+    # Fetch fresh expenses (cache just invalidated, will hit source)
+    dashboard_handlers = get_dashboard_handlers()
+    expenses_data = await dashboard_handlers._get_expenses(
+        user_id=uid,
+        company_id=company_id,
+        mandate_path=mandate_path
+    )
+
+    logger.info(
+        f"[ORCHESTRATION] Billing refresh: fetched {len(expenses_data.get('items', []))} items"
+    )
+
+    # Broadcast updated expenses to frontend
+    await hub.broadcast(uid, {
+        "type": WS_EVENTS.DASHBOARD.BILLING_REFRESH,
+        "payload": {
+            "success": True,
+            "data": {"expenses": expenses_data}
+        }
+    })
+
+    return {
+        "type": WS_EVENTS.DASHBOARD.BILLING_REFRESH,
+        "payload": {"success": True, "company_id": company_id}
+    }
+
+
 # ============================================
 # ORCHESTRATION RUNNER
 # ============================================

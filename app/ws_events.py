@@ -129,6 +129,7 @@ class DashboardEvents:
     APPROVALS_UPDATE = "dashboard.approvals_update"  # Approvals data updated
     # Real-time delta updates from jobbeurs (via Redis PubSub)
     BILLING_ITEM_UPDATE = "dashboard.billing_item_update"  # Single billing_history item changed (delta)
+    BILLING_REFRESH = "dashboard.billing_refresh"  # Targeted refresh of billing_history only
     PENDING_APPROVAL_UPDATE = "dashboard.pending_approval_update"  # Pending approval list update from jobbeurs
 
 

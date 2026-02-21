@@ -2054,6 +2054,17 @@ async def websocket_endpoint(ws: WebSocket):
                         await ws.send_text(_json.dumps(response))
                         logger.info(f"[WS] Dashboard refresh response sent - uid={uid}")
 
+                    elif msg_type == "dashboard.billing_refresh":
+                        # Targeted billing_history refresh (not full dashboard)
+                        from .wrappers.dashboard_orchestration_handlers import handle_billing_refresh
+                        response = await handle_billing_refresh(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Billing refresh response sent - uid={uid}")
+
                     elif msg_type == "page.context_change":
                         # Handler de changement de contexte de page
                         from .realtime.contextual_publisher import update_page_context
