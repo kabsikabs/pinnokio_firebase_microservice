@@ -437,6 +437,9 @@ class DriveCacheHandlers:
                 status = tm_data.get("status", "").lower()
                 # Garder le statut original pour le badge frontend
                 doc_item["status"] = status
+                # Propager le service de destination (onglet processed)
+                if tm_data.get("routed_to"):
+                    doc_item["routed_to"] = tm_data["routed_to"]
 
                 if status in ["completed", "close", "closed"]:
                     organized["processed"].append(doc_item)
@@ -467,6 +470,9 @@ class DriveCacheHandlers:
                 "status": status,  # Garder le statut original
                 "source": "task_manager",
             }
+            # Propager le service de destination (onglet processed)
+            if tm_data.get("routed_to"):
+                item["routed_to"] = tm_data["routed_to"]
             if status in ["completed", "close", "closed"]:
                 organized["processed"].append(item)
             elif status == "pending":
