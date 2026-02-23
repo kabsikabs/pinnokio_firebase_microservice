@@ -672,6 +672,43 @@ class RedisSubscriber:
         except Exception as e:
             logger.error("[REDIS_SUBSCRIBER] unexpected_error channel=%s uid=%s error=%s", channel, uid, str(e), exc_info=True)
 
+    @staticmethod
+    def _transform_direct_message(message_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Transforme un payload direct_message brut (snake_case worker) en format
+        frontend camelCase (DirectMessage interface).
+
+        Pour action "new": extrait les données du worker et ajoute docId.
+        Pour action "remove": retourne juste {docId}.
+        """
+        action = message_data.get("action_type", "new")
+
+        if action == "remove":
+            return {
+                "docId": message_data.get("message_id", message_data.get("docId", "")),
+            }
+
+        # Pour "new": les données worker sont soit dans "data", soit au top-level
+        raw = message_data.get("data", message_data)
+        message_id = message_data.get("message_id", "")
+
+        return {
+            "docId": message_id,
+            "message": raw.get("message", raw.get("status", "")),
+            "fileName": raw.get("file_name", raw.get("fileName", "")),
+            "collectionId": raw.get("collection_id", raw.get("collectionId", "")),
+            "collectionName": raw.get("collection_name", raw.get("collectionName", "")),
+            "status": raw.get("status", ""),
+            "jobId": raw.get("job_id", raw.get("jobId", "")),
+            "fileId": raw.get("file_id", raw.get("fileId", "")),
+            "functionName": raw.get("function_name", raw.get("functionName", "Chat")),
+            "timestamp": raw.get("timestamp", message_data.get("timestamp", "")),
+            "chatMode": raw.get("chat_mode", raw.get("chatMode", "")),
+            "threadKey": raw.get("thread_key", raw.get("threadKey", "")),
+            "driveLink": raw.get("drive_link", raw.get("driveLink", "")),
+            "batchId": raw.get("batch_id", raw.get("batchId", "")),
+        }
+
     async def _handle_direct_message_message(self, uid: str, channel: str, message_data: Dict[str, Any]) -> None:
         """
         Traite un message du canal direct_message_notif (Messenger).
@@ -701,19 +738,24 @@ class RedisSubscriber:
             is_connected = hub.is_user_connected(uid)
             logger.debug("[REDIS_SUBSCRIBER] → user_connected=%s", is_connected)
 
+            # Transformer le payload brut snake_case → camelCase (format DirectMessage)
+            action = message_data.get("action_type", "new")
+            transformed_data = self._transform_direct_message(message_data)
+
+            logger.debug("[REDIS_SUBSCRIBER] → transformed_data=%s", transformed_data)
+
             # Étape 1: Mise à jour du cache USER (TOUJOURS)
             logger.info("[REDIS_SUBSCRIBER] → Step 1: Updating USER cache (messages)...")
             try:
                 cache_key = _get_cache_key(CacheLevel.USER, uid, subkey="messages")
                 ttl = _get_ttl_for_cache(CacheLevel.USER)
 
-                # Préparer le payload pour le cache
                 cache_payload = {
-                    "action": "new",
-                    "data": message_data
+                    "action": action,
+                    "data": transformed_data
                 }
                 _update_cache(CacheLevel.USER, cache_key, cache_payload, ttl)
-                logger.debug("[REDIS_SUBSCRIBER] → cache_key=%s", cache_key)
+                logger.debug("[REDIS_SUBSCRIBER] → cache_key=%s action=%s", cache_key, action)
 
             except Exception as cache_error:
                 logger.error("[REDIS_SUBSCRIBER] cache_update_failed uid=%s error=%s", uid, str(cache_error), exc_info=True)
@@ -723,7 +765,7 @@ class RedisSubscriber:
                 logger.info("[REDIS_SUBSCRIBER] → Step 2: Publishing HIGH PRIORITY message via WebSocket...")
                 try:
                     event_type = WS_EVENTS.MESSENGER.DELTA
-                    payload = {"action": "new", "data": message_data}
+                    payload = {"action": action, "data": transformed_data}
 
                     # Publier via contextual_publisher (niveau USER)
                     published = await publish_user_event(
@@ -849,14 +891,31 @@ class RedisSubscriber:
                 # Toutes les catégories sont des flat lists (bank inclus, batches calculés à la volée)
 
                 # Extraire transaction_id depuis department_data pour matching bank
-                # Les items to_process ont "id": "579" (move_id ERP)
-                # Le delta a job_id: "company_acct_579" (composite)
-                # Mais department_data.Bankbookeeper.transaction_id = "579"
+                # Les items to_process ont "id": "577" (move_id ERP)
+                # Le delta a job_id: "company_18_577" (composite)
+                # department_data peut être:
+                #   - un dict imbriqué: {"Bankbookeeper": {"transaction_id": "577"}}
+                #   - OU des clés dot-path: {"department_data.Bankbookeeper.transaction_id": "577"}
                 tx_id_for_match = None
                 if domain in ("bank", "banking"):
+                    # Tentative 1: dict imbriqué classique
                     dept_data = item_data.get("department_data", {})
-                    bk_data = dept_data.get("Bankbookeeper", dept_data.get("banker", dept_data.get("Banker", {})))
-                    tx_id_for_match = str(bk_data.get("transaction_id", "")) if bk_data else None
+                    if isinstance(dept_data, dict) and dept_data:
+                        bk_data = dept_data.get("Bankbookeeper", dept_data.get("banker", dept_data.get("Banker", {})))
+                        tx_id_for_match = str(bk_data.get("transaction_id", "")) if bk_data else None
+                    # Tentative 2: clés dot-path (venant de update_task_manager_transaction_direct)
+                    if not tx_id_for_match:
+                        for dot_key in ("department_data.Bankbookeeper.transaction_id", "department_data.banker.transaction_id"):
+                            val = item_data.get(dot_key)
+                            if val:
+                                tx_id_for_match = str(val)
+                                break
+                    # Tentative 3: extraire le dernier segment du composite job_id
+                    # job_id = "klk_space_id_xxx_18_577" → transaction_id = "577"
+                    if not tx_id_for_match and job_id and "_" in job_id:
+                        last_segment = job_id.rsplit("_", 1)[-1]
+                        if last_segment.isdigit():
+                            tx_id_for_match = last_segment
 
                 # Étape 1: Trouver l'item existant dans toutes les listes (conserver ses champs)
                 existing_item = None

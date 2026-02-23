@@ -332,7 +332,8 @@ async def handle_session_select(
             company_id=company_id,
             space_code=company_id,
             thread_key=thread_key,
-            mode=mode
+            mode=mode,
+            chat_mode=chat_mode,
         )
 
         # NOTE: job_data for specialized chat modes (apbookeeper, banker, router)
@@ -342,15 +343,21 @@ async def handle_session_select(
         # ─────────────────────────────────────────────────
         # STEP 3: Broadcast to frontend
         # ─────────────────────────────────────────────────
+        broadcast_payload = {
+            "success": True,
+            "thread_key": thread_key,
+            "messages": history_result.get("messages", []),
+            "total": history_result.get("total", 0),
+            "pending_card": history_result.get("pending_card"),
+        }
+        # Include workflow checklist if restored (onboarding_chat mode)
+        wf_checklist = history_result.get("workflow_checklist")
+        if wf_checklist is not None:
+            broadcast_payload["workflow_checklist"] = wf_checklist
+
         await hub.broadcast(uid, {
             "type": WS_EVENTS.CHAT.HISTORY_LOADED,
-            "payload": {
-                "success": True,
-                "thread_key": thread_key,
-                "messages": history_result.get("messages", []),
-                "total": history_result.get("total", 0),
-                "pending_card": history_result.get("pending_card"),
-            }
+            "payload": broadcast_payload,
         })
 
         return {
@@ -899,6 +906,165 @@ async def handle_workflow_step_update(
 # INTERACTIVE CARD HANDLERS
 # ============================================
 
+# Cartes des workers externes (klk_router, klk_bank, klk_accountant)
+# Traitées directement par le backend — pas besoin du Worker LLM
+_EXTERNAL_WORKER_CARD_IDS = {
+    "klk_router_card",
+    "klk_router_approval_card",
+    "four_eyes_approval_card",
+    "approval_card",
+    "job_menu_card",
+    "bank_list_file_card",
+    "bank_file_list_card",
+}
+
+# invokedFunction par défaut selon le card_id
+_DEFAULT_INVOKED_FUNCTION = {
+    "klk_router_card": "answer_pinnokio",
+    "klk_router_approval_card": "answer_pinnokio",
+    "four_eyes_approval_card": "approve_four_eyes",
+    "approval_card": "approve_four_eyes",
+    "job_menu_card": "navigate",
+    "bank_list_file_card": "start_router_job",
+    "bank_file_list_card": "start_router_job",
+}
+
+# Champs formInputs attendus par les workers externes selon le card_id
+_FORM_FIELDS_BY_CARD = {
+    "klk_router_card": ["pinnokio_func", "instructions"],
+    "klk_router_approval_card": ["pinnokio_func", "second_dropdown", "instructions"],
+    "four_eyes_approval_card": ["user_message"],
+    "approval_card": ["user_message"],
+    "job_menu_card": ["next_step"],
+    "bank_list_file_card": ["selected_files", "methode"],
+    "bank_file_list_card": ["selected_files", "methode"],
+}
+
+
+async def _handle_external_card_response(
+    uid: str,
+    company_id: str,
+    thread_key: str,
+    card_id: str,
+    action: str,
+    params: Dict[str, Any],
+    message_id: str = None,
+) -> Dict[str, Any]:
+    """
+    Traite la réponse à une carte de worker externe directement côté backend.
+
+    Reconstruit le payload CARD_CLICKED_PINNOKIO au format attendu par les workers
+    externes (klk_router, klk_bank, klk_accountant) et l'écrit dans RTDB job_chats.
+
+    Même pattern que le raccourci CMMD : pas de passage par le Worker LLM.
+    """
+    import json
+    import uuid
+    from datetime import datetime, timezone
+
+    logger.info(
+        f"[CARD_EXTERNAL] Carte externe détectée — traitement direct "
+        f"card={card_id} action={action} thread={thread_key}"
+    )
+
+    try:
+        # Déterminer invokedFunction
+        if card_id in ("four_eyes_approval_card", "approval_card"):
+            if action in ("reject", "rejected", "reject_four_eyes"):
+                invoked_function = "reject_four_eyes"
+            else:
+                invoked_function = "approve_four_eyes"
+        else:
+            invoked_function = _DEFAULT_INVOKED_FUNCTION.get(card_id, "answer_pinnokio")
+
+        # Construire formInputs depuis les widget_values du frontend
+        widget_values = params.get("widget_values", params)
+        form_inputs = {}
+        for field_name in _FORM_FIELDS_BY_CARD.get(card_id, []):
+            raw_value = widget_values.get(field_name)
+            if raw_value is None and field_name in ("instructions", "user_message"):
+                raw_value = widget_values.get("comment", "") or params.get("comment", "")
+            if isinstance(raw_value, list):
+                value_list = raw_value
+            elif raw_value is not None:
+                value_list = [str(raw_value)]
+            else:
+                value_list = [""]
+            form_inputs[field_name] = {"stringInputs": {"value": value_list}}
+
+        # Construire le payload CARD_CLICKED_PINNOKIO
+        timestamp = datetime.now(timezone.utc).isoformat()
+        response_id = str(uuid.uuid4())
+        card_response_data = {
+            "type": "CARD_CLICKED",
+            "threadKey": thread_key,
+            "message": {
+                "cardsV2": [{
+                    "cardId": card_id,
+                    "card": {
+                        "header": {
+                            "title": "Réponse utilisateur",
+                            "subtitle": f"Action: {action}"
+                        }
+                    }
+                }]
+            },
+            "common": {
+                "invokedFunction": invoked_function,
+                "formInputs": form_inputs
+            },
+            "message_type": "CARD_CLICKED_PINNOKIO",
+            "timestamp": timestamp,
+            "sender_id": uid,
+            "read": False
+        }
+
+        # Écrire dans RTDB job_chats/{thread_key}/messages/
+        import os
+        import firebase_admin.db as rtdb
+        from app.firebase_client import get_firebase_app
+        app = get_firebase_app()
+        db_url = os.getenv(
+            "FIREBASE_REALTIME_DB_URL",
+            "https://pinnokio-gpt-default-rtdb.europe-west1.firebasedatabase.app/"
+        )
+        rtdb_path = f"{company_id}/job_chats/{thread_key}/messages/{response_id}"
+        rtdb.reference(rtdb_path, url=db_url, app=app).set(card_response_data)
+
+        logger.info(
+            f"[CARD_EXTERNAL] ✅ CARD_CLICKED_PINNOKIO écrit dans RTDB — "
+            f"path={rtdb_path} invokedFunction={invoked_function} "
+            f"formFields={list(form_inputs.keys())}"
+        )
+
+        # Broadcast card_responded pour que le frontend masque la carte
+        await hub.broadcast(uid, {
+            "type": "chat.card_responded",
+            "payload": {
+                "success": True,
+                "card_name": card_id,
+                "action": action,
+                "thread_key": thread_key,
+            }
+        })
+
+        return {
+            "type": "chat.card_clicked",
+            "payload": {
+                "success": True,
+                "status": "direct",
+                "message_id": response_id,
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"[CARD_EXTERNAL] ❌ Erreur traitement carte externe: {e}", exc_info=True)
+        return {
+            "type": "chat.card_clicked",
+            "payload": {"success": False, "error": str(e)}
+        }
+
+
 async def handle_card_clicked(
     uid: str,
     session_id: str,
@@ -949,6 +1115,22 @@ async def handle_card_clicked(
     )
 
     try:
+        # ── Raccourci cartes workers externes : écriture RTDB directe ──
+        # Même pattern que CMMD/FOLLOW_CARD : pas besoin du Worker LLM.
+        # On reconstruit le CARD_CLICKED_PINNOKIO et on l'écrit dans job_chats.
+        if card_id in _EXTERNAL_WORKER_CARD_IDS:
+            result = await _handle_external_card_response(
+                uid=uid,
+                company_id=company_id,
+                thread_key=thread_key,
+                card_id=card_id,
+                action=action,
+                params=params,
+                message_id=message_id,
+            )
+            return result
+
+        # ── Cartes Worker LLM : déléguer au Worker via LLMGateway ──
         from app.llm_service.llm_gateway import get_llm_gateway
 
         gateway = get_llm_gateway()

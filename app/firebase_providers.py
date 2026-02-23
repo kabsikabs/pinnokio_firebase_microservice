@@ -447,7 +447,15 @@ class FirebaseManagement:
                 status = data.get("status", "").lower()
                 department_data = data.get("department_data", {})
                 banker_data = department_data.get("Bankbookeeper", {}) or department_data.get("banker", {}) or department_data.get("Banker", {})
-                
+
+                # Filtrer les docs batch-level (pas de transaction_id dans banker_data).
+                # Ces docs sont créés par update_job_status_job_id(job_id=batch_id) pour
+                # le suivi du batch global. Seuls les docs transaction-level (avec
+                # transaction_id) sont des vraies transactions affichables.
+                tx_id = banker_data.get("transaction_id")
+                if not tx_id:
+                    continue
+
                 # Cas 1: Completed -> Processed
                 if status in ["completed", "close", "closed"]:
                     result["processed"].append(data)
@@ -5127,53 +5135,18 @@ class FirebaseManagement:
                     
                     if workflow_doc.exists:
                         workflow_data = workflow_doc.to_dict()
-                        
-                        # Extraire les paramètres pour Apbookeeper
-                        if "Apbookeeper_param" in workflow_data:
-                            ap_param = workflow_data.get("Apbookeeper_param", {})
-                            mandate["workflow_params"]["Apbookeeper_param"] = {
-                                "apbookeeper_approval_contact_creation": ap_param.get("apbookeeper_approval_contact_creation", False),
-                                "apbookeeper_approval_required": ap_param.get("apbookeeper_approval_required", False),
-                                "apbookeeper_communication_method": ap_param.get("apbookeeper_communication_method", ""),
-                                "apbookeeper_approval_pendinglist_enabled": ap_param.get("apbookeeper_approval_pendinglist_enabled", False),
-                                "apbookeeper_automated_workflow": ap_param.get("apbookeeper_automated_workflow", False),
-                                "trust_threshold_required": ap_param.get("trust_threshold_required", False),
-                                "trust_threshold_percent": ap_param.get("trust_threshold_percent", 95),
-                            }
-                        
-                        # Extraire les paramètres pour Router
-                        if "Router_param" in workflow_data:
-                            router_param = workflow_data.get("Router_param", {})
-                            mandate["workflow_params"]["Router_param"] = {
-                                "router_approval_required": router_param.get("router_approval_required", False),
-                                "router_automated_workflow": router_param.get("router_automated_workflow", False),
-                                "router_communication_method": router_param.get("router_communication_method", ""),
-                                "router_approval_pendinglist_enabled": router_param.get("router_approval_pendinglist_enabled", False),
-                                "departments": router_param.get("departments", []),
-                            }
-                        
-                        # Extraire les paramètres pour Banker
-                        if "Banker_param" in workflow_data:
-                            banker_param = workflow_data.get("Banker_param", {})
-                            mandate["workflow_params"]["Banker_param"] = {
-                                "banker_approval_required": banker_param.get("banker_approval_required", False),
-                                "banker_approval_thresholdworkflow": banker_param.get("banker_approval_thresholdworkflow", 0),
-                                "banker_communication_method": banker_param.get("banker_communication_method", ""),
-                                "banker_approval_pendinglist_enabled": banker_param.get("banker_approval_pendinglist_enabled", False),
-                                "banker_gl_approval": banker_param.get("banker_gl_approval", False),
-                                "banker_voucher_approval": banker_param.get("banker_voucher_approval", False),
-                            }
+
+                        # Pass through ALL fields from Firestore instead of whitelisting
+                        # This ensures new fields added via Settings save are not dropped
+                        for param_key in ("Apbookeeper_param", "Router_param", "Banker_param"):
+                            if param_key in workflow_data:
+                                mandate["workflow_params"][param_key] = workflow_data[param_key]
 
                         # Extraire les paramètres de date comptable depuis Accounting_param
                         if "Accounting_param" in workflow_data:
                             accounting_param = workflow_data.get("Accounting_param", {})
                             print(f"[FETCH_MANDATE] Found Accounting_param in Firestore: {accounting_param}")
-                            mandate["workflow_params"]["Accounting_param"] = {
-                                "accounting_date_definition": accounting_param.get("accounting_date_definition", True),
-                                "accounting_date": accounting_param.get("accounting_date", ""),
-                                "custom_mode": accounting_param.get("custom_mode", False),
-                                "date_prompt": accounting_param.get("date_prompt", ""),
-                            }
+                            mandate["workflow_params"]["Accounting_param"] = accounting_param
                             print(f"[FETCH_MANDATE] Built Accounting_param: {mandate['workflow_params']['Accounting_param']}")
                         else:
                             # Fallback: legacy format at root level
@@ -5566,44 +5539,18 @@ class FirebaseManagement:
                 
                 if workflow_doc.exists:
                     workflow_data = workflow_doc.to_dict()
-                    
-                    # Extraire les paramètres pour Apbookeeper
-                    if "Apbookeeper_param" in workflow_data:
-                        ap_param = workflow_data.get("Apbookeeper_param", {})
-                        mandate["workflow_params"]["Apbookeeper_param"] = {
-                            "apbookeeper_approval_contact_creation": ap_param.get("apbookeeper_approval_contact_creation", False),
-                            "apbookeeper_approval_required": ap_param.get("apbookeeper_approval_required", False),
-                            "apbookeeper_communication_method": ap_param.get("apbookeeper_communication_method", "")
-                        }
-                    
-                    # Extraire les paramètres pour Router
-                    if "Router_param" in workflow_data:
-                        router_param = workflow_data.get("Router_param", {})
-                        mandate["workflow_params"]["Router_param"] = {
-                            "router_approval_required": router_param.get("router_approval_required", False),
-                            "router_automated_workflow": router_param.get("router_automated_workflow", False),
-                            "router_communication_method": router_param.get("router_communication_method", "")
-                        }
-                    
-                    # Extraire les paramètres pour Banker
-                    if "Banker_param" in workflow_data:
-                        banker_param = workflow_data.get("Banker_param", {})
-                        mandate["workflow_params"]["Banker_param"] = {
-                            "banker_approval_required": banker_param.get("banker_approval_required", False),
-                            "banker_approval_thresholdworkflow": banker_param.get("banker_approval_thresholdworkflow", 0),
-                            "banker_communication_method": banker_param.get("banker_communication_method", "")
-                        }
+
+                    # Pass through ALL fields from Firestore instead of whitelisting
+                    # This ensures new fields added via Settings save are not dropped
+                    for param_key in ("Apbookeeper_param", "Router_param", "Banker_param"):
+                        if param_key in workflow_data:
+                            mandate["workflow_params"][param_key] = workflow_data[param_key]
 
                     # Extraire les paramètres de date comptable (Accounting_param)
                     if "Accounting_param" in workflow_data:
                         accounting_param = workflow_data.get("Accounting_param", {})
                         print(f"[fetch_single_mandate] Found Accounting_param: {accounting_param}")
-                        mandate["workflow_params"]["Accounting_param"] = {
-                            "accounting_date_definition": accounting_param.get("accounting_date_definition", True),
-                            "accounting_date": accounting_param.get("accounting_date", ""),
-                            "custom_mode": accounting_param.get("custom_mode", False),
-                            "date_prompt": accounting_param.get("date_prompt", ""),
-                        }
+                        mandate["workflow_params"]["Accounting_param"] = accounting_param
                     else:
                         # Valeurs par défaut si Accounting_param n'existe pas
                         print(f"[fetch_single_mandate] No Accounting_param found, using defaults")
@@ -8597,33 +8544,11 @@ class FirebaseManagement:
                 
                 if workflow_doc.exists:
                     workflow_data = workflow_doc.to_dict()
-                    
-                    # Extraire les paramètres pour Apbookeeper
-                    if "Apbookeeper_param" in workflow_data:
-                        ap_param = workflow_data.get("Apbookeeper_param", {})
-                        workflow_params["Apbookeeper_param"] = {
-                            "apbookeeper_approval_contact_creation": ap_param.get("apbookeeper_approval_contact_creation", False),
-                            "apbookeeper_approval_required": ap_param.get("apbookeeper_approval_required", False),
-                            "apbookeeper_communication_method": ap_param.get("apbookeeper_communication_method", "")
-                        }
-                    
-                    # Extraire les paramètres pour Router
-                    if "Router_param" in workflow_data:
-                        router_param = workflow_data.get("Router_param", {})
-                        workflow_params["Router_param"] = {
-                            "router_approval_required": router_param.get("router_approval_required", False),
-                            "router_automated_workflow": router_param.get("router_automated_workflow", False),
-                            "router_communication_method": router_param.get("router_communication_method", "")
-                        }
-                    
-                    # Extraire les paramètres pour Banker
-                    if "Banker_param" in workflow_data:
-                        banker_param = workflow_data.get("Banker_param", {})
-                        workflow_params["Banker_param"] = {
-                            "banker_approval_required": banker_param.get("banker_approval_required", False),
-                            "banker_approval_thresholdworkflow": banker_param.get("banker_approval_thresholdworkflow", 0),
-                            "banker_communication_method": banker_param.get("banker_communication_method", "")
-                        }
+
+                    # Pass through ALL fields from Firestore instead of whitelisting
+                    for param_key in ("Apbookeeper_param", "Router_param", "Banker_param"):
+                        if param_key in workflow_data:
+                            workflow_params[param_key] = workflow_data[param_key]
             except Exception as e:
                 print(f"⚠️ Erreur récupération workflow_params: {str(e)} - Utilisation des valeurs par défaut")
             

@@ -821,6 +821,8 @@ class CompanySettingsHandlers:
                     "router_automated_workflow": data.get("automatedWorkflow"),
                     "router_approval_pendinglist_enabled": data.get("approvalPendinglistEnabled"),
                     "departments": data.get("departments", []),
+                    "trust_threshold_required": data.get("trustThresholdRequired"),
+                    "trust_threshold_percent": data.get("trustThresholdPercent"),
                 })
                 self._firebase.set_document(workflow_path, {"Router_param": router_param}, merge=True)
 

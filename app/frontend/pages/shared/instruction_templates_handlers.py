@@ -6,7 +6,7 @@ Handlers partagés pour le CRUD des instruction templates.
 Utilisés par les 3 pages: routing, invoices, banking.
 
 Path Firestore:
-    {mandate_path}/working_doc/instruction_templates/{page_name}/items/{template_id}
+    {mandate_path}/working_doc/instruction_templates/{page_name}/{template_id}
 
 Events WS (par page):
     {page}.templates_list    → handle_templates_list    → {page}.templates_data
@@ -118,7 +118,10 @@ async def handle_templates_create(
     title = payload.get("title", "").strip()
     content = payload.get("content", "").strip()
 
+    logger.info(f"[TEMPLATES] Create request for {page_name}: company_id={company_id} title='{title}' content_len={len(content)}")
+
     if not company_id or not title or not content:
+        logger.warning(f"[TEMPLATES] Create REJECTED - missing fields: company_id={bool(company_id)} title={bool(title)} content={bool(content)}")
         await hub.broadcast(uid, {
             "type": f"{page_name}.templates_created",
             "payload": {"success": False, "error": "Missing required fields (company_id, title, content)"}
@@ -128,7 +131,10 @@ async def handle_templates_create(
     context = _get_company_context(uid, company_id)
     mandate_path = context.get("mandate_path", "")
 
+    logger.info(f"[TEMPLATES] Context resolved: mandate_path={'...'+mandate_path[-40:] if mandate_path else 'EMPTY'}")
+
     if not mandate_path:
+        logger.warning(f"[TEMPLATES] Create REJECTED - no mandate_path for company={company_id}")
         await hub.broadcast(uid, {
             "type": f"{page_name}.templates_created",
             "payload": {"success": False, "error": "Session context not initialized"}
@@ -144,7 +150,11 @@ async def handle_templates_create(
             "content": content,
             "created_at": datetime.utcnow().isoformat() + "Z",
         }
+        collection_path = f"{mandate_path}/working_doc/instruction_templates/{page_name}/items"
+        logger.info(f"[TEMPLATES] Writing to Firebase: {collection_path}")
+
         result = firebase.create_instruction_template(mandate_path, page_name, template_data)
+        logger.info(f"[TEMPLATES] Firebase result: {result}")
 
         if result:
             await hub.broadcast(uid, {
@@ -155,8 +165,9 @@ async def handle_templates_create(
                     "page_name": page_name,
                 }
             })
-            logger.info(f"[TEMPLATES] Created template '{title}' for {page_name}")
+            logger.info(f"[TEMPLATES] Created template '{title}' for {page_name} → id={result.get('id')}")
         else:
+            logger.warning(f"[TEMPLATES] Firebase returned empty result for {page_name}")
             await hub.broadcast(uid, {
                 "type": f"{page_name}.templates_created",
                 "payload": {"success": False, "error": "Failed to create template"}

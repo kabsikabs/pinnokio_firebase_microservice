@@ -173,8 +173,9 @@ async def handle_banking_orchestrate_init(
     """
     company_id = payload.get("company_id")
     account_id = payload.get("account_id")  # Optional initial filter
+    force_refresh = payload.get("force_refresh", False)
 
-    logger.info(f"[BANKING] Orchestration started for company={company_id}, account={account_id}")
+    logger.info(f"[BANKING] Orchestration started for company={company_id}, account={account_id}, force_refresh={force_refresh}")
 
     # Validate company_id
     if not company_id:
@@ -232,7 +233,8 @@ async def handle_banking_orchestrate_init(
                 company_id=company_id,
                 client_uuid=client_uuid,
                 bank_erp=bank_erp,
-                mandate_path=mandate_path
+                mandate_path=mandate_path,
+                force_refresh=force_refresh,
             )
 
             if result.get("data"):
@@ -331,14 +333,14 @@ async def handle_banking_orchestrate_init(
                 "to_process": to_process,
                 "in_process": in_process,
                 "pending": pending,
-                "processed": processed,
+                "matched": processed,
             },
             "batches": batches,
             "counts": {
                 "to_process": len(to_process),
                 "in_process": len(in_process),
                 "pending": len(pending),
-                "processed": len(processed),
+                "matched": len(processed),
             },
             "pagination": {
                 "page": 1,
@@ -454,15 +456,16 @@ async def handle_banking_refresh(
     try:
         from app.cache.unified_cache_manager import get_firebase_cache_manager
         cache = get_firebase_cache_manager()
-        await cache.delete_cached_data(uid, company_id, "bank", "transactions")
+        await cache.invalidate_business_domain(uid, company_id, "bank")
         logger.info(f"[BANKING] Bank cache invalidated")
     except Exception as e:
         logger.warning(f"[BANKING] Failed to invalidate bank cache: {e}")
 
-    # Re-run orchestration (will fetch fresh from ERP + apply business logic)
+    # Re-run orchestration with force_refresh to bypass cache entirely
     await handle_banking_orchestrate_init(uid, session_id, {
         "company_id": company_id,
-        "account_id": account_id
+        "account_id": account_id,
+        "force_refresh": True,
     })
 
 

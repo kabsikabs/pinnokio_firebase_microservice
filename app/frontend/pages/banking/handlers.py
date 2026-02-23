@@ -281,7 +281,8 @@ class BankingHandlers:
                 company_id=company_id,
                 client_uuid=client_uuid,
                 bank_erp=bank_erp,
-                mandate_path=mandate_path
+                mandate_path=mandate_path,
+                force_refresh=force_refresh,
             )
 
             from_cache = bank_result.get("source") == "cache"

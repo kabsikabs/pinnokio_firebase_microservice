@@ -1402,14 +1402,36 @@ def _build_banker_jobs_data(
     approval_required = banker_params.get("banker_approval_required", False)
     approval_threshold = banker_params.get("banker_approval_thresholdworkflow", "95")
 
-    jobs_data = [{
-        "bank_account": bank_account,
-        "bank_account_id": bank_account_id,
-        "transactions": transactions_data,
-        "instructions": payload.get("instructions", ""),
-        "banker_approval_required": approval_required,
-        "banker_approval_thresholdworkflow": str(approval_threshold),
-    }]
+    instructions = payload.get("instructions", "")
+
+    # Group transactions by account_id to support multi-account batches
+    account_groups: Dict[str, list] = {}
+    for tx in transactions_data:
+        acct_id = str(tx.get("account_id") or tx.get("journal_id") or bank_account_id)
+        account_groups.setdefault(acct_id, []).append(tx)
+
+    if account_groups:
+        jobs_data = []
+        for acct_id, txs in account_groups.items():
+            first_tx = txs[0]
+            jobs_data.append({
+                "bank_account": first_tx.get("account_name", "") or first_tx.get("journal_name", "") or bank_account,
+                "bank_account_id": acct_id,
+                "transactions": txs,
+                "instructions": instructions,
+                "banker_approval_required": approval_required,
+                "banker_approval_thresholdworkflow": str(approval_threshold),
+            })
+    else:
+        # Fallback: single element (same as previous behaviour)
+        jobs_data = [{
+            "bank_account": bank_account,
+            "bank_account_id": bank_account_id,
+            "transactions": transactions_data,
+            "instructions": instructions,
+            "banker_approval_required": approval_required,
+            "banker_approval_thresholdworkflow": str(approval_threshold),
+        }]
 
     return jobs_data
 
@@ -1531,25 +1553,34 @@ async def _create_batch_notifications(
                 upsert_key = "job_id"
                 display_name = "Onboarding"
             elif job_type == "bankbookeeper":
-                # Banker: notification references the batch + transactions
+                # Banker: single aggregated notification for the whole batch
+                # Collect all transactions and account names across all job_items
+                all_transactions = []
+                all_account_names = []
+                for ji in jobs_data:
+                    all_transactions.extend(ji.get("transactions", []))
+                    acct_name = ji.get("bank_account", "")
+                    if acct_name and acct_name not in all_account_names:
+                        all_account_names.append(acct_name)
+
                 notification_firebase = {
                     "function_name": config["department"],
                     "aws_instance_id": aws_instance_id,
                     "job_id": batch_id,
                     "batch_id": batch_id,
-                    "bank_account": job_item.get("bank_account", ""),
-                    "bank_account_id": job_item.get("bank_account_id", ""),
-                    "transactions": job_item.get("transactions", []),
+                    "bank_account": ", ".join(all_account_names) if all_account_names else "",
+                    "bank_account_id": jobs_data[0].get("bank_account_id", "") if jobs_data else "",
+                    "transactions": all_transactions,
                     "status": "in queue",
                     "read": False,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "collection_id": company_id,
                     "collection_name": company_name,
-                    "batch_index": index,
-                    "batch_total": batch_total,
+                    "batch_index": 1,
+                    "batch_total": 1,
                 }
                 upsert_key = "job_id"  # Banker uses job_id for upsert
-                display_name = job_item.get("bank_account", batch_id)
+                display_name = ", ".join(all_account_names) if all_account_names else batch_id
             else:
                 # Router/AP: notification per file
                 file_id = job_item.get("drive_file_id") or job_item.get("job_id", "")
@@ -1618,16 +1649,16 @@ async def _create_batch_notifications(
                             "awsInstanceId": aws_instance_id,
                             "jobId": batch_id,
                             "batchId": batch_id,
-                            "bankAccount": job_item.get("bank_account", ""),
-                            "bankAccountId": job_item.get("bank_account_id", ""),
-                            "transactions": job_item.get("transactions", []),
+                            "bankAccount": notification_firebase.get("bank_account", ""),
+                            "bankAccountId": notification_firebase.get("bank_account_id", ""),
+                            "transactions": notification_firebase.get("transactions", []),
                             "status": "in_queue",
                             "read": False,
                             "timestamp": notification_firebase["timestamp"],
                             "collectionId": company_id,
                             "collectionName": company_name,
-                            "batchIndex": index,
-                            "batchTotal": batch_total,
+                            "batchIndex": 1,
+                            "batchTotal": 1,
                             "message": f"Bank reconciliation - in queue",
                             "hasAdditionalInfo": False,
                         }
@@ -1667,6 +1698,10 @@ async def _create_batch_notifications(
 
             except Exception as notif_err:
                 logger.error(f"[JOB_ACTIONS] Failed to create notification for {display_name}: {notif_err}")
+
+            # Banker: single aggregated notification, no need to iterate further
+            if job_type == "bankbookeeper":
+                break
 
         logger.info(
             f"[JOB_ACTIONS] Created {len(notification_ids)} notifications "

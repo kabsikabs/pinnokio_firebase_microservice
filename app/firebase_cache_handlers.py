@@ -420,7 +420,8 @@ class FirebaseCacheHandlers:
         company_id: str,
         client_uuid: str = None,
         bank_erp: str = None,
-        mandate_path: str = None  # Kept for backward compatibility
+        mandate_path: str = None,  # Kept for backward compatibility
+        force_refresh: bool = False,
     ) -> Dict[str, Any]:
         """
         Récupère les transactions bancaires avec réconciliation (ERP + Task Manager).
@@ -437,6 +438,7 @@ class FirebaseCacheHandlers:
             client_uuid (str): Client UUID for ERP connection
             bank_erp (str): ERP type (e.g., "odoo")
             mandate_path (str): Full Firestore path to mandate
+            force_refresh (bool): If True, bypass cache and fetch fresh from ERP + Firebase
 
         Returns:
             {"data": {"to_process": [...], "in_process": [...], "pending": [...], "processed": [...]}, "source": "cache"|"erp"}
@@ -444,30 +446,36 @@ class FirebaseCacheHandlers:
         import asyncio
 
         try:
-            # 1. Tentative cache
+            # 1. Tentative cache (sauf si force_refresh)
             cache = get_firebase_cache_manager()
-            cached = await cache.get_cached_data(
-                user_id,
-                company_id,
-                "bank",
-                "transactions",
-                ttl_seconds=TTL_BANK_TRANSACTIONS
-            )
+            if not force_refresh:
+                cached = await cache.get_cached_data(
+                    user_id,
+                    company_id,
+                    "bank",
+                    "transactions",
+                    ttl_seconds=TTL_BANK_TRANSACTIONS
+                )
 
-            if cached and cached.get("data"):
-                data = cached["data"]
-                if isinstance(data, dict):
-                    total = sum(len(v) for v in data.values() if isinstance(v, list))
-                else:
-                    total = len(data) if isinstance(data, list) else 0
+                if cached and cached.get("data"):
+                    data = cached["data"]
+                    if isinstance(data, dict):
+                        total = sum(len(v) for v in data.values() if isinstance(v, list))
+                    else:
+                        total = len(data) if isinstance(data, list) else 0
+                    logger.info(
+                        f"FIREBASE_CACHE.get_bank_transactions company_id={company_id} "
+                        f"count={total} source=cache"
+                    )
+                    return {
+                        "data": cached["data"],
+                        "source": "cache"
+                    }
+            else:
                 logger.info(
                     f"FIREBASE_CACHE.get_bank_transactions company_id={company_id} "
-                    f"count={total} source=cache"
+                    f"force_refresh=True → bypassing cache"
                 )
-                return {
-                    "data": cached["data"],
-                    "source": "cache"
-                }
 
             # 2. Validation des paramètres
             bank_erp_type = (bank_erp or "").lower()
@@ -582,9 +590,9 @@ class FirebaseCacheHandlers:
                         "account_name": banker.get("bank_account", ""),
                         "date": banker.get("transaction_date", ""),
                         "reference": banker.get("reference", ""),
-                        "description": "",
-                        "partner_name": "",
-                        "payment_ref": "",
+                        "description": banker.get("description", "") or banker.get("label", ""),
+                        "partner_name": banker.get("partner_name", ""),
+                        "payment_ref": banker.get("payment_ref", ""),
                         "amount": amount,
                         "currency": banker.get("txn_currency") or "CHF",
                         "transaction_type": "credit" if amount >= 0 else "debit",
@@ -608,48 +616,24 @@ class FirebaseCacheHandlers:
             for batch_id, items in fb_jobs.get("in_process", {}).items():
                 for item in items:
                     tx_id = str(item.get("transaction_id") or "")
+                    if not tx_id:
+                        continue  # Skip items sans transaction_id (docs batch-level fantômes)
                     erp_tx = erp_map.pop(tx_id, None)
                     normalized = _normalize_from_task_manager(item, erp_tx=erp_tx, status="on_process")
                     normalized["batch_id"] = batch_id
                     in_process_list.append(normalized)
 
             # B. Pending (cross-ref ERP)
-            # Si une transaction pending n'existe plus dans l'ERP non-réconcilié,
-            # elle a été réconciliée manuellement en dehors du flow →
-            # supprimer le doc task_manager (nettoyage) et ne pas l'afficher.
+            # Une transaction pending peut être en attente d'approbation (pas dans l'ERP)
+            # → on l'affiche toujours, avec fallback sur banker_data si absent de l'ERP.
             pending_list = []
-            pending_to_delete = []  # task_ids à supprimer de task_manager
             for item in fb_jobs.get("pending", []):
                 tx_id = str(item.get("transaction_id") or "")
+                if not tx_id:
+                    continue  # Skip items sans transaction_id
                 erp_tx = erp_map.pop(tx_id, None)
-                if erp_tx is None:
-                    # Transaction réconciliée manuellement → marquer pour suppression
-                    task_id = item.get("task_id", "")
-                    if task_id:
-                        pending_to_delete.append(task_id)
-                    logger.info(
-                        f"[BANK] Pending tx_id={tx_id} task_id={task_id} "
-                        f"no longer in ERP → delete from task_manager"
-                    )
-                else:
-                    normalized = _normalize_from_task_manager(item, erp_tx=erp_tx, status="pending")
-                    pending_list.append(normalized)
-
-            # Suppression asynchrone des docs pending obsolètes
-            if pending_to_delete:
-                try:
-                    db = get_firestore()
-                    task_mgr_ref = db.collection("clients").document(user_id).collection("task_manager")
-                    for task_id in pending_to_delete:
-                        await asyncio.to_thread(
-                            task_mgr_ref.document(task_id).delete
-                        )
-                    logger.info(
-                        f"[BANK] Deleted {len(pending_to_delete)} obsolete pending docs "
-                        f"from task_manager for company_id={company_id}"
-                    )
-                except Exception as del_err:
-                    logger.warning(f"[BANK] Failed to delete pending docs: {del_err}")
+                normalized = _normalize_from_task_manager(item, erp_tx=erp_tx, status="pending")
+                pending_list.append(normalized)
 
             # C. Processed (full Firestore docs, extract department_data.banker)
             processed_list = []

@@ -152,27 +152,27 @@ class MessengerHandlers:
                     redirect_path = "/chat"
 
             elif function_name == "Router":
-                if file_id:
-                    redirect_path = f"/routing/{file_id}"
+                if job_id:
+                    redirect_path = f"/chat?job_id={job_id}&mode=router_chat"
                 else:
                     redirect_path = "/routing"
 
             elif function_name == "APbookeeper":
                 if job_id:
-                    redirect_path = f"/invoices/{job_id}"
+                    redirect_path = f"/chat?job_id={job_id}&mode=apbookeeper_chat"
                 else:
                     redirect_path = "/invoices"
 
             elif function_name == "Bankbookeeper":
                 if batch_id:
-                    redirect_path = f"/banking/{batch_id}"
+                    redirect_path = f"/chat?job_id={batch_id}&mode=banker_chat"
                 elif job_id:
-                    redirect_path = f"/banking/{job_id}"
+                    redirect_path = f"/chat?job_id={job_id}&mode=banker_chat"
                 else:
                     redirect_path = "/banking"
 
             # Check if company change is needed
-            needs_company_change = False
+            needs_company_change = bool(collection_id)
             target_company_id = None
 
             if collection_id:

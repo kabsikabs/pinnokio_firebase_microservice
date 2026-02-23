@@ -608,16 +608,30 @@ async def handle_task_list(
 ) -> Dict[str, Any]:
     """Handle task.list WebSocket event."""
     handlers = get_task_handlers()
+    mandate_path = payload.get("mandate_path", "")
+
     result = await handlers.list_tasks(
         user_id=uid,
         company_id=payload.get("company_id", ""),
-        mandate_path=payload.get("mandate_path", "")
+        mandate_path=mandate_path
     )
 
     if result.get("success"):
+        # Include pending_jobs (onboarding) so the Play/Stop button reflects real state
+        try:
+            from ..frontend.pages.chat.orchestration import _check_pending_jobs
+            pending_jobs = await _check_pending_jobs(uid, mandate_path)
+        except Exception as e:
+            logger.warning(f"[TASK] Error checking pending jobs: {e}")
+            pending_jobs = []
+
+        broadcast_payload = {**result}
+        if pending_jobs:
+            broadcast_payload["pending_jobs"] = pending_jobs
+
         await hub.broadcast(uid, {
             "type": "dashboard.tasks_update",
-            "payload": result
+            "payload": broadcast_payload
         })
 
     return {"type": "task.list", "payload": result}

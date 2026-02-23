@@ -173,6 +173,18 @@ class ActiveJobManager:
                 f"[ACTIVE_JOBS] Job {job_key} registered for {mandate_path[-30:]}: "
                 f"location={result['location']} should_start={result['should_start']}"
             )
+
+            # ── Post-commit verification ──
+            verify_path = f"active_jobs/{job_type}/{result['location']}/{encoded}_{job_key}"
+            try:
+                verify_doc = db.document(verify_path).get()
+                if verify_doc.exists:
+                    logger.info(f"[ACTIVE_JOBS] ✅ POST-COMMIT VERIFIED: {verify_path}")
+                else:
+                    logger.error(f"[ACTIVE_JOBS] ❌ POST-COMMIT MISSING: {verify_path} — transaction may not have committed!")
+            except Exception as ve:
+                logger.error(f"[ACTIVE_JOBS] ❌ POST-COMMIT VERIFY ERROR: {ve}")
+
             return result
 
         except Exception as e:

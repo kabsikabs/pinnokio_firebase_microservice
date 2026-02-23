@@ -1484,6 +1484,59 @@ async def invalidate_cache(req: InvalidateCacheRequest):
         raise HTTPException(status_code=500, detail=f"Erreur invalidation cache: {str(e)}")
 
 
+async def _refresh_company_after_onboarding(uid: str, company_id: str, mandate_path: str):
+    """
+    Post-onboarding hook: refresh company caches after DF_ANALYSER completes.
+
+    1. Fetch enriched mandate (COA + prompts now present)
+    2. Run company orchestration to refresh L1/L2 caches + broadcast company.details
+    3. Mark onboarding as inactive in temp_data
+    4. Broadcast ONBOARDING_JOB_STATUS = completed
+    """
+    try:
+        logger.info(f"[ONBOARDING] Refreshing company after onboarding: uid={uid}, company_id={company_id}")
+
+        fb = get_firebase_management()
+
+        # 1. Fetch enriched mandate
+        full_mandate = await asyncio.to_thread(fb.fetch_single_mandate, mandate_path)
+        if not full_mandate:
+            logger.error(f"[ONBOARDING] Failed to fetch mandate: {mandate_path}")
+            return
+
+        # 2. Run company orchestration (refresh caches + broadcast company.details)
+        from .wrappers.dashboard_orchestration_handlers import run_company_orchestration
+
+        await run_company_orchestration(
+            uid=uid,
+            company_id=company_id,
+            full_mandate=full_mandate,
+            broadcast_list=False,  # Don't re-broadcast the full company list
+        )
+        logger.info(f"[ONBOARDING] Company orchestration completed for {company_id}")
+
+        # 3. Mark onboarding as inactive
+        try:
+            from .firebase_client import get_firestore
+            onboarding_ref = get_firestore().document(f"clients/{uid}/temp_data/onboarding")
+            await asyncio.to_thread(onboarding_ref.update, {"job_active": False})
+        except Exception as e:
+            logger.warning(f"[ONBOARDING] Failed to update temp_data/onboarding: {e}")
+
+        # 4. Broadcast completion status to frontend
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.CHAT.ONBOARDING_JOB_STATUS,
+            "payload": {
+                "job_id": f"onboarding_{uid}",
+                "status": "completed",
+            },
+        })
+        logger.info(f"[ONBOARDING] Post-onboarding refresh complete for {company_id}")
+
+    except Exception as e:
+        logger.error(f"[ONBOARDING] Error refreshing company after onboarding: {e}", exc_info=True)
+
+
 @app.post("/lpt/callback")
 async def lpt_callback(req: LPTCallbackRequest, authorization: str | None = Header(default=None, alias="Authorization")):
     """
@@ -1728,7 +1781,18 @@ async def lpt_callback(req: LPTCallbackRequest, authorization: str | None = Head
             req.task_id,
             is_planned_task
         )
-        
+
+        # ⭐ ÉTAPE 5 : Post-onboarding cache refresh
+        # When onboarding completes, refresh company caches so the UI reflects new COA/prompts
+        if req.task_type == "onboarding" and req.status == "completed":
+            asyncio.create_task(
+                _refresh_company_after_onboarding(
+                    uid=req.user_id,
+                    company_id=company_id,
+                    mandate_path=mandate_path,
+                )
+            )
+
         dt_ms = int((time.time() - t0) * 1000)
         
         # ⭐ Pour les tâches planifiées, utiliser thread_key comme task_id (car thread_key = task_id de la tâche planifiée)

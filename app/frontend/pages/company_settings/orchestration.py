@@ -44,45 +44,42 @@ async def _rebroadcast_company_details(
     mandate_path: str,
 ) -> None:
     """
-    Re-fetch and broadcast updated COMPANY.DETAILS after a save operation.
+    Re-fetch and broadcast updated workflow_params after a save operation.
 
-    This keeps auth-store.selectedCompany in sync with the latest changes.
-    Only call this AFTER a successful save operation.
+    Uses fetch_single_mandate + _build_workflow_params (same path as initial load)
+    to ensure the frontend receives the exact same payload format (snake_case keys).
     """
     try:
-        # Import here to avoid circular dependency
-        from app.wrappers.dashboard_orchestration_handlers import (
-            _load_full_workflow_params,
-            _load_full_contexts,
-        )
+        from app.wrappers.dashboard_orchestration_handlers import _build_workflow_params
         from app.firebase_providers import get_firebase_management
 
         firebase_mgmt = get_firebase_management()
 
-        # Re-load workflow params and contexts
-        import asyncio
-        full_workflow_params, full_contexts = await asyncio.gather(
-            _load_full_workflow_params(firebase_mgmt, mandate_path),
-            _load_full_contexts(firebase_mgmt, mandate_path),
-        )
+        # Re-load mandate data (includes workflow_params subcollection)
+        selected_mandate = firebase_mgmt.fetch_single_mandate(mandate_path)
+        if not selected_mandate:
+            logger.warning(f"[COMPANY_SETTINGS] Could not re-fetch mandate at {mandate_path}")
+            return
 
-        # Broadcast partial update for COMPANY.DETAILS
-        # Frontend should merge this with existing selectedCompany
+        # Build workflow_params in the same snake_case format as initial company.details load
+        workflow_params = _build_workflow_params(selected_mandate)
+
+        # Broadcast as COMPANY.DETAILS partial update so the existing
+        # handleCompanyDetailsUpdate handler can pick it up and sync the store
         await hub.broadcast(uid, {
             "type": WS_EVENTS.COMPANY.DETAILS,
             "payload": {
                 "contact_space_id": company_id,
                 "mandate_path": mandate_path,
-                "workflowParams": full_workflow_params,
-                "contexts": full_contexts,
-                "_partialUpdate": True,  # Signal to frontend to merge, not replace
+                "workflow_params": workflow_params,
+                "_partialUpdate": True,
             }
         })
 
-        logger.info(f"[COMPANY_SETTINGS] Re-broadcasted COMPANY.DETAILS for company_id={company_id}")
+        logger.info(f"[COMPANY_SETTINGS] Re-broadcasted workflow_params for company_id={company_id}")
 
     except Exception as e:
-        logger.warning(f"[COMPANY_SETTINGS] Failed to re-broadcast COMPANY.DETAILS: {e}")
+        logger.warning(f"[COMPANY_SETTINGS] Failed to re-broadcast workflow_params: {e}")
 
 
 # ============================================

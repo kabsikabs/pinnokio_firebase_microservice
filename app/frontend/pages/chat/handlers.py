@@ -313,6 +313,11 @@ class ChatHandlers:
         """
         CHAT.session_delete - Delete a chat session.
 
+        Cleans up:
+        - RTDB: primary channel ({mode}/{thread_key})
+        - RTDB: job_chats/{thread_key} (if mode is active_chats)
+        - Redis: chat history cache (chat:{uid}:{company_id}:{thread_key}:history)
+
         Args:
             uid: User ID
             company_id: Company ID
@@ -335,6 +340,24 @@ class ChatHandlers:
 
             if not success:
                 return {"success": False, "error": "Failed to delete chat session"}
+
+            # Always clean job_chats/{thread_key} (onboarding + job-monitoring chats
+            # both write to job_chats even though their session mode differs)
+            if realtime_service.delete_chat(
+                space_code=space_code,
+                thread_key=thread_key,
+                mode="job_chats"
+            ):
+                logger.info(f"[CHAT] Also deleted job_chats/{thread_key}")
+
+            # Clean Redis chat history cache
+            try:
+                r = get_redis()
+                redis_key = f"chat:{uid}:{company_id}:{thread_key}:history"
+                r.delete(redis_key)
+                logger.debug(f"[CHAT] Redis chat history deleted: {redis_key}")
+            except Exception as redis_err:
+                logger.warning(f"[CHAT] Failed to delete Redis chat history: {redis_err}")
 
             # Invalidate sessions cache
             await self._cache_manager.invalidate_cache(
@@ -707,6 +730,7 @@ class ChatHandlers:
         thread_key: str,
         mode: str = "chats",
         limit: int = 100,
+        chat_mode: str = "",
     ) -> Dict[str, Any]:
         """
         CHAT.history_load - Load message history for a chat session.
@@ -718,6 +742,7 @@ class ChatHandlers:
             thread_key: Thread key to load
             mode: Firebase mode
             limit: Max messages to load
+            chat_mode: Chat mode (e.g. "onboarding_chat") — used to load extra data
 
         Returns:
             {"success": True, "messages": [...], "total": int}
@@ -788,18 +813,117 @@ class ChatHandlers:
             # Pass thread_key so the card knows which chat it belongs to
             pending_card = self._extract_pending_card(raw_messages, thread_key)
 
-            logger.info(f"[CHAT] Loaded {len(formatted_messages)} messages for {thread_key}, pending_card={pending_card is not None}, from_cache={from_cache}")
+            # 5. Pour les modes job chat, charger aussi job_chats pour :
+            #    - Workflow checklist (onboarding)
+            #    - Pending cards des workers externes (router, AP, bank)
+            workflow_checklist = None
+            _JOB_CHAT_MODES = {"onboarding_chat", "router_chat", "apbookeeper_chat", "banker_chat"}
+            # Normaliser le chat_mode (certains modes ont un point final parasite)
+            normalized_chat_mode = (chat_mode or "").rstrip(".")
+
+            if normalized_chat_mode in _JOB_CHAT_MODES:
+                job_messages = None
+                try:
+                    from app.firebase_providers import get_firebase_realtime
+                    realtime_service = get_firebase_realtime()
+                    job_messages = realtime_service.get_thread_messages(
+                        space_code=space_code,
+                        thread_key=thread_key,
+                        mode="job_chats",
+                        limit=500
+                    )
+                except Exception as jc_err:
+                    logger.warning(f"[CHAT] Error loading job_chats: {jc_err}")
+
+                if job_messages:
+                    # 5a. Workflow checklist (onboarding_chat only)
+                    if normalized_chat_mode == "onboarding_chat":
+                        try:
+                            workflow_checklist = self._extract_workflow_checklist(job_messages)
+                            if workflow_checklist:
+                                logger.info(f"[CHAT] Restored workflow checklist for {thread_key}: {len(workflow_checklist.get('steps', []))} steps")
+                        except Exception as wf_err:
+                            logger.warning(f"[CHAT] Error extracting workflow checklist: {wf_err}")
+
+                    # 5b. Pending card des workers externes dans job_chats
+                    if not pending_card:
+                        pending_card = self._extract_pending_card(job_messages, thread_key)
+                        if pending_card:
+                            logger.info(f"[CHAT] Pending card found in job_chats for {thread_key}: {pending_card.get('cardId', 'unknown')}")
+
+            logger.info(f"[CHAT] Loaded {len(formatted_messages)} messages for {thread_key}, pending_card={pending_card is not None}, workflow_checklist={workflow_checklist is not None}, from_cache={from_cache}")
             return {
                 "success": True,
                 "messages": formatted_messages,
                 "total": len(formatted_messages),
                 "pending_card": pending_card,
+                "workflow_checklist": workflow_checklist,
                 "from_cache": from_cache,
             }
 
         except Exception as e:
             logger.error(f"[CHAT] Error loading history: {e}")
             return {"success": False, "error": str(e), "messages": [], "total": 0}
+
+    def _extract_workflow_checklist(self, raw_messages: List[Dict]) -> Optional[Dict[str, Any]]:
+        """
+        Replay CMMD messages to reconstruct the workflow checklist state.
+
+        Scans for SET_WORKFLOW_CHECKLIST (initial definition) then applies
+        UPDATE_STEP_STATUS commands in order to get current step states.
+
+        Returns:
+            {"totalSteps": int, "steps": [{"id", "name", "status", "message"}]} or None
+        """
+        import json
+
+        checklist = None  # Will be set by SET_WORKFLOW_CHECKLIST
+
+        for msg in raw_messages:
+            if msg.get("message_type") != "CMMD":
+                continue
+
+            content_raw = msg.get("content", "")
+            try:
+                if isinstance(content_raw, str):
+                    content = json.loads(content_raw)
+                else:
+                    content = content_raw
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            # content may be the CMMD payload directly or nested in "message"
+            action = content.get("action", "")
+            params = content.get("params", {})
+
+            if action == "SET_WORKFLOW_CHECKLIST":
+                raw_checklist = params.get("checklist", {})
+                steps = raw_checklist.get("steps", [])
+                checklist = {
+                    "totalSteps": raw_checklist.get("total_steps", len(steps)),
+                    "steps": [
+                        {
+                            "id": s.get("id", ""),
+                            "name": s.get("name", ""),
+                            "status": s.get("status", "pending"),
+                            "message": s.get("message"),
+                        }
+                        for s in steps
+                    ],
+                }
+
+            elif action == "UPDATE_STEP_STATUS" and checklist is not None:
+                step_id = params.get("step_id", "")
+                new_status = params.get("status", "")
+                new_message = params.get("message")
+                for step in checklist["steps"]:
+                    if step["id"] == step_id:
+                        step["status"] = new_status
+                        if new_message is not None:
+                            step["message"] = new_message
+                        break
+
+        return checklist
 
     def _transform_messages(self, raw_messages: List[Dict]) -> List[Dict[str, Any]]:
         """
@@ -985,18 +1109,14 @@ class ChatHandlers:
         """
         Extract the last pending interactive card from message history.
 
-        SIMPLIFIED RULE: A card is pending if its status == "pending_approval"
+        RULES:
+        1. Worker LLM cards: status == "pending_approval" (explicit field set by worker)
+        2. External worker cards: message_type FOLLOW_CARD/CARD with pinnokio_card_status == "pending_approval"
+           OR FOLLOW_CARD/CARD without status but no subsequent CARD_CLICKED_PINNOKIO
 
-        The backend sets:
-        - status: "pending_approval" when card is created
-        - status: "responded" when user clicks approve/reject
-        - status: "expired" when card times out
-
-        Supported card types:
-        - text_modification_approval
-        - task_creation_approval
-        - approval_card
-        - four_eyes_approval_card
+        Supported card types (worker LLM + external workers):
+        - text_modification_approval, task_creation_approval, approval_card, four_eyes_approval_card
+        - klk_router_card, klk_router_approval_card, job_menu_card, bank_list_file_card, bank_file_list_card
 
         Args:
             raw_messages: Raw messages from Firebase (before transformation)
@@ -1012,6 +1132,20 @@ class ChatHandlers:
             'task_creation_approval',
             'approval_card',
             'four_eyes_approval_card',
+            'klk_router_card',
+            'klk_router_approval_card',
+            'job_menu_card',
+            'bank_list_file_card',
+            'bank_file_list_card',
+        }
+
+        # External worker card IDs (cardsV2 format with dynamic widgets)
+        EXTERNAL_WORKER_CARD_IDS = {
+            'klk_router_card',
+            'klk_router_approval_card',
+            'job_menu_card',
+            'bank_list_file_card',
+            'bank_file_list_card',
         }
 
         last_pending_card: Optional[Dict[str, Any]] = None
@@ -1025,21 +1159,41 @@ class ChatHandlers:
             card_type_field = msg.get("card_type", "")
 
             is_card_message = (
-                message_type == "CARD" or
-                msg_type == "CARD" or
-                bool(card_type_field)  # Has card_type field
+                message_type in ("CARD", "FOLLOW_CARD") or
+                msg_type in ("CARD", "FOLLOW_CARD") or
+                bool(card_type_field)
             )
 
             if not is_card_message:
                 continue
 
-            # SIMPLIFIED RULE: Check status field
+            # Check status fields (worker LLM sets "pending_approval", worker external uses pinnokio_card_status)
             card_status = msg.get("status", "")
+            pinnokio_status = msg.get("pinnokio_card_status", "")
 
-            # Only process cards with pending_approval status
-            if card_status != "pending_approval":
+            # Rule 1: Explicit pending_approval status (worker LLM or enriched external)
+            is_pending_by_status = (
+                card_status == "pending_approval" or
+                pinnokio_status == "pending_approval"
+            )
+
+            # Rule 2: External worker card (FOLLOW_CARD) without explicit status
+            # → check if no CARD_CLICKED_PINNOKIO after this message
+            is_external_follow_card = (
+                message_type in ("FOLLOW_CARD", "CARD") and
+                not card_status and
+                not pinnokio_status
+            )
+
+            if not is_pending_by_status and not is_external_follow_card:
                 logger.debug(f"[CHAT] Skipping card with status={card_status}")
                 continue
+
+            # For external follow cards, verify no CARD_CLICKED_PINNOKIO exists after
+            if is_external_follow_card:
+                if self._has_card_clicked_after(raw_messages, msg):
+                    logger.debug(f"[CHAT] Skipping external card (already clicked)")
+                    continue
 
             try:
                 content_raw = msg.get("content", "{}")
@@ -1051,6 +1205,7 @@ class ChatHandlers:
                 card_id = None
                 card_type = None
                 card_params = {}
+                widgets = None
 
                 # Format 1: Standard format with cardsV2
                 if "cardsV2" in content:
@@ -1059,6 +1214,16 @@ class ChatHandlers:
                         card_id = cards_v2[0].get("cardId")
                     card_params = content.get("message", {}).get("cardParams", {})
                     card_type = content.get("message", {}).get("cardType", card_id)
+
+                    # External worker cards: extract widgets from cardsV2 sections
+                    if card_id in EXTERNAL_WORKER_CARD_IDS and not card_params:
+                        card_body = cards_v2[0].get("card", {}) if cards_v2 else {}
+                        widgets = self._extract_widgets_from_cardsv2(card_body)
+                        header = card_body.get("header", {})
+                        card_params = {
+                            "title": header.get("title", "Carte Interactive"),
+                            "subtitle": header.get("subtitle", ""),
+                        }
 
                 # Format 2: cardParams in message
                 elif "message" in content:
@@ -1080,10 +1245,12 @@ class ChatHandlers:
 
                 # Check if it's a supported card type
                 if card_type in SUPPORTED_CARD_TYPES or card_id in SUPPORTED_CARD_TYPES:
-                    # Extract message_id from the Firebase message
                     message_id = msg.get("id") or msg.get("message_id") or msg.get("name")
 
-                    logger.info(f"[CHAT] Found pending card: id={card_id}, type={card_type}, status={card_status}, message_id={message_id}")
+                    logger.info(
+                        f"[CHAT] Found pending card: id={card_id}, type={card_type}, "
+                        f"status={card_status or pinnokio_status or 'implicit'}, message_id={message_id}"
+                    )
 
                     last_pending_card = {
                         "cardId": card_id,
@@ -1093,9 +1260,7 @@ class ChatHandlers:
                         "text": card_params.get("text"),
                         "params": card_params,
                         "isVisible": True,
-                        # Thread key for card response (required - identifies the chat)
                         "threadKey": thread_key,
-                        # Message ID for card response (required by send_card_response)
                         "messageId": message_id,
                         # Specific fields for text_modification_approval
                         "originalText": card_params.get("original_text"),
@@ -1109,6 +1274,10 @@ class ChatHandlers:
                         "missionDescription": card_params.get("mission_description"),
                     }
 
+                    # Add widgets for external worker cards
+                    if widgets:
+                        last_pending_card["widgets"] = widgets
+
             except (json.JSONDecodeError, TypeError) as e:
                 logger.warning(f"[CHAT] Error parsing CARD message: {e}")
 
@@ -1116,6 +1285,85 @@ class ChatHandlers:
             logger.info(f"[CHAT] Pending card detected: {last_pending_card.get('cardId')}")
 
         return last_pending_card
+
+    def _has_card_clicked_after(self, raw_messages: List[Dict], card_msg: Dict) -> bool:
+        """Check if a CARD_CLICKED_PINNOKIO message exists after the given card message."""
+        card_ts = card_msg.get("timestamp", "")
+
+        for msg in raw_messages:
+            msg_type = msg.get("message_type", "")
+            if msg_type != "CARD_CLICKED_PINNOKIO":
+                continue
+
+            msg_ts = msg.get("timestamp", "")
+            # Compare timestamps (ISO format strings are lexicographically ordered)
+            if msg_ts > card_ts:
+                return True
+
+        return False
+
+    def _extract_widgets_from_cardsv2(self, card_body: Dict) -> List[Dict[str, Any]]:
+        """Extract normalized widgets from a cardsV2 card body for frontend rendering."""
+        widgets = []
+
+        for section in card_body.get("sections", []):
+            for widget in section.get("widgets", []):
+                # selectionInput (dropdown / multi-select)
+                if "selectionInput" in widget:
+                    sel = widget["selectionInput"]
+                    sel_type = sel.get("type", "DROPDOWN")
+                    items = [
+                        {"text": item.get("text", ""), "value": item.get("value", item.get("text", ""))}
+                        for item in sel.get("items", [])
+                    ]
+                    widgets.append({
+                        "type": "multi_select" if sel_type == "MULTI_SELECT" else "dropdown",
+                        "name": sel.get("name", ""),
+                        "label": sel.get("label", ""),
+                        "items": items,
+                        "defaultValue": sel.get("value") or (items[0]["value"] if items else None),
+                    })
+
+                # textInput
+                elif "textInput" in widget:
+                    ti = widget["textInput"]
+                    widgets.append({
+                        "type": "text_input",
+                        "name": ti.get("name", ""),
+                        "label": ti.get("label", ""),
+                        "hintText": ti.get("hintText", ""),
+                    })
+
+                # buttonList
+                elif "buttonList" in widget:
+                    bl = widget["buttonList"]
+                    buttons = []
+                    for btn in bl.get("buttons", []):
+                        action_data = btn.get("onClick", {}).get("action", {})
+                        color = btn.get("color", {})
+                        color_str = None
+                        if color:
+                            r, g, b = color.get("red", 0), color.get("green", 0), color.get("blue", 0)
+                            if g > r and g > b:
+                                color_str = "green"
+                            elif r > g and r > b:
+                                color_str = "red"
+                        buttons.append({
+                            "text": btn.get("text", ""),
+                            "action": action_data.get("function", ""),
+                            "color": color_str,
+                        })
+                    widgets.append({"type": "button_list", "buttons": buttons})
+
+                # textParagraph
+                elif "textParagraph" in widget:
+                    tp = widget["textParagraph"]
+                    widgets.append({
+                        "type": "text_paragraph",
+                        "text": tp.get("text", ""),
+                    })
+
+        return widgets
 
     # ──────────────────────────────────────────
     # TASK MANAGEMENT (Chat-specific tasks)

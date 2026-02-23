@@ -143,7 +143,7 @@ class LLMGateway:
             "type": "resume_workflow_after_lpt",
             "params": {
                 "user_id": user_id,
-                "collection_name": collection_name,
+                "company_id": collection_name,
                 "thread_key": thread_key,
                 **payload,
             },

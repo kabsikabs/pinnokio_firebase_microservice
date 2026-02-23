@@ -76,13 +76,14 @@ class ModuleMetrics:
 
 
 class BankMetrics(ModuleMetrics):
-    """Métriques spécifiques pour le module bancaire - seulement 3 statuts."""
+    """Métriques spécifiques pour le module bancaire - 4 statuts (matched = reconciled)."""
 
     def to_dict(self) -> Dict[str, int]:
         return {
             "toProcess": self.to_process,
             "inProcess": self.in_process,
             "pending": self.pending,
+            "matched": self.processed,
         }
 
 
@@ -332,7 +333,7 @@ class MetricsCalculator:
                 "to_process": [...],           # Transactions ERP non matchées (à traiter)
                 "in_process": [...],           # Liste plate (aplatie depuis batch_id dict)
                 "pending": [...],              # En attente
-                "processed": [...]             # Terminées
+                "processed": [...]             # Terminées (réconciliées)
             }
         """
         data = self._get_business_data(uid, company_id, BusinessDomain.BANK.value)
@@ -342,6 +343,7 @@ class MetricsCalculator:
 
         to_process = data.get("to_process", [])
         pending = data.get("pending", [])
+        processed = data.get("processed", [])
 
         # in_process: normalement liste plate, mais gérer le cas dict par sécurité
         in_process_raw = data.get("in_process", [])
@@ -356,7 +358,7 @@ class MetricsCalculator:
             to_process=len(to_process),
             in_process=in_process_count,
             pending=len(pending),
-            processed=0,  # Not used for bank
+            processed=len(processed),
         )
 
     def get_expenses_metrics(self, uid: str, company_id: str) -> ExpenseMetrics:
@@ -536,20 +538,35 @@ class AsyncMetricsCalculator:
         )
 
     async def get_bank_metrics(self, uid: str, company_id: str) -> BankMetrics:
-        """Calcule les métriques Bank (async)."""
+        """
+        Calcule les métriques Bank (async).
+
+        Le cache bank utilise des listes pré-catégorisées (to_process, in_process,
+        pending, processed) — PAS un array "transactions".
+        """
         data = await self._get_business_data(uid, company_id, BusinessDomain.BANK.value)
 
         if not data:
             return BankMetrics()
 
-        transactions = data.get("transactions", [])
-        counts = self._count_by_status(transactions)
+        to_process = data.get("to_process", [])
+        pending = data.get("pending", [])
+        processed = data.get("processed", [])
+
+        # in_process: normalement liste plate, mais gérer le cas dict par sécurité
+        in_process_raw = data.get("in_process", [])
+        if isinstance(in_process_raw, dict):
+            in_process_count = sum(
+                len(items) for items in in_process_raw.values() if isinstance(items, list)
+            )
+        else:
+            in_process_count = len(in_process_raw) if isinstance(in_process_raw, list) else 0
 
         return BankMetrics(
-            to_process=counts["toProcess"],
-            in_process=counts["inProcess"],
-            pending=counts["pending"],
-            processed=counts["processed"],
+            to_process=len(to_process),
+            in_process=in_process_count,
+            pending=len(pending),
+            processed=len(processed),
         )
 
     async def get_expenses_metrics(self, uid: str, company_id: str) -> ExpenseMetrics:

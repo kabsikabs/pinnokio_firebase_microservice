@@ -552,8 +552,8 @@ async def handle_refresh(
     # Without this, full_data would read stale domain caches
     if company_data:
         try:
-            await _populate_widget_caches(uid, company_id, company_data)
-            logger.info(f"[ORCHESTRATION] Refresh: Domain caches repopulated")
+            await _populate_widget_caches(uid, company_id, company_data, force_refresh=True)
+            logger.info(f"[ORCHESTRATION] Refresh: Domain caches repopulated (force_refresh)")
         except Exception as pop_err:
             logger.warning(f"[ORCHESTRATION] Refresh: Cache repopulation error: {pop_err}")
 
@@ -1129,6 +1129,8 @@ def _build_workflow_params(selected_mandate: Dict[str, Any]) -> Dict[str, Any]:
         "router_communication_method": router_p.get("router_communication_method", ""),
         "router_approval_pendinglist_enabled": router_p.get("router_approval_pendinglist_enabled", False),
         "router_departments": router_p.get("departments", []),
+        "router_trust_threshold_required": router_p.get("trust_threshold_required", False),
+        "router_trust_threshold_percent": router_p.get("trust_threshold_percent", 80),
         # ─────────────────────────────────────
         # APbookeeper params
         # ─────────────────────────────────────
@@ -1869,7 +1871,8 @@ def transform_company_data_to_info(company_data: Dict[str, Any]) -> Dict[str, An
 async def _populate_widget_caches(
     uid: str,
     company_id: str,
-    company_data: Dict[str, Any]
+    company_data: Dict[str, Any],
+    force_refresh: bool = False,
 ):
     """
     Populate Redis cache with data from external sources.
@@ -1957,7 +1960,8 @@ async def _populate_widget_caches(
                 firebase_handlers.get_bank_transactions(
                     uid, company_id,
                     client_uuid=client_uuid,
-                    bank_erp=bank_erp
+                    bank_erp=bank_erp,
+                    force_refresh=force_refresh,
                 )
             )
         )
