@@ -455,18 +455,27 @@ async def handle_job_process(
         }
 
         # Override for onboarding: flat payload format expected by DF_ANALYSER
+        # Also includes user_id/client_uuid/mandates_path/pub_sub_id for LPT traceability capture
         if job_type == "onboarding":
             first_job = jobs_data[0] if jobs_data else {}
             jobbeur_payload = {
                 "firebase_user_id": uid,
+                "user_id": uid,
+                "client_uuid": company_data.get("client_uuid", ""),
                 "job_id": first_job.get("job_id", batch_id),
                 "mandate_path": mandate_path,
+                "mandates_path": mandate_path,
                 "mode": "onboarding",
                 "setup_coa_type": first_job.get("setup_coa_type"),
                 "erp_system": first_job.get("erp_system"),
                 "context": first_job.get("initial_context_data", ""),
                 "batch_id": batch_id,
+                "pub_sub_id": pub_sub_id,
                 "collection_name": str(company_id),
+                "settings": [
+                    {"communication_mode": _comm_mode},
+                    {"log_communication_mode": _log_mode},
+                ],
             }
             if traceability:
                 jobbeur_payload["traceability"] = traceability
@@ -2537,6 +2546,15 @@ async def _persist_jobs_to_task_manager(
                             "batch_id": batch_id,
                             "bank_account_id": acct_id,
                             "transaction_id": move_id,
+                            # Champs d'affichage (depuis le cache ERP)
+                            "txn_amount": tx.get("amount", 0),
+                            "txn_currency": tx.get("currency", "") or tx.get("currency_name", ""),
+                            "transaction_date": tx.get("date", "") or tx.get("created_at", ""),
+                            "description": tx.get("description", "") or tx.get("payment_ref", ""),
+                            "partner_name": tx.get("partner_name", ""),
+                            "payment_ref": tx.get("payment_ref", ""),
+                            "reference": tx.get("reference", "") or tx.get("ref", ""),
+                            "bank_account_name": tx.get("account_name", "") or tx.get("journal_name", ""),
                         }
                     }
                 }

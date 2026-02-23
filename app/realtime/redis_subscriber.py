@@ -15,13 +15,13 @@ CANAUX REDIS:
 - user:{uid}/notifications         → Notifications (Firestore) - Niveau USER (global)
 - user:{uid}/direct_message_notif  → Direct Messages (RTDB) - Niveau USER (global)
 - user:{uid}/task_manager          → Task Manager (Firestore) - Niveau BUSINESS (page-specific)
-- user:{uid}/{collection}/job_chats/{job_id}/messages → Job Chat (RTDB) - Routé vers llm_manager
+- user:{uid}/{collection}/job_chats/{job_id}/messages → Job Chat (RTDB) - CMMD direct WS / MESSAGE → llm_manager
 - user:{uid}/{space_code}/*/messages → Chat - DÉJÀ GÉRÉ PAR llm_manager (IGNORÉ)
 
 RÈGLES DE PUBLICATION:
 - USER (notifications, direct_message_notif): Publier si utilisateur connecté uniquement
 - BUSINESS (task_manager): Publier si utilisateur connecté ET sur la page concernée
-- Job Chat (job_chats): Routé vers llm_manager._handle_onboarding_log_event() pour traitement métier
+- Job Chat (job_chats): CMMD → broadcast direct WebSocket / MESSAGE → llm_manager pour traitement métier
 - Chat: Ignoré (déjà géré par llm_manager)
 
 FLUX:
@@ -848,6 +848,16 @@ class RedisSubscriber:
                 # Format pré-catégorisé (routing, invoices, bank)
                 # Toutes les catégories sont des flat lists (bank inclus, batches calculés à la volée)
 
+                # Extraire transaction_id depuis department_data pour matching bank
+                # Les items to_process ont "id": "579" (move_id ERP)
+                # Le delta a job_id: "company_acct_579" (composite)
+                # Mais department_data.Bankbookeeper.transaction_id = "579"
+                tx_id_for_match = None
+                if domain in ("bank", "banking"):
+                    dept_data = item_data.get("department_data", {})
+                    bk_data = dept_data.get("Bankbookeeper", dept_data.get("banker", dept_data.get("Banker", {})))
+                    tx_id_for_match = str(bk_data.get("transaction_id", "")) if bk_data else None
+
                 # Étape 1: Trouver l'item existant dans toutes les listes (conserver ses champs)
                 existing_item = None
                 for cat_key in category_keys:
@@ -855,7 +865,8 @@ class RedisSubscriber:
                     if not isinstance(cat_list, list):
                         continue
                     for item in cat_list:
-                        if item.get("job_id") == job_id or item.get("id") == job_id or item.get("task_id") == job_id:
+                        if (item.get("job_id") == job_id or item.get("id") == job_id or item.get("task_id") == job_id or
+                                (tx_id_for_match and (str(item.get("id", "")) == tx_id_for_match or str(item.get("transaction_id", "")) == tx_id_for_match))):
                             existing_item = item
                             break
                     if existing_item:
@@ -875,7 +886,8 @@ class RedisSubscriber:
                         continue
                     inner_data[cat_key] = [
                         item for item in cat_list
-                        if item.get("job_id") != job_id and item.get("id") != job_id and item.get("task_id") != job_id
+                        if not (item.get("job_id") == job_id or item.get("id") == job_id or item.get("task_id") == job_id or
+                                (tx_id_for_match and (str(item.get("id", "")) == tx_id_for_match or str(item.get("transaction_id", "")) == tx_id_for_match)))
                     ]
 
                 # Étape 3: MERGER le delta PubSub avec l'item original
@@ -1448,6 +1460,111 @@ class RedisSubscriber:
             logger.error("[REDIS_SUBSCRIBER] unexpected_error channel=%s uid=%s error=%s", channel, uid, str(e), exc_info=True)
 
 
+    def _extract_card_data_from_message(
+        self,
+        message: Dict[str, Any],
+        thread_key: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Extrait et enrichit les données d'une carte interactive depuis un message RTDB.
+
+        Convertit le format cardsV2 (Google Chat API) en format InteractiveCard
+        compatible avec le frontend (card_data avec widgets).
+
+        Returns:
+            Dict InteractiveCard-compatible ou None si pas de carte valide
+        """
+        try:
+            raw_content = message.get("content")
+            if not raw_content:
+                return None
+
+            content = json.loads(raw_content) if isinstance(raw_content, str) else raw_content
+            if not isinstance(content, dict):
+                return None
+
+            cards_v2 = content.get("cardsV2", [])
+            if not cards_v2:
+                return None
+
+            first_card = cards_v2[0]
+            card_id = first_card.get("cardId", "")
+            card_body = first_card.get("card", {})
+            header = card_body.get("header", {})
+
+            # Extraire widgets (même logique que handlers._extract_widgets_from_cardsv2)
+            widgets = []
+            text_paragraphs = []
+
+            for section in card_body.get("sections", []):
+                for widget in section.get("widgets", []):
+                    if "selectionInput" in widget:
+                        sel = widget["selectionInput"]
+                        sel_type = sel.get("type", "DROPDOWN")
+                        items = [
+                            {"text": it.get("text", ""), "value": it.get("value", it.get("text", ""))}
+                            for it in sel.get("items", [])
+                        ]
+                        widgets.append({
+                            "type": "multi_select" if sel_type == "MULTI_SELECT" else "dropdown",
+                            "name": sel.get("name", ""),
+                            "label": sel.get("label", ""),
+                            "items": items,
+                            "defaultValue": sel.get("value") or (items[0]["value"] if items else None),
+                        })
+                    elif "textInput" in widget:
+                        ti = widget["textInput"]
+                        widgets.append({
+                            "type": "text_input",
+                            "name": ti.get("name", ""),
+                            "label": ti.get("label", ""),
+                            "hintText": ti.get("hintText", ""),
+                        })
+                    elif "buttonList" in widget:
+                        bl = widget["buttonList"]
+                        buttons = []
+                        for btn in bl.get("buttons", []):
+                            action_data = btn.get("onClick", {}).get("action", {})
+                            color = btn.get("color", {})
+                            color_str = None
+                            if color:
+                                r = color.get("red", 0)
+                                g = color.get("green", 0)
+                                b = color.get("blue", 0)
+                                if g > r and g > b:
+                                    color_str = "green"
+                                elif r > g and r > b:
+                                    color_str = "red"
+                            buttons.append({
+                                "text": btn.get("text", ""),
+                                "action": action_data.get("function", ""),
+                                "color": color_str,
+                            })
+                        widgets.append({"type": "button_list", "buttons": buttons})
+                    elif "textParagraph" in widget:
+                        tp = widget["textParagraph"]
+                        text_paragraphs.append(tp.get("text", ""))
+                        widgets.append({"type": "text_paragraph", "text": tp.get("text", "")})
+
+            message_id = message.get("id") or message.get("message_id")
+
+            return {
+                "cardId": card_id,
+                "cardType": card_id,
+                "title": header.get("title", "Carte Interactive"),
+                "subtitle": header.get("subtitle"),
+                "text": "\n".join(text_paragraphs) if text_paragraphs else None,
+                "params": {},
+                "isVisible": True,
+                "threadKey": thread_key,
+                "messageId": message_id,
+                "widgets": widgets,
+            }
+
+        except Exception as e:
+            logger.warning("[REDIS_SUBSCRIBER] card_data_extraction_failed error=%s", str(e))
+            return None
+
     async def _handle_job_chat_message(
         self,
         uid: str,
@@ -1458,7 +1575,12 @@ class RedisSubscriber:
         Traite un message du canal job_chats.
 
         Canal: user:{uid}/{collection}/job_chats/{job_id}/messages
-        Route vers llm_manager pour traitement métier (injection LLM, mode intermédiation).
+
+        Raccourci CMMD: Les messages de type CMMD (SET_WORKFLOW_CHECKLIST, UPDATE_STEP_STATUS)
+        sont broadcastés directement au frontend via WebSocket sans passer par le Worker LLM.
+        La persistance RTDB est déjà assurée côté klk_router.
+
+        Messages MESSAGE: Routés vers llm_manager pour traitement métier (injection LLM).
 
         Args:
             uid: User ID
@@ -1491,7 +1613,105 @@ class RedisSubscriber:
                 uid, collection_name, job_id, thread_key
             )
 
-            # Deleguer au worker via LLMGateway
+            # ── Raccourci CMMD : broadcast direct au frontend ──
+            message_type = message.get("message_type") if isinstance(message, dict) else None
+
+            if message_type == "CMMD":
+                logger.info(
+                    "[JOB_CHAT] CMMD detected - bypassing Worker LLM, broadcasting direct to WS"
+                )
+
+                # Vérifier si le user a ce thread ouvert
+                from app.llm_service.session_state_manager import get_session_state_manager
+                state_manager = get_session_state_manager()
+                user_on_thread = state_manager.is_user_on_thread_multi_tab(
+                    user_id=uid,
+                    company_id=collection_name,
+                    thread_key=thread_key
+                )
+
+                if user_on_thread:
+                    await hub.broadcast(uid, {
+                        "type": "CMMD",
+                        "payload": {
+                            "content": message.get("content"),
+                            "message_type": "CMMD",
+                            "thread_key": thread_key,
+                            "job_id": job_id,
+                            "collection_name": collection_name,
+                        }
+                    })
+                    duration_ms = (time.time() - start_time) * 1000
+                    logger.info(
+                        "[JOB_CHAT] CMMD broadcast direct → user on thread=True "
+                        "uid=%s job_id=%s duration_ms=%.2f",
+                        uid, job_id, duration_ms
+                    )
+                else:
+                    duration_ms = (time.time() - start_time) * 1000
+                    logger.info(
+                        "[JOB_CHAT] CMMD skipped (user not on thread) uid=%s thread=%s duration_ms=%.2f",
+                        uid, thread_key, duration_ms
+                    )
+
+                logger.info("[REDIS_SUBSCRIBER] ═══════════════════════════════════════════════════════")
+                return
+
+            # ── Raccourci FOLLOW_CARD / CARD : broadcast direct au frontend ──
+            # Même pattern que CMMD : les cartes interactives des workers externes
+            # (klk_router, klk_bank, klk_accountant) n'ont pas besoin du Worker LLM
+            # pour être affichées. On enrichit avec card_data et on broadcast direct.
+            if message_type in ("FOLLOW_CARD", "CARD"):
+                logger.info(
+                    "[JOB_CHAT] %s detected - bypassing Worker LLM, broadcasting direct to WS",
+                    message_type
+                )
+
+                # Extraire card_data depuis le contenu cardsV2
+                card_data = self._extract_card_data_from_message(message, thread_key)
+
+                from app.llm_service.session_state_manager import get_session_state_manager
+                state_manager = get_session_state_manager()
+                user_on_thread = state_manager.is_user_on_thread_multi_tab(
+                    user_id=uid,
+                    company_id=collection_name,
+                    thread_key=thread_key
+                )
+
+                if user_on_thread:
+                    await hub.broadcast(uid, {
+                        "type": "CARD",
+                        "payload": {
+                            "content": message.get("content"),
+                            "message_type": "CARD",
+                            "thread_key": thread_key,
+                            "job_id": job_id,
+                            "collection_name": collection_name,
+                            "card_data": card_data,
+                            "message_id": message.get("id") or message.get("message_id"),
+                            "timestamp": message.get("timestamp"),
+                        }
+                    })
+                    duration_ms = (time.time() - start_time) * 1000
+                    logger.info(
+                        "[JOB_CHAT] %s broadcast direct → user on thread=True "
+                        "uid=%s job_id=%s card=%s duration_ms=%.2f",
+                        message_type, uid, job_id,
+                        card_data.get("cardId", "unknown") if card_data else "no_card_data",
+                        duration_ms
+                    )
+                else:
+                    duration_ms = (time.time() - start_time) * 1000
+                    logger.info(
+                        "[JOB_CHAT] %s — user not on thread, card stored in RTDB for reload "
+                        "uid=%s thread=%s duration_ms=%.2f",
+                        message_type, uid, thread_key, duration_ms
+                    )
+
+                logger.info("[REDIS_SUBSCRIBER] ═══════════════════════════════════════════════════════")
+                return
+
+            # ── MESSAGE ou autre : déléguer au Worker LLM via LLMGateway ──
             from app.llm_service.llm_gateway import get_llm_gateway
 
             gateway = get_llm_gateway()

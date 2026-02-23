@@ -59,6 +59,7 @@ _DOMAIN_CONFIGS = {
     "routing": RoutingDomainConfig,
     "invoices": InvoicesDomainConfig,
     "banking": BankingDomainConfig,
+    "bank": BankingDomainConfig,       # alias for JOB_TYPE_CONFIG["bankbookeeper"]["domain"]
     "expenses": ExpensesDomainConfig,
 }
 
