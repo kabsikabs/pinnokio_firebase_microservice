@@ -119,6 +119,15 @@ async def on_startup():
     except Exception as e:
         logger.error("agentic_dispatch_listener status=error error=%s", repr(e))
 
+    # Démarrer le CommunicationResponseCollector (canaux externes)
+    try:
+        from .realtime.communication_response_collector import get_response_collector
+        collector = get_response_collector()
+        await collector.start()
+        logger.info("communication_response_collector status=started")
+    except Exception as e:
+        logger.error("communication_response_collector status=error error=%s", repr(e))
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
@@ -2668,6 +2677,15 @@ async def websocket_endpoint(ws: WebSocket):
                             payload=msg_payload
                         )
                         logger.info(f"[WS] Company settings load_asset_accounts handled - uid={uid}")
+
+                    elif msg_type == "company_settings.create_fiscal_folders":
+                        from .frontend.pages.company_settings import handle_create_fiscal_folders
+                        await handle_create_fiscal_folders(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings create_fiscal_folders handled - uid={uid}")
 
                     elif msg_type == "company_settings.telegram_start_registration":
                         from .frontend.pages.company_settings.telegram_handler import handle_telegram_start_registration

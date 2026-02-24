@@ -22,6 +22,14 @@ from ..redis_client import get_redis
 
 logger = logging.getLogger("realtime.worker_broadcast")
 
+# Types de messages dispatchables vers canaux externes
+DISPATCHABLE_TYPES = {
+    "llm_stream_complete", "llm.stream_end",  # Message final LLM
+    "CARD", "FOLLOW_CARD", "CMMD",            # Cartes interactives
+    "notification",                            # Notifications
+    "llm_stream_error",                        # Erreurs
+}
+
 
 class WorkerBroadcastListener:
     """
@@ -187,30 +195,62 @@ class WorkerBroadcastListener:
         channel_type: str
     ):
         """
-        Forward un message vers le WebSocketHub.
+        Forward un message vers le WebSocketHub ou vers un canal externe.
+
+        Si communication_chat_type != "pinnokio", route vers
+        CommunicationDispatcher.dispatch_outbound() pour les types dispatchables.
 
         Args:
             user_id: ID de l'utilisateur cible
             payload: Payload a envoyer
             channel_type: Type de channel (broadcast, stream, notification)
         """
-        try:
-            # Verifier si l'utilisateur est connecte
-            if not self.hub.is_user_connected(user_id):
+        communication_chat_type = payload.get("communication_chat_type", "pinnokio")
+
+        if communication_chat_type == "pinnokio":
+            # FLUX ACTUEL INCHANGE — WebSocket hub
+            try:
+                if not self.hub.is_user_connected(user_id):
+                    logger.debug(
+                        f"User {user_id} not connected, message will be buffered"
+                    )
+
+                await self.hub.broadcast(user_id, payload)
+
                 logger.debug(
-                    f"User {user_id} not connected, message will be buffered"
+                    f"Forwarded to WebSocket: user={user_id} "
+                    f"type={payload.get('type', 'unknown')}"
                 )
-                # Le hub.broadcast gere le buffering
-
-            await self.hub.broadcast(user_id, payload)
-
-            logger.debug(
-                f"Forwarded to WebSocket: user={user_id} "
-                f"type={payload.get('type', 'unknown')}"
-            )
-
-        except Exception as e:
-            logger.error(f"Error forwarding to WebSocket: {e}")
+            except Exception as e:
+                logger.error(f"Error forwarding to WebSocket: {e}")
+        else:
+            # FLUX CANAL EXTERNE — dispatch vers microservice
+            msg_type = payload.get("type", "")
+            if msg_type in DISPATCHABLE_TYPES:
+                try:
+                    from app.realtime.communication_dispatcher import get_communication_dispatcher
+                    dispatcher = get_communication_dispatcher()
+                    await dispatcher.dispatch_outbound(
+                        channel=communication_chat_type,
+                        uid=user_id,
+                        external_thread_id=payload.get("external_thread_id"),
+                        message_type=msg_type,
+                        payload=payload,
+                    )
+                    logger.info(
+                        f"Dispatched to external channel: user={user_id} "
+                        f"channel={communication_chat_type} type={msg_type}"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Error dispatching to external channel: "
+                        f"user={user_id} channel={communication_chat_type} error={e}"
+                    )
+            else:
+                logger.debug(
+                    f"Skipped non-dispatchable type for external: "
+                    f"user={user_id} channel={communication_chat_type} type={msg_type}"
+                )
 
 
 # ═══════════════════════════════════════════════════════════════

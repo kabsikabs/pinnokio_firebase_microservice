@@ -41,6 +41,8 @@ croniter==6.0.0
 google-generativeai>=0.3.0
 google-genai==0.3.0
 aiohttp==3.13.1
+# Google Cloud Pub/Sub pour transport multi-canal (Telegram, Google Chat)
+google-cloud-pubsub>=2.0.0
 # AWS SDK pour CloudWatch Logs
 boto3>=1.35.0
 # PostgreSQL async driver pour Neon (module HR)

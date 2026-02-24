@@ -44,10 +44,11 @@ async def _rebroadcast_company_details(
     mandate_path: str,
 ) -> None:
     """
-    Re-fetch and broadcast updated workflow_params after a save operation.
+    Re-fetch and broadcast updated company details after a save operation.
 
     Uses fetch_single_mandate + _build_workflow_params (same path as initial load)
     to ensure the frontend receives the exact same payload format (snake_case keys).
+    Includes workflow_params AND communication_settings so all sections stay in sync.
     """
     try:
         from app.wrappers.dashboard_orchestration_handlers import _build_workflow_params
@@ -64,6 +65,13 @@ async def _rebroadcast_company_details(
         # Build workflow_params in the same snake_case format as initial company.details load
         workflow_params = _build_workflow_params(selected_mandate)
 
+        # Build communication_settings (same format as dashboard_orchestration_handlers)
+        communication_settings = {
+            "dms_type": selected_mandate.get("dms_type", "odoo"),
+            "chat_type": selected_mandate.get("chat_type", "pinnokio"),
+            "communication_log_type": selected_mandate.get("communication_log_type", "pinnokio"),
+        }
+
         # Broadcast as COMPANY.DETAILS partial update so the existing
         # handleCompanyDetailsUpdate handler can pick it up and sync the store
         await hub.broadcast(uid, {
@@ -72,14 +80,15 @@ async def _rebroadcast_company_details(
                 "contact_space_id": company_id,
                 "mandate_path": mandate_path,
                 "workflow_params": workflow_params,
+                "communication_settings": communication_settings,
                 "_partialUpdate": True,
             }
         })
 
-        logger.info(f"[COMPANY_SETTINGS] Re-broadcasted workflow_params for company_id={company_id}")
+        logger.info(f"[COMPANY_SETTINGS] Re-broadcasted company details for company_id={company_id}")
 
     except Exception as e:
-        logger.warning(f"[COMPANY_SETTINGS] Failed to re-broadcast workflow_params: {e}")
+        logger.warning(f"[COMPANY_SETTINGS] Failed to re-broadcast company details: {e}")
 
 
 # ============================================
@@ -509,6 +518,86 @@ async def handle_save_context(
 
     except Exception as e:
         logger.error(f"[COMPANY_SETTINGS] Save context failed: {e}")
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.ERROR,
+            "payload": {"error": str(e)}
+        })
+
+
+# ============================================
+# DMS OPERATIONS: Fiscal Folder Creation
+# ============================================
+
+async def handle_create_fiscal_folders(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """
+    Handle company_settings.create_fiscal_folders WebSocket event.
+
+    Launches DMS_CREATION(command='create_folders') in a background thread
+    so Drive API calls don't block the event loop.
+    The frontend button stays in "working" state until the response arrives.
+
+    Args:
+        payload: {
+            "company_id": str,
+            "mandate_path": str,
+            "fiscal_year": int
+        }
+    """
+    company_id = payload.get("company_id")
+    mandate_path = payload.get("mandate_path")
+    fiscal_year = payload.get("fiscal_year")
+
+    if not company_id or not mandate_path or not fiscal_year:
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.ERROR,
+            "payload": {"error": "Missing company_id, mandate_path, or fiscal_year"}
+        })
+        return
+
+    try:
+        logger.info(
+            f"[COMPANY_SETTINGS] Creating fiscal folders for "
+            f"company_id={company_id} fiscal_year={fiscal_year}"
+        )
+
+        handlers = get_company_settings_handlers()
+
+        # Run synchronous DMS_CREATION in a thread to avoid blocking event loop
+        result = await asyncio.to_thread(
+            handlers.create_fiscal_folders,
+            user_id=uid,
+            company_id=company_id,
+            mandate_path=mandate_path,
+            fiscal_year=fiscal_year,
+        )
+
+        logger.info(
+            f"[COMPANY_SETTINGS] Fiscal folders handler returned: {result}"
+        )
+
+        # Broadcast result to frontend
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.FISCAL_FOLDERS_CREATED,
+            "payload": {
+                "success": result.get("success", False),
+                "message": result.get("message"),
+                "folders_created": result.get("folders_created", 0),
+                "error": result.get("error"),
+                "company_id": company_id,
+            }
+        })
+
+        logger.info(
+            f"[COMPANY_SETTINGS] Fiscal folders creation completed for "
+            f"company_id={company_id} success={result.get('success')}"
+        )
+
+    except Exception as e:
+        logger.error(f"[COMPANY_SETTINGS] Create fiscal folders failed: {e}", exc_info=True)
         await hub.broadcast(uid, {
             "type": WS_EVENTS.COMPANY_SETTINGS.ERROR,
             "payload": {"error": str(e)}

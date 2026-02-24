@@ -289,7 +289,8 @@ class LLMGateway:
         action: str,
         user_message: str = "",
         message_data: Optional[dict] = None,
-        tab_session_id: str = "legacy"
+        tab_session_id: str = "legacy",
+        **kwargs,
     ) -> dict[str, Any]:
         """
         Enqueue une reponse a une carte interactive.
@@ -326,6 +327,7 @@ class LLMGateway:
                 "user_message": user_message,
                 "message_data": message_data or {},
                 "tab_session_id": tab_session_id,
+                **kwargs,  # communication_chat_type, external_thread_id
             },
             "queued_at": datetime.now(timezone.utc).isoformat(),
         }

@@ -1139,14 +1139,8 @@ class ChatHandlers:
             'bank_file_list_card',
         }
 
-        # External worker card IDs (cardsV2 format with dynamic widgets)
-        EXTERNAL_WORKER_CARD_IDS = {
-            'klk_router_card',
-            'klk_router_approval_card',
-            'job_menu_card',
-            'bank_list_file_card',
-            'bank_file_list_card',
-        }
+        # External worker card IDs — source unique: card_transformer.py
+        from app.realtime.card_transformer import EXTERNAL_WORKER_CARD_IDS
 
         last_pending_card: Optional[Dict[str, Any]] = None
 
@@ -1304,66 +1298,8 @@ class ChatHandlers:
 
     def _extract_widgets_from_cardsv2(self, card_body: Dict) -> List[Dict[str, Any]]:
         """Extract normalized widgets from a cardsV2 card body for frontend rendering."""
-        widgets = []
-
-        for section in card_body.get("sections", []):
-            for widget in section.get("widgets", []):
-                # selectionInput (dropdown / multi-select)
-                if "selectionInput" in widget:
-                    sel = widget["selectionInput"]
-                    sel_type = sel.get("type", "DROPDOWN")
-                    items = [
-                        {"text": item.get("text", ""), "value": item.get("value", item.get("text", ""))}
-                        for item in sel.get("items", [])
-                    ]
-                    widgets.append({
-                        "type": "multi_select" if sel_type == "MULTI_SELECT" else "dropdown",
-                        "name": sel.get("name", ""),
-                        "label": sel.get("label", ""),
-                        "items": items,
-                        "defaultValue": sel.get("value") or (items[0]["value"] if items else None),
-                    })
-
-                # textInput
-                elif "textInput" in widget:
-                    ti = widget["textInput"]
-                    widgets.append({
-                        "type": "text_input",
-                        "name": ti.get("name", ""),
-                        "label": ti.get("label", ""),
-                        "hintText": ti.get("hintText", ""),
-                    })
-
-                # buttonList
-                elif "buttonList" in widget:
-                    bl = widget["buttonList"]
-                    buttons = []
-                    for btn in bl.get("buttons", []):
-                        action_data = btn.get("onClick", {}).get("action", {})
-                        color = btn.get("color", {})
-                        color_str = None
-                        if color:
-                            r, g, b = color.get("red", 0), color.get("green", 0), color.get("blue", 0)
-                            if g > r and g > b:
-                                color_str = "green"
-                            elif r > g and r > b:
-                                color_str = "red"
-                        buttons.append({
-                            "text": btn.get("text", ""),
-                            "action": action_data.get("function", ""),
-                            "color": color_str,
-                        })
-                    widgets.append({"type": "button_list", "buttons": buttons})
-
-                # textParagraph
-                elif "textParagraph" in widget:
-                    tp = widget["textParagraph"]
-                    widgets.append({
-                        "type": "text_paragraph",
-                        "text": tp.get("text", ""),
-                    })
-
-        return widgets
+        from app.realtime.card_transformer import CardTransformer
+        return CardTransformer.extract_widgets_from_card_body(card_body)
 
     # ──────────────────────────────────────────
     # TASK MANAGEMENT (Chat-specific tasks)

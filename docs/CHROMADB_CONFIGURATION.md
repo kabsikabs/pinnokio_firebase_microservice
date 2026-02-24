@@ -3,7 +3,7 @@
 ## Current Configuration
 
 ### Server Setup (EC2 Instance)
-- **Host**: `13.36.168.113`
+- **Host**: `15.237.231.19`
 - **Port**: `8000`
 - **Region**: eu-west-3 (Paris)
 - **Instance ID**: `i-0617efb08fecc6d2a`
@@ -104,7 +104,7 @@ import chromadb
 async def main():
     # Client asynchrone
     client = await chromadb.AsyncHttpClient(
-        host="13.36.168.113",
+        host="15.237.231.19",
         port=8000,
         ssl=False
     )
@@ -316,7 +316,7 @@ gcloud secrets versions access latest --secret="klk_router_aws_pem" > /tmp/key.p
 chmod 600 /tmp/key.pem
 
 # Se connecter
-ssh -i /tmp/key.pem ec2-user@13.36.168.113
+ssh -i /tmp/key.pem ec2-user@15.237.231.19
 
 # Commandes utiles
 docker ps                                    # Liste containers
@@ -330,13 +330,13 @@ sudo du -sh /var/lib/docker/volumes/ec2-user_index_data/_data/  # Taille donnée
 
 ```bash
 # Test de santé basique
-curl http://13.36.168.113:8000/api/v2/heartbeat
+curl http://15.237.231.19:8000/api/v2/heartbeat
 
 # Liste des collections
-curl http://13.36.168.113:8000/api/v2/tenants/default_tenant/databases/default_database/collections
+curl http://15.237.231.19:8000/api/v2/tenants/default_tenant/databases/default_database/collections
 
 # Créer une collection test
-curl -X POST "http://13.36.168.113:8000/api/v2/tenants/default_tenant/databases/default_database/collections" \
+curl -X POST "http://15.237.231.19:8000/api/v2/tenants/default_tenant/databases/default_database/collections" \
   -H "Content-Type: application/json" \
   -d '{"name": "test_collection"}'
 ```

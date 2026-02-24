@@ -1424,15 +1424,15 @@ async def _run_company_phase(
             # ─────────────────────────────────────────────────
             "communication_settings": {
                 "dms_type": selected_mandate.get("dms_type", "odoo"),
-                "chat_type": selected_mandate.get("chat_type", "rag"),
-                "communication_log_type": selected_mandate.get("communication_log_type", "rag"),
+                "chat_type": selected_mandate.get("chat_type", "pinnokio"),
+                "communication_log_type": selected_mandate.get("communication_log_type", "pinnokio"),
             },
             # Champs plats conservés pour compatibilité backend
             "apbookeeper_approval_required": selected_mandate.get("apbookeeper_approval_required", False),
             "router_approval_required": selected_mandate.get("router_approval_required", False),
             "banker_approval_required": selected_mandate.get("banker_approval_required", False),
-            "chat_type": selected_mandate.get("chat_type", "rag"),
-            "communication_log_type": selected_mandate.get("communication_log_type", "rag"),
+            "chat_type": selected_mandate.get("chat_type", "pinnokio"),
+            "communication_log_type": selected_mandate.get("communication_log_type", "pinnokio"),
             "router_automated_workflow": selected_mandate.get("router_automated_workflow", True),
             # ─────────────────────────────────────────────────
             # Context Details (pour LLM et Settings page)
@@ -1611,15 +1611,15 @@ async def run_company_orchestration(
             # Communication Settings
             "communication_settings": {
                 "dms_type": full_mandate.get("dms_type", "odoo"),
-                "chat_type": full_mandate.get("chat_type", "rag"),
-                "communication_log_type": full_mandate.get("communication_log_type", "rag"),
+                "chat_type": full_mandate.get("chat_type", "pinnokio"),
+                "communication_log_type": full_mandate.get("communication_log_type", "pinnokio"),
             },
             # Flat workflow params for compatibility
             "apbookeeper_approval_required": full_mandate.get("apbookeeper_approval_required", False),
             "router_approval_required": full_mandate.get("router_approval_required", False),
             "banker_approval_required": full_mandate.get("banker_approval_required", False),
-            "chat_type": full_mandate.get("chat_type", "rag"),
-            "communication_log_type": full_mandate.get("communication_log_type", "rag"),
+            "chat_type": full_mandate.get("chat_type", "pinnokio"),
+            "communication_log_type": full_mandate.get("communication_log_type", "pinnokio"),
             "router_automated_workflow": full_mandate.get("router_automated_workflow", True),
             # Context Details
             "context_details": full_mandate.get("context_details", {

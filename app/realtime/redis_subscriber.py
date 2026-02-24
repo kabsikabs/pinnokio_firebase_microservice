@@ -1519,111 +1519,6 @@ class RedisSubscriber:
             logger.error("[REDIS_SUBSCRIBER] unexpected_error channel=%s uid=%s error=%s", channel, uid, str(e), exc_info=True)
 
 
-    def _extract_card_data_from_message(
-        self,
-        message: Dict[str, Any],
-        thread_key: str
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Extrait et enrichit les données d'une carte interactive depuis un message RTDB.
-
-        Convertit le format cardsV2 (Google Chat API) en format InteractiveCard
-        compatible avec le frontend (card_data avec widgets).
-
-        Returns:
-            Dict InteractiveCard-compatible ou None si pas de carte valide
-        """
-        try:
-            raw_content = message.get("content")
-            if not raw_content:
-                return None
-
-            content = json.loads(raw_content) if isinstance(raw_content, str) else raw_content
-            if not isinstance(content, dict):
-                return None
-
-            cards_v2 = content.get("cardsV2", [])
-            if not cards_v2:
-                return None
-
-            first_card = cards_v2[0]
-            card_id = first_card.get("cardId", "")
-            card_body = first_card.get("card", {})
-            header = card_body.get("header", {})
-
-            # Extraire widgets (même logique que handlers._extract_widgets_from_cardsv2)
-            widgets = []
-            text_paragraphs = []
-
-            for section in card_body.get("sections", []):
-                for widget in section.get("widgets", []):
-                    if "selectionInput" in widget:
-                        sel = widget["selectionInput"]
-                        sel_type = sel.get("type", "DROPDOWN")
-                        items = [
-                            {"text": it.get("text", ""), "value": it.get("value", it.get("text", ""))}
-                            for it in sel.get("items", [])
-                        ]
-                        widgets.append({
-                            "type": "multi_select" if sel_type == "MULTI_SELECT" else "dropdown",
-                            "name": sel.get("name", ""),
-                            "label": sel.get("label", ""),
-                            "items": items,
-                            "defaultValue": sel.get("value") or (items[0]["value"] if items else None),
-                        })
-                    elif "textInput" in widget:
-                        ti = widget["textInput"]
-                        widgets.append({
-                            "type": "text_input",
-                            "name": ti.get("name", ""),
-                            "label": ti.get("label", ""),
-                            "hintText": ti.get("hintText", ""),
-                        })
-                    elif "buttonList" in widget:
-                        bl = widget["buttonList"]
-                        buttons = []
-                        for btn in bl.get("buttons", []):
-                            action_data = btn.get("onClick", {}).get("action", {})
-                            color = btn.get("color", {})
-                            color_str = None
-                            if color:
-                                r = color.get("red", 0)
-                                g = color.get("green", 0)
-                                b = color.get("blue", 0)
-                                if g > r and g > b:
-                                    color_str = "green"
-                                elif r > g and r > b:
-                                    color_str = "red"
-                            buttons.append({
-                                "text": btn.get("text", ""),
-                                "action": action_data.get("function", ""),
-                                "color": color_str,
-                            })
-                        widgets.append({"type": "button_list", "buttons": buttons})
-                    elif "textParagraph" in widget:
-                        tp = widget["textParagraph"]
-                        text_paragraphs.append(tp.get("text", ""))
-                        widgets.append({"type": "text_paragraph", "text": tp.get("text", "")})
-
-            message_id = message.get("id") or message.get("message_id")
-
-            return {
-                "cardId": card_id,
-                "cardType": card_id,
-                "title": header.get("title", "Carte Interactive"),
-                "subtitle": header.get("subtitle"),
-                "text": "\n".join(text_paragraphs) if text_paragraphs else None,
-                "params": {},
-                "isVisible": True,
-                "threadKey": thread_key,
-                "messageId": message_id,
-                "widgets": widgets,
-            }
-
-        except Exception as e:
-            logger.warning("[REDIS_SUBSCRIBER] card_data_extraction_failed error=%s", str(e))
-            return None
-
     async def _handle_job_chat_message(
         self,
         uid: str,
@@ -1727,7 +1622,8 @@ class RedisSubscriber:
                 )
 
                 # Extraire card_data depuis le contenu cardsV2
-                card_data = self._extract_card_data_from_message(message, thread_key)
+                from app.realtime.card_transformer import CardTransformer
+                card_data = CardTransformer.cardsv2_to_interactive_card(message, thread_key)
 
                 from app.llm_service.session_state_manager import get_session_state_manager
                 state_manager = get_session_state_manager()
@@ -1738,6 +1634,13 @@ class RedisSubscriber:
                 )
 
                 if user_on_thread:
+                    widget_count = len(card_data.get("widgets", [])) if card_data else 0
+                    logger.info(
+                        "[JOB_CHAT] card_data debug: cardId=%s widgets=%d keys=%s",
+                        card_data.get("cardId") if card_data else None,
+                        widget_count,
+                        list(card_data.keys()) if card_data else []
+                    )
                     await hub.broadcast(uid, {
                         "type": "CARD",
                         "payload": {
@@ -1754,9 +1657,10 @@ class RedisSubscriber:
                     duration_ms = (time.time() - start_time) * 1000
                     logger.info(
                         "[JOB_CHAT] %s broadcast direct → user on thread=True "
-                        "uid=%s job_id=%s card=%s duration_ms=%.2f",
+                        "uid=%s job_id=%s card=%s widgets=%d duration_ms=%.2f",
                         message_type, uid, job_id,
                         card_data.get("cardId", "unknown") if card_data else "no_card_data",
+                        widget_count,
                         duration_ms
                     )
                 else:
@@ -1765,6 +1669,18 @@ class RedisSubscriber:
                         "[JOB_CHAT] %s — user not on thread, card stored in RTDB for reload "
                         "uid=%s thread=%s duration_ms=%.2f",
                         message_type, uid, thread_key, duration_ms
+                    )
+
+                # Dispatch vers canaux externes (google_chat, telegram) si mandate_path present
+                mandate_path = message_data.get("mandate_path")
+                if mandate_path:
+                    from app.realtime.communication_dispatcher import get_communication_dispatcher
+                    dispatcher = get_communication_dispatcher()
+                    asyncio.create_task(
+                        dispatcher.dispatch_message(
+                            uid, mandate_path, collection_name,
+                            thread_key, message, message_mode="job_chats"
+                        )
                     )
 
                 logger.info("[REDIS_SUBSCRIBER] ═══════════════════════════════════════════════════════")

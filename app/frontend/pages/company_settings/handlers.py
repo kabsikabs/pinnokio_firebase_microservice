@@ -978,7 +978,7 @@ class CompanySettingsHandlers:
     # DMS OPERATIONS
     # ============================================
 
-    async def create_fiscal_folders(
+    def create_fiscal_folders(
         self,
         user_id: str,
         company_id: str,
@@ -988,10 +988,9 @@ class CompanySettingsHandlers:
         """
         Create fiscal year folder structure in the DMS (Google Drive).
 
-        RPC: COMPANY_SETTINGS.create_fiscal_folders
-
-        This uses the file_manager_agent's create_fiscal_year_structure() logic
-        which loads the folder schema from GCS and creates folders recursively.
+        Uses DMS_CREATION(command='create_folders') from onboarding_flow.py.
+        This is a SYNCHRONOUS method (Drive API calls are blocking).
+        The orchestration layer runs it via asyncio.to_thread().
 
         Args:
             user_id: Firebase UID
@@ -1000,11 +999,7 @@ class CompanySettingsHandlers:
             fiscal_year: Year to create folders for (e.g., 2025)
 
         Returns:
-            {
-                "success": True,
-                "folders_created": int,
-                "message": "..."
-            }
+            {"success": True, "message": "...", "folders_created": int}
         """
         start_time = datetime.utcnow()
 
@@ -1022,61 +1017,97 @@ class CompanySettingsHandlers:
                     "error": f"Invalid fiscal year: {fiscal_year}. Must be between 2000 and {current_year + 5}."
                 }
 
-            # Get company data for DMS configuration
-            mandate_data = self._firebase.get_document(mandate_path)
-            if not mandate_data:
+            # Get company data from Redis Level 2 cache (populated during auth/dashboard)
+            from app.wrappers.dashboard_orchestration_handlers import get_company_context
+            company_data = get_company_context(user_id, company_id)
+
+            if not company_data:
+                # Fallback: read raw mandate from Firebase
+                logger.warning(
+                    f"COMPANY_SETTINGS.create_fiscal_folders "
+                    f"Level 2 cache MISS for uid={user_id} company={company_id}, falling back to Firebase"
+                )
+                company_data = self._firebase.get_document(mandate_path) or {}
+
+            dms_type = company_data.get("dms_type", "odoo")
+            if dms_type != "google_drive":
                 return {
                     "success": False,
-                    "error": "Mandate not found"
+                    "error": f"Fiscal folder creation only supported for Google Drive DMS (current: {dms_type})"
                 }
 
-            dms_type = mandate_data.get("dms_type", "odoo")
-            root_folder_id = mandate_data.get("root_folder_id") or mandate_data.get("drive_root_folder_id")
+            # Extract required fields from Level 2 cache
+            client_name = company_data.get("client_name", "")
+            space_name = company_data.get("contact_space_name", "")
+            client_uuid = company_data.get("client_uuid", "")
+            communication_mode = company_data.get("communication_log_type", "pinnokio")
 
-            if not root_folder_id:
+            if not client_name or not space_name:
                 return {
                     "success": False,
-                    "error": "No root folder configured for this company. Please configure DMS first."
+                    "error": "Missing client_name or contact_space_name in mandate. Please configure company info first."
                 }
 
-            # TODO: Implement actual Drive folder creation
-            # When Drive singleton is configured, use:
-            #
-            # from app.pinnokio_agentic_workflow.file_manager_agent.file_manager import FileManager
-            #
-            # file_manager = FileManager(
-            #     user_id=user_id,
-            #     collection_name=company_id,
-            #     drive_service=get_drive_service(),  # Need singleton
-            #     root_folder_id=root_folder_id,
-            #     dms_type=dms_type
-            # )
-            #
-            # result = file_manager.create_fiscal_year_structure(fiscal_year)
-            #
-            # return {
-            #     "success": result.get("success", False),
-            #     "folders_created": len(result.get("folders_info", {})),
-            #     "message": result.get("message", ""),
-            #     "durationMs": self._elapsed_ms(start_time)
-            # }
+            # Extract client_mandat_doc_id from mandate_path
+            # Format: clients/{uid}/bo_clients/{client_doc_id}/mandates/{mandat_doc_id}
+            path_parts = mandate_path.split("/")
+            if len(path_parts) >= 6:
+                client_mandat_doc_id = path_parts[5]
+            else:
+                return {
+                    "success": False,
+                    "error": f"Invalid mandate_path format: {mandate_path}"
+                }
 
-            # PLACEHOLDER: Return success for now
-            logger.warning(
-                f"COMPANY_SETTINGS.create_fiscal_folders PLACEHOLDER - "
-                f"Drive singleton not yet configured. fiscal_year={fiscal_year}"
+            # Call DMS_CREATION with command='create_folders'
+            from pinnokio_app.logique_metier.onboarding_flow import DMS_CREATION
+
+            logger.info(
+                f"COMPANY_SETTINGS.create_fiscal_folders launching DMS_CREATION "
+                f"client={client_name} space={space_name} year={fiscal_year}"
             )
 
-            return {
-                "success": True,
-                "folders_created": 0,
-                "message": f"[PLACEHOLDER] Fiscal year {fiscal_year} folder creation queued. "
-                           f"Drive integration pending singleton configuration.",
-                "durationMs": self._elapsed_ms(start_time)
-            }
+            dms_creator = DMS_CREATION(
+                dms_type=dms_type,
+                command="create_folders",
+                mandates_path=mandate_path,
+                user_mail=None,
+                command_args={
+                    "client_name": client_name,
+                    "space_name": space_name,
+                    "specific_year": str(fiscal_year),
+                    "communication_mode": communication_mode,
+                },
+                firebase_user_id=user_id,
+                client_uuid=client_uuid,
+                client_mandat_doc_id=client_mandat_doc_id,
+            )
+
+            # DMS_CREATION constructor executes create_folders synchronously
+            # Result is stored in dms_creator.firebase_create_mandate_template
+            template = getattr(dms_creator, "firebase_create_mandate_template", None)
+
+            if template:
+                logger.info(
+                    f"COMPANY_SETTINGS.create_fiscal_folders SUCCESS "
+                    f"company_id={company_id} fiscal_year={fiscal_year} "
+                    f"template_keys={list(template.keys()) if isinstance(template, dict) else 'N/A'}"
+                )
+                return {
+                    "success": True,
+                    "folders_created": len(template) if isinstance(template, dict) else 0,
+                    "message": f"Dossiers fiscaux {fiscal_year} créés avec succès.",
+                    "durationMs": self._elapsed_ms(start_time),
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "DMS_CREATION completed but no folder template was returned.",
+                    "durationMs": self._elapsed_ms(start_time),
+                }
 
         except Exception as e:
-            logger.error(f"COMPANY_SETTINGS.create_fiscal_folders error: {e}")
+            logger.error(f"COMPANY_SETTINGS.create_fiscal_folders error: {e}", exc_info=True)
             return {
                 "success": False,
                 "error": str(e)

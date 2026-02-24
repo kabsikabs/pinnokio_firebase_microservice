@@ -329,12 +329,22 @@ class FirebaseManagement:
                             updates['telegram_auth_users'] = telegram_auth_users
                             print(f"✅ {telegram_username} supprimé de telegram_auth_users")
                         
-                        # B. NOUVEAU : Supprimer du mapping telegram_users_mapping
+                        # B. Supprimer la room assignee a cet utilisateur dans les mappings
+                        telegram_room_assignments = mandate_doc_data.get('telegram_room_assignments', {})
                         telegram_users_mapping = mandate_doc_data.get('telegram_users_mapping', {})
-                        if telegram_username in telegram_users_mapping:
-                            del telegram_users_mapping[telegram_username]
-                            updates['telegram_users_mapping'] = telegram_users_mapping
-                            print(f"✅ {telegram_username} supprimé du mapping telegram_users_mapping")
+                        room_to_remove = None
+                        for rname, rusername in telegram_room_assignments.items():
+                            if rusername.replace("@", "").strip() == telegram_username.replace("@", "").strip():
+                                room_to_remove = rname
+                                break
+                        if room_to_remove:
+                            if room_to_remove in telegram_users_mapping:
+                                del telegram_users_mapping[room_to_remove]
+                                updates['telegram_users_mapping'] = telegram_users_mapping
+                            if room_to_remove in telegram_room_assignments:
+                                del telegram_room_assignments[room_to_remove]
+                                updates['telegram_room_assignments'] = telegram_room_assignments
+                            print(f"✅ Room {room_to_remove} de {telegram_username} supprimee des mappings")
                         
                         # Appliquer les mises à jour si nécessaire
                         if updates:

@@ -37,6 +37,7 @@ from .orchestration import (
     handle_save_settings,
     handle_save_workflow,
     handle_save_context,
+    handle_create_fiscal_folders,
     handle_save_asset_config,
     handle_list_asset_models,
     handle_create_asset_model,
@@ -62,6 +63,8 @@ __all__ = [
     "handle_save_settings",
     "handle_save_workflow",
     "handle_save_context",
+    # DMS Operations
+    "handle_create_fiscal_folders",
     # Asset Management
     "handle_save_asset_config",
     "handle_list_asset_models",

@@ -906,39 +906,12 @@ async def handle_workflow_step_update(
 # INTERACTIVE CARD HANDLERS
 # ============================================
 
-# Cartes des workers externes (klk_router, klk_bank, klk_accountant)
-# Traitées directement par le backend — pas besoin du Worker LLM
-_EXTERNAL_WORKER_CARD_IDS = {
-    "klk_router_card",
-    "klk_router_approval_card",
-    "four_eyes_approval_card",
-    "approval_card",
-    "job_menu_card",
-    "bank_list_file_card",
-    "bank_file_list_card",
-}
-
-# invokedFunction par défaut selon le card_id
-_DEFAULT_INVOKED_FUNCTION = {
-    "klk_router_card": "answer_pinnokio",
-    "klk_router_approval_card": "answer_pinnokio",
-    "four_eyes_approval_card": "approve_four_eyes",
-    "approval_card": "approve_four_eyes",
-    "job_menu_card": "navigate",
-    "bank_list_file_card": "start_router_job",
-    "bank_file_list_card": "start_router_job",
-}
-
-# Champs formInputs attendus par les workers externes selon le card_id
-_FORM_FIELDS_BY_CARD = {
-    "klk_router_card": ["pinnokio_func", "instructions"],
-    "klk_router_approval_card": ["pinnokio_func", "second_dropdown", "instructions"],
-    "four_eyes_approval_card": ["user_message"],
-    "approval_card": ["user_message"],
-    "job_menu_card": ["next_step"],
-    "bank_list_file_card": ["selected_files", "methode"],
-    "bank_file_list_card": ["selected_files", "methode"],
-}
+# Cartes des workers externes — source unique: card_transformer.py
+from app.realtime.card_transformer import (
+    EXTERNAL_WORKER_CARD_IDS as _EXTERNAL_WORKER_CARD_IDS,
+    DEFAULT_INVOKED_FUNCTION as _DEFAULT_INVOKED_FUNCTION,
+    FORM_FIELDS_BY_CARD as _FORM_FIELDS_BY_CARD,
+)
 
 
 async def _handle_external_card_response(
@@ -1031,8 +1004,27 @@ async def _handle_external_card_response(
         rtdb_path = f"{company_id}/job_chats/{thread_key}/messages/{response_id}"
         rtdb.reference(rtdb_path, url=db_url, app=app).set(card_response_data)
 
+        # Publier sur Redis PubSub pour que le worker recoive la reponse
+        try:
+            redis_client = get_redis()
+            redis_channel = f"user:{uid}/{company_id}/job_chats/{thread_key}/messages"
+            redis_client.publish(redis_channel, json.dumps({
+                "type": "job_chat_message",
+                "job_id": thread_key,
+                "collection_name": company_id,
+                "thread_key": thread_key,
+                "message": card_response_data,
+                "timestamp": timestamp,
+            }, default=str))
+            logger.info(
+                "[CARD_EXTERNAL] Redis publish OK channel=%s invokedFunction=%s",
+                redis_channel, invoked_function
+            )
+        except Exception as redis_err:
+            logger.error("[CARD_EXTERNAL] Redis publish failed: %s", redis_err)
+
         logger.info(
-            f"[CARD_EXTERNAL] ✅ CARD_CLICKED_PINNOKIO écrit dans RTDB — "
+            f"[CARD_EXTERNAL] CARD_CLICKED_PINNOKIO ecrit dans RTDB — "
             f"path={rtdb_path} invokedFunction={invoked_function} "
             f"formFields={list(form_inputs.keys())}"
         )

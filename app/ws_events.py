@@ -584,6 +584,10 @@ class CompanySettingsEvents:
     LOAD_ASSET_ACCOUNTS = "company_settings.load_asset_accounts"
     ASSET_ACCOUNTS_DATA = "company_settings.asset_accounts_data"
 
+    # DMS Operations
+    CREATE_FISCAL_FOLDERS = "company_settings.create_fiscal_folders"
+    FISCAL_FOLDERS_CREATED = "company_settings.fiscal_folders_created"
+
     # ERP connections
     SAVE_ERP_CONNECTIONS = "company_settings.save_erp_connections"
     ERP_CONNECTIONS_SAVED = "company_settings.erp_connections_saved"

@@ -12,7 +12,7 @@ print(f"Version ChromaDB: {chromadb.__version__}")
 print("\n1. Test configuration minimale...")
 try:
     client = chromadb.HttpClient(
-        host='13.36.168.113',
+        host='15.237.231.19',
         port='8000',
         ssl=False
     )
@@ -25,7 +25,7 @@ except Exception as e:
 print("\n2. Test avec headers/settings None...")
 try:
     client = chromadb.HttpClient(
-        host='13.36.168.113',
+        host='15.237.231.19',
         port='8000',
         ssl=False,
         headers=None,
@@ -40,7 +40,7 @@ except Exception as e:
 print("\n3. Test avec tenant/database...")
 try:
     client = chromadb.HttpClient(
-        host='13.36.168.113',
+        host='15.237.231.19',
         port='8000',
         ssl=False,
         headers=None,

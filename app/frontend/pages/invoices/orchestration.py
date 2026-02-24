@@ -387,8 +387,8 @@ async def handle_invoices_process(
                 "client_uuid": context.get("client_uuid", ""),
                 # Communication settings (for jobbeur payload)
                 "dms_type": context.get("dms_type", "odoo"),
-                "communication_mode": context.get("chat_type", "rag"),
-                "log_communication_mode": context.get("communication_log_type", "rag"),
+                "communication_mode": context.get("chat_type", "pinnokio"),
+                "log_communication_mode": context.get("communication_log_type", "pinnokio"),
                 # Workflow defaults — handle_job_process reads router_* keys for all job types
                 "router_approval_required": context.get("workflow_params", {}).get("apbookeeper_approval_required", context.get("apbookeeper_approval_required", False)),
                 "router_automated_workflow": context.get("workflow_params", {}).get("apbookeeper_approval_contact_creation", False),

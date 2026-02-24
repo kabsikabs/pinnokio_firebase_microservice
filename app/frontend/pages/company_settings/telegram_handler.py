@@ -32,6 +32,39 @@ from app.cache.unified_cache_manager import get_firebase_cache_manager
 
 logger = logging.getLogger("company_settings.telegram")
 
+
+def _sync_mapping_to_telegram_users(firebase, mandate_path: str, auth_users: list, full_mapping: dict):
+    """
+    Synchronise le telegram_users_mapping complet dans chaque
+    telegram_users/{username}/authorized_mandates/{mandate_path}.
+
+    Appele apres chaque creation/modification de room pour garder
+    la coherence entre le mandate doc et les entrees telegram_users.
+    """
+    from datetime import datetime, timezone
+
+    for tg_username in auth_users:
+        try:
+            clean_name = tg_username.replace("@", "").strip()
+            user_ref = firebase.db.collection("telegram_users").document(clean_name)
+            user_doc = user_ref.get()
+            if not user_doc.exists:
+                continue
+            user_data = user_doc.to_dict()
+            authorized_mandates = user_data.get("authorized_mandates", {})
+            if mandate_path not in authorized_mandates:
+                continue
+            # Update the entry with the full mapping
+            authorized_mandates[mandate_path]["telegram_users_mapping"] = full_mapping
+            user_ref.update({
+                "authorized_mandates": authorized_mandates,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            logger.info(f"[TELEGRAM] Synced telegram_users_mapping to telegram_users/{clean_name}")
+        except Exception as e:
+            logger.warning(f"[TELEGRAM] Failed to sync mapping to {tg_username}: {e}")
+
+
 # Room display names mapping
 ROOM_DISPLAY_NAMES = {
     "accounting_room": "Accounting Room",
@@ -119,15 +152,28 @@ async def handle_telegram_start_registration(
                     }
                 )
 
-                # Save room mapping
+                # Save room mapping + ensure sender is in telegram_auth_users
+                mandate_data = firebase.get_document(mandate_path) or {}
+                auth_users = mandate_data.get("telegram_auth_users", [])
+                clean_sender = sender_username.replace("@", "").strip()
+                if clean_sender not in auth_users:
+                    auth_users.append(clean_sender)
+
                 firebase.set_document(
                     mandate_path,
                     {
                         "telegram_users_mapping": {room_name: chat_id},
                         "telegram_room_assignments": {room_name: sender_username},
+                        "telegram_auth_users": auth_users,
                     },
                     merge=True
                 )
+
+                # Propagate full telegram_users_mapping to all authorized telegram users
+                updated_mandate = firebase.get_document(mandate_path) or {}
+                full_mapping = updated_mandate.get("telegram_users_mapping", {})
+                if full_mapping:
+                    _sync_mapping_to_telegram_users(firebase, mandate_path, auth_users, full_mapping)
 
                 # Invalidate cache
                 cache = get_firebase_cache_manager()
@@ -288,6 +334,10 @@ async def handle_telegram_remove_user(
                 merge=True
             )
 
+            # Sync updated mapping to remaining authorized users
+            if auth_users and users_mapping:
+                _sync_mapping_to_telegram_users(firebase, mandate_path, auth_users, users_mapping)
+
         # Invalidate cache
         cache = get_firebase_cache_manager()
         await cache.invalidate_cache(uid, company_id, "company_settings", "full_data")
@@ -364,6 +414,11 @@ async def handle_telegram_reset_room(
             },
             merge=True
         )
+
+        # Sync updated mapping to all authorized telegram users
+        auth_users = mandate_data.get("telegram_auth_users", [])
+        if auth_users and users_mapping:
+            _sync_mapping_to_telegram_users(firebase, mandate_path, auth_users, users_mapping)
 
         # Invalidate cache
         cache = get_firebase_cache_manager()

@@ -74,7 +74,7 @@ class ChromaVectorService:
 
             # Configuration minimale qui fonctionne (sans headers/settings/tenant/database)
             self.chroma = chromadb.HttpClient(
-                host=chroma_host or '13.36.168.113',
+                host=chroma_host or '15.237.231.19',
                 port=chroma_port or '8000',
                 ssl=safe_env("CHROMA_SSL") == "True"
             )
@@ -780,7 +780,7 @@ class AsyncChromaVectorService:
             return None if value == "None" else value
 
         try:
-            chroma_host = safe_env("CHROMA_HOST") or '13.36.168.113'
+            chroma_host = safe_env("CHROMA_HOST") or '15.237.231.19'
             chroma_port = safe_env("CHROMA_PORT") or '8000'
 
             print(f"🔗 Connexion ChromaDB (async): {chroma_host}:{chroma_port}")

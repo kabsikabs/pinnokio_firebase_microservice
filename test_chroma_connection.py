@@ -26,7 +26,7 @@ def test_chroma_basic():
             value = os.getenv(key, default)
             return None if value == "None" else value
 
-        host = safe_env("CHROMA_HOST") or '13.36.168.113'
+        host = safe_env("CHROMA_HOST") or '15.237.231.19'
         port = safe_env("CHROMA_PORT") or '8000'
         ssl = safe_env("CHROMA_SSL") == "True"
 
@@ -65,7 +65,7 @@ def test_chroma_with_embeddings():
 
         # Configuration minimale qui fonctionne
         client = chromadb.HttpClient(
-            host='13.36.168.113',
+            host='15.237.231.19',
             port='8000',
             ssl=False
         )
