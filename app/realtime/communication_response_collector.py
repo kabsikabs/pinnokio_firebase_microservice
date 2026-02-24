@@ -242,10 +242,11 @@ class CommunicationResponseCollector:
 
     async def _resolve_telegram_user(self, username: str, mandate_path: str) -> tuple:
         """
-        Resout uid + company_id depuis telegram_users/{username}/authorized_mandates.
+        Resout uid + contact_space_id depuis telegram_users/{username} + mandate Firestore.
 
-        Les champs firebase_user_id et mandate_doc_id sont stockes par
-        create_telegram_user() (firebase_providers.py).
+        Le contact_space_id est le vrai identifiant company utilise partout dans le systeme
+        (session cache Level 2, resolve_client_by_contact_space, etc.).
+        On le lit directement depuis le document mandate Firestore.
         """
         if not username:
             return None, None
@@ -253,6 +254,8 @@ class CommunicationResponseCollector:
             from app.firebase_providers import get_firebase_management
 
             fm = get_firebase_management()
+
+            # 1. Resoudre uid depuis telegram_users/{username}
             doc_ref = fm.db.collection("telegram_users").document(username)
             doc = doc_ref.get()
             if not doc.exists:
@@ -262,15 +265,33 @@ class CommunicationResponseCollector:
             authorized = user_data.get("authorized_mandates", {})
             mandate_data = authorized.get(mandate_path, {})
             uid = mandate_data.get("firebase_user_id")
+            if not uid:
+                return None, None
 
-            # company_id: prefer mandate_doc_id if stored, else extract from mandate_path
-            company_id = mandate_data.get("mandate_doc_id")
-            if not company_id and mandate_path:
-                # mandate_path format: "companies/{company_id}" or similar
-                parts = mandate_path.strip("/").split("/")
-                company_id = parts[-1] if parts else None
+            # 2. Resoudre contact_space_id depuis le document mandate Firestore
+            #    mandate_path ex: "clients/{uid}/bo_clients/{client_doc}/mandates/{mandate_id}"
+            #    Le champ contact_space_id est la cle utilisee par le cache Level 2
+            contact_space_id = None
+            try:
+                mandate_doc = fm.db.document(mandate_path).get()
+                if mandate_doc.exists:
+                    contact_space_id = mandate_doc.to_dict().get("contact_space_id")
+            except Exception as e:
+                logger.warning("[RESPONSE_COLLECTOR] mandate doc read failed: %s", e)
 
-            return uid, company_id
+            if not contact_space_id:
+                logger.warning(
+                    "[RESPONSE_COLLECTOR] contact_space_id not found in mandate doc, "
+                    "falling back to mandate_doc_id for username=%s",
+                    username,
+                )
+                # Fallback: mandate_doc_id ou dernier segment du path
+                contact_space_id = mandate_data.get("mandate_doc_id")
+                if not contact_space_id:
+                    parts = mandate_path.strip("/").split("/")
+                    contact_space_id = parts[-1] if parts else None
+
+            return uid, contact_space_id
         except Exception as e:
             logger.error("[RESPONSE_COLLECTOR] resolve_telegram_user error: %s", e)
             return None, None

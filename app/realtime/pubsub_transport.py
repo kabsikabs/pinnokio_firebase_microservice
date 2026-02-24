@@ -123,7 +123,9 @@ class PubSubTransport:
         r = get_redis()
         ps = r.pubsub()
         # Mapping subscription -> Redis channel
-        channel = f"inbound:{subscription.replace('-backend-sub', '').replace('telegram-', '')}"
+        # "telegram-inbound-backend-sub" -> "inbound:telegram"
+        base = subscription.replace("-backend-sub", "").replace("-inbound", "")
+        channel = f"inbound:{base}"
         ps.subscribe(channel)
         logger.info("[TRANSPORT] redis subscribed to channel=%s", channel)
 
