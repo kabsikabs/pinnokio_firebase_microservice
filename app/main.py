@@ -174,6 +174,15 @@ async def on_shutdown():
     except Exception as e:
         logger.error("agentic_dispatch_listener_stop status=error error=%s", repr(e))
 
+    # Arrêter le CommunicationResponseCollector (canaux externes + PubSub)
+    try:
+        from .realtime.communication_response_collector import get_response_collector
+        collector = get_response_collector()
+        await collector.stop()
+        logger.info("communication_response_collector status=stopped")
+    except Exception as e:
+        logger.error("communication_response_collector_stop status=error error=%s", repr(e))
+
 
 @app.get("/healthz")
 def healthz():

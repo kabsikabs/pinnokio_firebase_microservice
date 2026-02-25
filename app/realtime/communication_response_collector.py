@@ -64,11 +64,28 @@ class CommunicationResponseCollector:
             )
 
     async def stop(self) -> None:
-        """Arrete tous les listeners."""
+        """Arrete tous les listeners et le transport PubSub."""
         self._running = False
         for task in self._tasks:
             task.cancel()
+        # Attendre que les tasks se terminent proprement
+        for task in self._tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning("[RESPONSE_COLLECTOR] task cleanup error: %s", e)
         self._tasks.clear()
+
+        # Arrêter les streaming pulls PubSub
+        try:
+            from app.realtime.pubsub_transport import get_pubsub_transport
+            transport = get_pubsub_transport()
+            transport.stop()
+        except Exception as e:
+            logger.warning("[RESPONSE_COLLECTOR] transport stop error: %s", e)
+
         logger.info("[RESPONSE_COLLECTOR] Stopped")
 
     # ── Google Chat ──
@@ -181,8 +198,15 @@ class CommunicationResponseCollector:
         thread_key = f"tg_{abs(chat_id)}_{module}"
 
         if msg_type == "message":
-            # Message texte -> enqueue vers Worker LLM
+            # Verifier si un wizard attend un text_input
             text = response.get("text", "")
+            wizard_handled = await self._check_wizard_text_input(
+                chat_id, text, uid, company_id, mandate_path,
+            )
+            if wizard_handled:
+                return
+
+            # Message texte standard -> enqueue vers Worker LLM
             from app.llm_service.llm_gateway import get_llm_gateway
 
             gateway = get_llm_gateway()
@@ -201,8 +225,16 @@ class CommunicationResponseCollector:
             )
 
         elif msg_type == "callback":
-            # Callback (clic bouton) -> convertir en CARD_CLICKED standard
             callback_data = response.get("data", "")
+
+            # Wizard callback (prefix "w:")
+            if callback_data.startswith("w:"):
+                await self._handle_wizard_callback(
+                    callback_data, chat_id, uid, company_id, mandate_path,
+                )
+                return
+
+            # Callback standard (clic bouton) -> convertir en CARD_CLICKED
             # Parse callback_data: "card_id:action_name:value" ou "card_id:action_name"
             parts = callback_data.split(":", 2)
             card_id = parts[0] if parts else "unknown"
@@ -331,6 +363,235 @@ class CommunicationResponseCollector:
         except Exception as e:
             logger.error("[RESPONSE_COLLECTOR] telegram_to_standard failed: %s", e)
             return None
+
+    # ── Wizard multi-step ──
+
+    async def _handle_wizard_callback(
+        self,
+        callback_data: str,
+        chat_id: int,
+        uid: str,
+        company_id: str,
+        mandate_path: str,
+    ) -> None:
+        """
+        Traite un callback wizard (clic bouton sur une etape).
+
+        callback_data format: "w:{wizard_id}:{step_idx}:{value}"
+        Charge l'etat wizard, stocke la selection, avance ou complete.
+        """
+        parts = callback_data.split(":", 3)
+        if len(parts) < 4:
+            logger.warning("[RESPONSE_COLLECTOR] Invalid wizard callback: %s", callback_data)
+            return
+
+        _, wizard_id, step_idx_str, value = parts
+        try:
+            step_idx = int(step_idx_str)
+        except ValueError:
+            logger.warning("[RESPONSE_COLLECTOR] Invalid wizard step index: %s", step_idx_str)
+            return
+
+        # Charger l'etat wizard depuis Redis
+        from app.redis_client import get_redis
+        from app.realtime.communication_dispatcher import WIZARD_PREFIX, WIZARD_TTL
+
+        redis = get_redis()
+        key = f"{WIZARD_PREFIX}:{chat_id}:{wizard_id}"
+        raw = redis.get(key)
+        if not raw:
+            logger.warning("[RESPONSE_COLLECTOR] Wizard expired or not found: %s", key)
+            return
+
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        state = json.loads(raw)
+        steps = state["steps"]
+
+        # Verifier que le step correspond
+        if step_idx != state["current_step"]:
+            logger.warning(
+                "[RESPONSE_COLLECTOR] Wizard step mismatch: expected=%d got=%d wiz=%s",
+                state["current_step"], step_idx, wizard_id,
+            )
+            return
+
+        # Stocker la selection
+        if value == "__skip__":
+            steps[step_idx]["selected"] = ""
+        else:
+            steps[step_idx]["selected"] = value
+
+        logger.info(
+            "[RESPONSE_COLLECTOR] Wizard step %d/%d selected: %s=%s wiz=%s",
+            step_idx + 1, len(steps), steps[step_idx]["field"], value, wizard_id,
+        )
+
+        # Avancer
+        state["current_step"] = step_idx + 1
+
+        if state["current_step"] >= len(steps):
+            # Toutes les etapes sont completes → finaliser
+            redis.delete(key)
+            redis.delete(f"{WIZARD_PREFIX}_active:{chat_id}")
+            await self._complete_wizard(state, uid, company_id, mandate_path)
+        else:
+            # Sauvegarder l'etat mis a jour et envoyer l'etape suivante
+            redis.setex(key, WIZARD_TTL, json.dumps(state))
+
+            # Si la prochaine etape est text_input, mettre a jour le pointeur actif
+            next_step = steps[state["current_step"]]
+            if next_step["type"] == "text_input":
+                redis.setex(f"{WIZARD_PREFIX}_active:{chat_id}", WIZARD_TTL, wizard_id)
+
+            from app.realtime.communication_dispatcher import get_communication_dispatcher
+            dispatcher = get_communication_dispatcher()
+            await dispatcher.send_wizard_step(state)
+
+    async def _check_wizard_text_input(
+        self,
+        chat_id: int,
+        text: str,
+        uid: str,
+        company_id: str,
+        mandate_path: str,
+    ) -> bool:
+        """
+        Verifie si un wizard attend un text_input pour ce chat_id.
+
+        Si oui, capture le texte, avance le wizard, et retourne True.
+        Si non, retourne False (le message sera traite normalement).
+        """
+        from app.redis_client import get_redis
+        from app.realtime.communication_dispatcher import WIZARD_PREFIX, WIZARD_TTL
+
+        redis = get_redis()
+        active_key = f"{WIZARD_PREFIX}_active:{chat_id}"
+        wizard_id = redis.get(active_key)
+        if not wizard_id:
+            return False
+
+        if isinstance(wizard_id, bytes):
+            wizard_id = wizard_id.decode()
+
+        key = f"{WIZARD_PREFIX}:{chat_id}:{wizard_id}"
+        raw = redis.get(key)
+        if not raw:
+            redis.delete(active_key)
+            return False
+
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        state = json.loads(raw)
+        steps = state["steps"]
+        current = state["current_step"]
+
+        if current >= len(steps):
+            return False
+
+        # Verifier que l'etape courante attend du texte
+        if steps[current]["type"] != "text_input":
+            return False
+
+        # Capturer le texte comme valeur du champ
+        steps[current]["selected"] = text
+        state["current_step"] = current + 1
+
+        logger.info(
+            "[RESPONSE_COLLECTOR] Wizard text_input captured step=%d field=%s len=%d wiz=%s",
+            current + 1, steps[current]["field"], len(text), wizard_id,
+        )
+
+        if state["current_step"] >= len(steps):
+            # Toutes les etapes completes → finaliser
+            redis.delete(key)
+            redis.delete(active_key)
+            await self._complete_wizard(state, uid, company_id, mandate_path)
+        else:
+            # Sauvegarder et avancer
+            redis.setex(key, WIZARD_TTL, json.dumps(state))
+            from app.realtime.communication_dispatcher import get_communication_dispatcher
+            dispatcher = get_communication_dispatcher()
+            await dispatcher.send_wizard_step(state)
+
+        return True
+
+    async def _complete_wizard(
+        self,
+        state: Dict[str, Any],
+        uid: str,
+        company_id: str,
+        mandate_path: str,
+    ) -> None:
+        """
+        Agrege toutes les selections du wizard et publie CARD_CLICKED_PINNOKIO.
+
+        Construit le payload au format exact attendu par les workers externes
+        (ex: process_klk_router_approval_card qui extrait pinnokio_func,
+        second_dropdown, instructions).
+        """
+        from app.realtime.card_transformer import (
+            CardTransformer,
+            EXTERNAL_WORKER_CARD_IDS,
+        )
+
+        card_id = state["card_id"]
+        thread_key = state["thread_key"]
+        chat_id = state["chat_id"]
+
+        # Construire widget_values depuis les selections
+        widget_values = {"action": "approve"}
+        for step in state["steps"]:
+            widget_values[step["field"]] = step.get("selected", "")
+
+        # Construire le payload CARD_CLICKED_PINNOKIO standard
+        standard = CardTransformer.build_card_clicked_payload(
+            card_id=card_id,
+            widget_values=widget_values,
+            thread_key=thread_key,
+            user_id=uid,
+        )
+        standard["communication_chat_type"] = "telegram"
+        standard["external_thread_id"] = str(chat_id)
+
+        # Envoyer confirmation a l'utilisateur sur Telegram
+        summary_parts = []
+        for step in state["steps"]:
+            val = step.get("selected", "")
+            summary_parts.append(f"- {step['label']}: {val if val else '(vide)'}")
+        summary = "\n".join(summary_parts)
+
+        from app.realtime.communication_dispatcher import get_communication_dispatcher
+        dispatcher = get_communication_dispatcher()
+        await dispatcher._publish_outbound("telegram", {
+            "action": "send_message",
+            "chat_id": chat_id,
+            "text": f"Reponse enregistree:\n{summary}",
+            "mandate_path": mandate_path,
+        })
+
+        # Router vers le worker
+        if card_id in EXTERNAL_WORKER_CARD_IDS:
+            await self._publish_response_to_worker(uid, company_id, thread_key, standard)
+        else:
+            from app.llm_service.llm_gateway import get_llm_gateway
+            gateway = get_llm_gateway()
+            await gateway.enqueue_card_response(
+                user_id=uid,
+                collection_name=company_id,
+                thread_key=thread_key,
+                card_name=card_id,
+                card_message_id="",
+                action=json.dumps(widget_values),
+                communication_chat_type="telegram",
+                external_thread_id=str(chat_id),
+            )
+
+        logger.info(
+            "[RESPONSE_COLLECTOR] Wizard completed card=%s thread=%s uid=%s values=%s",
+            card_id, thread_key, uid,
+            {s["field"]: s.get("selected", "") for s in state["steps"]},
+        )
 
     # ── Commun ──
 

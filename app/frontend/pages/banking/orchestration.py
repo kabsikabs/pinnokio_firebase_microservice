@@ -541,7 +541,7 @@ async def handle_banking_process(
                 "company_name": context.get("name", context.get("legal_name", company_id)),
                 "client_uuid": context.get("client_uuid", ""),
                 "dms_type": context.get("dms_type", "odoo"),
-                "communication_mode": context.get("chat_type", "pinnokio"),
+                "communication_mode": context.get("communication_chat_type", context.get("chat_type", "pinnokio")),
                 "log_communication_mode": context.get("communication_log_type", "pinnokio"),
                 "workflow_params": context.get("workflow_params", {}),
             },

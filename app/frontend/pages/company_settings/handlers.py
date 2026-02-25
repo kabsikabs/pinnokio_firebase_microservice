@@ -521,18 +521,28 @@ class CompanySettingsHandlers:
 
             rooms_mapping = data.get("telegram_users_mapping", {})
             room_assignments = data.get("telegram_room_assignments", {})
+            telegram_auth_users = data.get("telegram_auth_users", [])
 
             # Build config for each room
-            rooms = ["accounting_room", "router_room", "banker_room", "approval_room"]
+            rooms = ["accountbookeeper_room", "router_room", "banker_room", "general_administration_room"]
             config = {}
 
             for room in rooms:
+                # Normalize authorizedUsers to list (legacy string → list migration)
+                raw_users = room_assignments.get(room, [])
+                if isinstance(raw_users, str):
+                    authorized = [raw_users] if raw_users else []
+                else:
+                    authorized = raw_users if raw_users else []
+
                 config[room] = {
                     "roomId": rooms_mapping.get(room, ""),
-                    "userIdentifier": room_assignments.get(room, ""),
+                    "userIdentifier": authorized[0] if authorized else "",
                     "isConfigured": bool(rooms_mapping.get(room)),
+                    "authorizedUsers": authorized,
                 }
 
+            config["telegramAuthUsers"] = telegram_auth_users
             return config
         except Exception as e:
             logger.error(f"Error fetching rooms config: {e}")
@@ -769,6 +779,8 @@ class CompanySettingsHandlers:
             elif section == "communication":
                 firebase_data["log_type"] = data.get("communicationMode")
                 firebase_data["chat_type"] = data.get("chatType")
+                # Keep communication_chat_type in sync (used by Worker LLM pipeline + communication_dispatcher)
+                firebase_data["communication_chat_type"] = data.get("chatType")
 
             elif section == "accounting":
                 firebase_data["gl_type"] = data.get("glType")

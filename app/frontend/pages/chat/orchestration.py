@@ -324,8 +324,11 @@ async def handle_session_select(
         # ─────────────────────────────────────────────────
         chat_handlers = get_chat_handlers()
 
-        # Get mode from payload (defaults to "chats" for backwards compatibility)
-        mode = payload.get("mode", "chats")
+        # Derive mode from chat_mode: job-monitoring chats live in active_chats
+        if chat_mode in ACTIVE_CHAT_MODES:
+            mode = "active_chats"
+        else:
+            mode = payload.get("mode", "chats")
 
         history_result = await chat_handlers.load_history(
             uid=uid,
@@ -914,6 +917,53 @@ from app.realtime.card_transformer import (
 )
 
 
+async def _clear_messenger_notif(uid: str, thread_key: str) -> bool:
+    """
+    Clear the messenger notification for a job_chat thread after card click.
+    Reads the tracking key from Redis, deletes the RTDB entry, and publishes removal event.
+
+    Args:
+        uid: Firebase user ID
+        thread_key: Job chat thread key
+
+    Returns:
+        True if cleared successfully, False otherwise
+    """
+    try:
+        redis_client = get_redis()
+        tracking_key = f"messenger_notif:{uid}:{thread_key}"
+        notif_message_id = redis_client.get(tracking_key)
+
+        if not notif_message_id:
+            logger.debug("[MESSENGER_NOTIF] No tracking key found uid=%s thread=%s", uid, thread_key)
+            return False
+
+        if isinstance(notif_message_id, bytes):
+            notif_message_id = notif_message_id.decode("utf-8")
+
+        # Delete from RTDB via FirebaseRealtimeChat
+        from app.firebase_providers import get_firebase_realtime
+        realtime = get_firebase_realtime()
+        realtime.delete_direct_message(uid, notif_message_id)
+
+        # Remove tracking key from Redis
+        redis_client.delete(tracking_key)
+
+        # Publish removal event via PubSub for real-time WS update
+        from app.realtime.pubsub_helper import publish_messenger_remove
+        await publish_messenger_remove(uid, notif_message_id)
+
+        logger.info(
+            "[MESSENGER_NOTIF] Cleared notif uid=%s thread=%s notif_id=%s",
+            uid, thread_key, notif_message_id
+        )
+        return True
+
+    except Exception as e:
+        logger.warning("[MESSENGER_NOTIF] Failed to clear notif uid=%s thread=%s: %s", uid, thread_key, e)
+        return False
+
+
 async def _handle_external_card_response(
     uid: str,
     company_id: str,
@@ -1008,14 +1058,16 @@ async def _handle_external_card_response(
         try:
             redis_client = get_redis()
             redis_channel = f"user:{uid}/{company_id}/job_chats/{thread_key}/messages"
-            redis_client.publish(redis_channel, json.dumps({
-                "type": "job_chat_message",
+            # Publier card_response_data directement au top-level
+            # Le worker filtre sur data.get('message_type') et lit
+            # data.get('type'), data.get('common'), data.get('message'), etc.
+            redis_payload = {
+                **card_response_data,
                 "job_id": thread_key,
                 "collection_name": company_id,
                 "thread_key": thread_key,
-                "message": card_response_data,
-                "timestamp": timestamp,
-            }, default=str))
+            }
+            redis_client.publish(redis_channel, json.dumps(redis_payload, default=str))
             logger.info(
                 "[CARD_EXTERNAL] Redis publish OK channel=%s invokedFunction=%s",
                 redis_channel, invoked_function
@@ -1039,6 +1091,9 @@ async def _handle_external_card_response(
                 "thread_key": thread_key,
             }
         })
+
+        # --- Clear messenger notification ---
+        await _clear_messenger_notif(uid, thread_key)
 
         return {
             "type": "chat.card_clicked",

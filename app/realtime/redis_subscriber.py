@@ -42,6 +42,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, Callable
 from redis.client import PubSub
 
@@ -68,6 +69,17 @@ from app.llm_service.redis_namespaces import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Mapping card_id → department for messenger notifications
+CARD_ID_TO_DEPARTMENT = {
+    "klk_router_card": "Router",
+    "klk_router_approval_card": "Router",
+    "four_eyes_approval_card": "Router",
+    "approval_card": "APbookeeper",
+    "job_menu_card": "APbookeeper",
+    "bank_list_file_card": "Bankbookeeper",
+    "bank_file_list_card": "Bankbookeeper",
+}
 
 # ============================================
 # Extraction des Informations du Canal
@@ -1672,14 +1684,28 @@ class RedisSubscriber:
                     )
 
                 # Dispatch vers canaux externes (google_chat, telegram) si mandate_path present
+                # communication_chat_type et department viennent du payload du worker externe
                 mandate_path = message_data.get("mandate_path")
-                if mandate_path:
+                comm_chat_type = message_data.get("communication_chat_type", "pinnokio")
+                dept = message_data.get("department", "Router")
+                if mandate_path and comm_chat_type != "pinnokio":
                     from app.realtime.communication_dispatcher import get_communication_dispatcher
                     dispatcher = get_communication_dispatcher()
                     asyncio.create_task(
                         dispatcher.dispatch_message(
                             uid, mandate_path, collection_name,
-                            thread_key, message, message_mode="job_chats"
+                            thread_key, message,
+                            department=dept,
+                            message_mode="job_chats",
+                            communication_chat_type=comm_chat_type,
+                        )
+                    )
+
+                # --- Messenger notification (only for pinnokio channel) ---
+                if comm_chat_type == "pinnokio" and card_data:
+                    asyncio.create_task(
+                        self._create_messenger_notif(
+                            uid, collection_name, thread_key, card_data, message
                         )
                     )
 
@@ -1711,6 +1737,96 @@ class RedisSubscriber:
             logger.error(
                 "[REDIS_SUBSCRIBER] job_chat_handler_error channel=%s uid=%s error=%s",
                 channel, uid, str(e), exc_info=True
+            )
+
+    async def _create_messenger_notif(
+        self,
+        uid: str,
+        collection_name: str,
+        thread_key: str,
+        card_data: Dict[str, Any],
+        message: Dict[str, Any],
+    ) -> None:
+        """
+        Create a messenger notification (direct_message_notif) when a CARD/FOLLOW_CARD
+        is received from an external worker. Writes to RTDB and publishes via Redis PubSub.
+
+        Args:
+            uid: Firebase user ID
+            collection_name: Company/collection ID
+            thread_key: Job chat thread key
+            card_data: Extracted interactive card data (from CardTransformer)
+            message: Original message dict from the worker
+        """
+        try:
+            card_id = card_data.get("cardId", "")
+            function_name = CARD_ID_TO_DEPARTMENT.get(card_id, "Chat")
+
+            # Build human-readable message (never raw card JSON)
+            DEPARTMENT_MESSAGES = {
+                "Router": "Approval required for document routing",
+                "APbookeeper": "Approval required for invoice processing",
+                "Bankbookeeper": "Action required on bank transaction",
+            }
+            human_message = DEPARTMENT_MESSAGES.get(function_name, "Action required")
+
+            notif_data = {
+                "job_id": thread_key,
+                "function_name": function_name,
+                "collection_id": collection_name,
+                "collection_name": collection_name,
+                "status": "Action required",
+                "message": human_message,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "expires_at": (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(),
+            }
+
+            # Enrich from task_manager cache if available
+            try:
+                from app.llm_service.redis_namespaces import build_business_key
+                cache_key = build_business_key(uid, collection_name, "task_manager")
+                cached = self.redis.get(cache_key)
+                if cached:
+                    import json as _json
+                    cache_items = _json.loads(cached) if isinstance(cached, (str, bytes)) else cached
+                    if isinstance(cache_items, list):
+                        for item in cache_items:
+                            if isinstance(item, dict) and item.get("job_id") == thread_key:
+                                notif_data["file_name"] = item.get("file_name", "")
+                                notif_data["file_id"] = item.get("file_id", "")
+                                notif_data["mandate_path"] = item.get("mandate_path", "")
+                                # Enrich message with file name if available
+                                file_name = item.get("file_name", "")
+                                if file_name:
+                                    notif_data["message"] = f"{human_message}: {file_name}"
+                                break
+            except Exception:
+                pass  # Cache enrichment is best-effort
+
+            # Write to RTDB via FirebaseRealtimeChat (send_direct_message is on this class)
+            from app.firebase_providers import get_firebase_realtime
+            realtime = get_firebase_realtime()
+            notif_message_id = realtime.send_direct_message(uid, uid, notif_data)
+
+            if notif_message_id:
+                # Store tracking in Redis with 2h TTL
+                tracking_key = f"messenger_notif:{uid}:{thread_key}"
+                self.redis.set(tracking_key, notif_message_id, ex=7200)
+
+                logger.info(
+                    "[MESSENGER_NOTIF] Created notif uid=%s thread=%s card=%s dept=%s notif_id=%s",
+                    uid, thread_key, card_id, function_name, notif_message_id
+                )
+            else:
+                logger.warning(
+                    "[MESSENGER_NOTIF] Failed to create notif uid=%s thread=%s",
+                    uid, thread_key
+                )
+
+        except Exception as e:
+            logger.error(
+                "[MESSENGER_NOTIF] Error creating notif uid=%s thread=%s error=%s",
+                uid, thread_key, str(e), exc_info=True
             )
 
 

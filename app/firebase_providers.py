@@ -308,57 +308,9 @@ class FirebaseManagement:
                 })
                 print(f"✅ Mandat {mandate_path} supprimé pour {telegram_username}")
             
-            if firebase_user_id and mandate_doc_id:
-                try:
-                    # Construire le chemin du document mandat depuis mandate_path
-                    mandate_doc_path = f"{mandate_path}"
-                    mandate_doc_ref = self.db.document(mandate_doc_path)
-                    
-                    # Récupérer le document mandat
-                    mandate_doc = mandate_doc_ref.get()
-                    if mandate_doc.exists:
-                        mandate_doc_data = mandate_doc.to_dict()
-                        
-                        # Préparer les mises à jour
-                        updates = {}
-                        
-                        # A. Supprimer de telegram_auth_users
-                        telegram_auth_users = mandate_doc_data.get('telegram_auth_users', [])
-                        if telegram_username in telegram_auth_users:
-                            telegram_auth_users.remove(telegram_username)
-                            updates['telegram_auth_users'] = telegram_auth_users
-                            print(f"✅ {telegram_username} supprimé de telegram_auth_users")
-                        
-                        # B. Supprimer la room assignee a cet utilisateur dans les mappings
-                        telegram_room_assignments = mandate_doc_data.get('telegram_room_assignments', {})
-                        telegram_users_mapping = mandate_doc_data.get('telegram_users_mapping', {})
-                        room_to_remove = None
-                        for rname, rusername in telegram_room_assignments.items():
-                            if rusername.replace("@", "").strip() == telegram_username.replace("@", "").strip():
-                                room_to_remove = rname
-                                break
-                        if room_to_remove:
-                            if room_to_remove in telegram_users_mapping:
-                                del telegram_users_mapping[room_to_remove]
-                                updates['telegram_users_mapping'] = telegram_users_mapping
-                            if room_to_remove in telegram_room_assignments:
-                                del telegram_room_assignments[room_to_remove]
-                                updates['telegram_room_assignments'] = telegram_room_assignments
-                            print(f"✅ Room {room_to_remove} de {telegram_username} supprimee des mappings")
-                        
-                        # Appliquer les mises à jour si nécessaire
-                        if updates:
-                            mandate_doc_ref.update(updates)
-                            print(f"✅ Document mandat {mandate_path} nettoyé")
-                        else:
-                            print(f"⚠️ Rien à nettoyer dans le document mandat")
-                            
-                    else:
-                        print(f"⚠️ Document mandat non trouvé: {mandate_doc_path}")
-                        
-                except Exception as e:
-                    print(f"⚠️ Erreur lors de la mise à jour du document mandat: {str(e)}")
-                    # Ne pas faire échouer la suppression principale pour cette erreur
+            # NOTE: Mandate document cleanup (auth_users, room_assignments, users_mapping)
+            # is handled by telegram_handler.py handle_telegram_remove_user() BEFORE calling this method.
+            # This method only manages the telegram_users/{username} collection document.
             
             return True
             
@@ -11052,17 +11004,18 @@ class FirebaseRealtimeChat:
     def create_chat(self,user_id: str, space_code: str, thread_name: str, mode: str = 'chats', chat_mode: str = 'general_chat',thread_key:str=None) -> dict:
         """
         Crée un nouveau thread de chat dans Firebase Realtime Database.
-        
+        Si le thread existe déjà, met à jour les metadata sans écraser les messages.
+
         Args:
             space_code (str): Code de l'espace (typiquement le companies_search_id)
             thread_name (str): Nom du nouveau thread/chat
             mode (str): Mode de groupement ('job_chats' ou 'chats')
             chat_mode (str): Mode de fonctionnement du chat ('general_chat', 'onboarding_chat', etc.)
-            
+
         Returns:
             dict: Informations sur le thread créé (thread_key, success, etc.)
         """
-        
+
         try:
             if thread_key:
                 # Utiliser le thread_key existant (pour le cas "renommer" un chat vierge)
@@ -11073,19 +11026,31 @@ class FirebaseRealtimeChat:
                 print(f"📝 Génération d'un nouveau thread_key: {thread_key}")
             # Construire le chemin complet pour le nouveau thread
             path = f"{space_code}/{mode}/{thread_key}"
-            
-            # Créer la structure initiale du thread
-            thread_data = {
-                "thread_name": thread_name,
-                "thread_key": thread_key,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "created_by": user_id,
-                "chat_mode": chat_mode,  # Ajouter le chat_mode dans les données du thread
-                "messages": {}  # Messages vides au départ
+
+            # Check if thread already exists (avoid overwriting messages)
+            existing = self.db.child(path).get()
+
+            if existing and isinstance(existing, dict) and existing.get("messages"):
+                # Thread exists with messages — update metadata only, preserve messages
+                print(f"📝 Thread existant avec messages, mise à jour metadata uniquement: {thread_key}")
+                metadata = {
+                    "thread_name": thread_name,
+                    "thread_key": thread_key,
+                    "chat_mode": chat_mode,
+                    "created_by": user_id,
                 }
-            
-            # Enregistrer le thread dans Firebase
-            result = self.db.child(path).set(thread_data)
+                result = self.db.child(path).update(metadata)
+            else:
+                # New thread or empty thread — create with full structure
+                thread_data = {
+                    "thread_name": thread_name,
+                    "thread_key": thread_key,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "created_by": user_id,
+                    "chat_mode": chat_mode,
+                    "messages": {}
+                }
+                result = self.db.child(path).set(thread_data)
             
             # Vérifier si l'opération a réussi (Firebase renvoie None en cas de succès)
             success = result is None

@@ -159,11 +159,20 @@ async def handle_telegram_start_registration(
                 if clean_sender not in auth_users:
                     auth_users.append(clean_sender)
 
+                # Build multi-user room assignments (list format)
+                current_assignments = mandate_data.get("telegram_room_assignments", {})
+                existing = current_assignments.get(room_name, [])
+                # Legacy migration: string → list
+                if isinstance(existing, str):
+                    existing = [existing] if existing else []
+                if sender_username not in existing:
+                    existing.append(sender_username)
+
                 firebase.set_document(
                     mandate_path,
                     {
                         "telegram_users_mapping": {room_name: chat_id},
-                        "telegram_room_assignments": {room_name: sender_username},
+                        "telegram_room_assignments": {room_name: existing},
                         "telegram_auth_users": auth_users,
                     },
                     merge=True
@@ -179,7 +188,28 @@ async def handle_telegram_start_registration(
                 cache = get_firebase_cache_manager()
                 await cache.invalidate_cache(uid, company_id, "company_settings", "full_data")
 
-                # Send success event
+                # Build updated rooms config inline (avoid stale cache)
+                updated_mandate_data = firebase.get_document(mandate_path) or {}
+                updated_assignments = updated_mandate_data.get("telegram_room_assignments", {})
+                updated_mapping = updated_mandate_data.get("telegram_users_mapping", {})
+                updated_auth = updated_mandate_data.get("telegram_auth_users", [])
+                all_rooms = ["accountbookeeper_room", "router_room", "banker_room", "general_administration_room"]
+                updated_rooms_config = {}
+                for r in all_rooms:
+                    raw = updated_assignments.get(r, [])
+                    if isinstance(raw, str):
+                        authorized = [raw] if raw else []
+                    else:
+                        authorized = raw if raw else []
+                    updated_rooms_config[r] = {
+                        "roomId": updated_mapping.get(r, ""),
+                        "userIdentifier": authorized[0] if authorized else "",
+                        "isConfigured": bool(updated_mapping.get(r)),
+                        "authorizedUsers": authorized,
+                    }
+                updated_rooms_config["telegramAuthUsers"] = updated_auth
+
+                # Send success event with fresh data
                 await hub.broadcast(uid, {
                     "type": WS_EVENTS.COMPANY_SETTINGS.TELEGRAM_REGISTRATION_SUCCESS,
                     "payload": {
@@ -187,6 +217,7 @@ async def handle_telegram_start_registration(
                         "chat_id": chat_id,
                         "username": sender_username,
                         "company_id": company_id,
+                        "communicationRoomsConfig": updated_rooms_config,
                     }
                 })
 
@@ -304,45 +335,81 @@ async def handle_telegram_remove_user(
     try:
         firebase = get_firebase_management()
 
-        # Delete from telegram_users collection
-        firebase.delete_telegram_user(clean_username, mandate_path)
+        # Get current mandate data
+        mandate_data = firebase.get_document(mandate_path) or {}
+        users_mapping = mandate_data.get("telegram_users_mapping", {})
+        room_assignments = mandate_data.get("telegram_room_assignments", {})
+        auth_users = mandate_data.get("telegram_auth_users", [])
 
-        # Update mandate document to clear room mapping if specified
-        if room_name:
-            # Get current mappings
-            mandate_data = firebase.get_document(mandate_path) or {}
-            users_mapping = mandate_data.get("telegram_users_mapping", {})
-            room_assignments = mandate_data.get("telegram_room_assignments", {})
-            auth_users = mandate_data.get("telegram_auth_users", [])
-
-            # Remove from mappings
-            if room_name in users_mapping:
-                del users_mapping[room_name]
-            if room_name in room_assignments:
+        # Step 1: Remove user from the target room only
+        if room_name and room_name in room_assignments:
+            current = room_assignments[room_name]
+            # Legacy migration: string → list
+            if isinstance(current, str):
+                current = [current] if current else []
+            # Remove matching username (with or without @)
+            current = [u for u in current if u.replace("@", "").strip() != clean_username]
+            if current:
+                room_assignments[room_name] = current
+            else:
+                # Last user removed from this room — clear room entirely
                 del room_assignments[room_name]
+                if room_name in users_mapping:
+                    del users_mapping[room_name]
+
+        # Step 2: Check if user is still in ANY other room
+        user_still_in_rooms = False
+        for rname, rusers in room_assignments.items():
+            if isinstance(rusers, str):
+                rusers = [rusers]
+            if any(u.replace("@", "").strip() == clean_username for u in rusers):
+                user_still_in_rooms = True
+                break
+
+        # Step 3: Only remove from auth_users + telegram_users collection if user is in NO room
+        if not user_still_in_rooms:
             if clean_username in auth_users:
                 auth_users.remove(clean_username)
+            # Delete the telegram_users/{username} doc only when fully removed
+            firebase.delete_telegram_user(clean_username, mandate_path)
 
-            # Update document
-            firebase.set_document(
-                mandate_path,
-                {
-                    "telegram_users_mapping": users_mapping,
-                    "telegram_room_assignments": room_assignments,
-                    "telegram_auth_users": auth_users,
-                },
-                merge=True
-            )
+        # Step 4: Save updated mandate fields
+        firebase.set_document(
+            mandate_path,
+            {
+                "telegram_users_mapping": users_mapping,
+                "telegram_room_assignments": room_assignments,
+                "telegram_auth_users": auth_users,
+            },
+            merge=True
+        )
 
-            # Sync updated mapping to remaining authorized users
-            if auth_users and users_mapping:
-                _sync_mapping_to_telegram_users(firebase, mandate_path, auth_users, users_mapping)
+        # Sync updated mapping to remaining authorized users
+        if auth_users and users_mapping:
+            _sync_mapping_to_telegram_users(firebase, mandate_path, auth_users, users_mapping)
 
         # Invalidate cache
         cache = get_firebase_cache_manager()
         await cache.invalidate_cache(uid, company_id, "company_settings", "full_data")
 
-        # Send success event
+        # Build updated rooms config inline (avoid stale cache on re-fetch)
+        all_rooms = ["accountbookeeper_room", "router_room", "banker_room", "general_administration_room"]
+        updated_rooms_config = {}
+        for r in all_rooms:
+            raw = room_assignments.get(r, [])
+            if isinstance(raw, str):
+                authorized = [raw] if raw else []
+            else:
+                authorized = raw if raw else []
+            updated_rooms_config[r] = {
+                "roomId": users_mapping.get(r, ""),
+                "userIdentifier": authorized[0] if authorized else "",
+                "isConfigured": bool(users_mapping.get(r)),
+                "authorizedUsers": authorized,
+            }
+        updated_rooms_config["telegramAuthUsers"] = auth_users
+
+        # Send success event with fresh data
         await hub.broadcast(uid, {
             "type": WS_EVENTS.COMPANY_SETTINGS.TELEGRAM_USER_REMOVED,
             "payload": {
@@ -350,6 +417,7 @@ async def handle_telegram_remove_user(
                 "username": clean_username,
                 "room_name": room_name,
                 "company_id": company_id,
+                "communicationRoomsConfig": updated_rooms_config,
             }
         })
 

@@ -417,7 +417,7 @@ async def handle_routing_process(
                 "client_uuid": context.get("client_uuid", ""),
                 # Communication settings (pour jobbeur payload)
                 "dms_type": context.get("dms_type", "odoo"),
-                "communication_mode": context.get("chat_type", "pinnokio"),
+                "communication_mode": context.get("communication_chat_type", context.get("chat_type", "pinnokio")),
                 "log_communication_mode": context.get("communication_log_type", "pinnokio"),
                 # Workflow defaults (from company settings)
                 "router_approval_required": context.get("router_approval_required", False),

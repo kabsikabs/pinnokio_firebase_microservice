@@ -33,6 +33,7 @@ class PubSubTransport:
         self._publisher = None
         self._subscriber = None
         self._mode = TRANSPORT_MODE
+        self._streaming_pull_futures = []
 
         # Auto-fallback to redis if no GCP project
         if self._mode == "pubsub" and not GOOGLE_PROJECT_ID:
@@ -40,6 +41,17 @@ class PubSubTransport:
             self._mode = "redis"
 
         logger.info("[TRANSPORT] Initialized mode=%s", self._mode)
+
+    def stop(self):
+        """Cancel all active streaming pulls for clean shutdown."""
+        for future in self._streaming_pull_futures:
+            future.cancel()
+            try:
+                future.result(timeout=5)
+            except Exception:
+                pass
+        self._streaming_pull_futures.clear()
+        logger.info("[TRANSPORT] All streaming pulls stopped")
 
     def publish(self, topic: str, message: Dict[str, Any]) -> None:
         """Publie un message JSON sur un topic."""
@@ -85,8 +97,14 @@ class PubSubTransport:
             await self._subscribe_redis(subscription, callback)
 
     async def _subscribe_pubsub(self, subscription: str, callback: Callable):
-        """Streaming pull Google Pub/Sub (tourne en boucle async)."""
+        """Streaming pull Google Pub/Sub avec ACK à la consommation.
+
+        - ACK uniquement après traitement réussi du callback
+        - NACK en cas d'erreur ou timeout → redelivery automatique par Pub/Sub
+        - FlowControl pour limiter les messages en vol (scaling-safe)
+        """
         from google.cloud import pubsub_v1
+        from google.cloud.pubsub_v1 import types
 
         if not self._subscriber:
             self._subscriber = pubsub_v1.SubscriberClient()
@@ -94,17 +112,48 @@ class PubSubTransport:
         sub_path = self._subscriber.subscription_path(GOOGLE_PROJECT_ID, subscription)
         loop = asyncio.get_event_loop()
 
+        # Configurable via env pour adapter au scaling
+        max_messages = int(os.getenv("PUBSUB_MAX_MESSAGES", "10"))
+        ack_timeout = int(os.getenv("PUBSUB_ACK_TIMEOUT", "60"))
+
+        flow_control = types.FlowControl(
+            max_messages=max_messages,
+        )
+
         def _sync_callback(message):
             try:
                 data = json.loads(message.data.decode("utf-8"))
-                loop.call_soon_threadsafe(asyncio.ensure_future, callback(data))
+                # Schedule le traitement async et ATTEND la complétion avant ACK
+                future = asyncio.run_coroutine_threadsafe(callback(data), loop)
+                future.result(timeout=ack_timeout)
                 message.ack()
+                logger.debug(
+                    "[TRANSPORT] message acked after processing sub=%s msg_id=%s",
+                    subscription, message.message_id,
+                )
+            except TimeoutError:
+                logger.error(
+                    "[TRANSPORT] processing timeout (%ds) sub=%s msg_id=%s — nacking for redelivery",
+                    ack_timeout, subscription, message.message_id,
+                )
+                message.nack()
             except Exception as e:
-                logger.error("[TRANSPORT] pubsub callback error: %s", e)
+                logger.error(
+                    "[TRANSPORT] callback error sub=%s msg_id=%s: %s — nacking for redelivery",
+                    subscription, message.message_id, e,
+                )
                 message.nack()
 
-        streaming_pull = self._subscriber.subscribe(sub_path, callback=_sync_callback)
-        logger.info("[TRANSPORT] pubsub subscribed to %s", subscription)
+        streaming_pull = self._subscriber.subscribe(
+            sub_path,
+            callback=_sync_callback,
+            flow_control=flow_control,
+        )
+        self._streaming_pull_futures.append(streaming_pull)
+        logger.info(
+            "[TRANSPORT] pubsub subscribed to %s (max_messages=%d, ack_timeout=%ds)",
+            subscription, max_messages, ack_timeout,
+        )
 
         # Block to keep the subscription alive
         try:

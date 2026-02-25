@@ -174,17 +174,19 @@ class CardTransformer:
             sel_type = sel.get("type", "DROPDOWN")
             items = [
                 {
-                    "text": item.get("text", ""),
-                    "value": item.get("value", item.get("text", "")),
+                    "text": str(item.get("text", "")),
+                    "value": str(item.get("value", item.get("text", ""))),
                 }
                 for item in sel.get("items", [])
             ]
+            raw_default = sel.get("value")
+            default_val = str(raw_default) if raw_default is not None else (items[0]["value"] if items else None)
             return {
                 "type": "multi_select" if sel_type == "MULTI_SELECT" else "dropdown",
                 "name": sel.get("name", ""),
                 "label": sel.get("label", ""),
                 "items": items,
-                "defaultValue": sel.get("value") or (items[0]["value"] if items else None),
+                "defaultValue": default_val,
             }
 
         # textInput
