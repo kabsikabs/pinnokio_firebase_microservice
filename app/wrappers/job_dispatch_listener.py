@@ -64,7 +64,9 @@ async def _listen_loop():
                 handle_reverse_reconciliation_dispatch,
             )
 
-            # Route reverse_reconciliation to dedicated handler (no notifs, no list changes)
+            # Route reverse_reconciliation TEST (scoring) → simplified handler (no notifs/cache)
+            # IMPORTANT: "apbookeeper_automated_reconciliation" does NOT contain "reverse_reconciliation"
+            # → it goes through handle_job_process (full pipeline with notifs/cache/WSS)
             if "reverse_reconciliation" in source:
                 result = await handle_reverse_reconciliation_dispatch(
                     uid=uid,

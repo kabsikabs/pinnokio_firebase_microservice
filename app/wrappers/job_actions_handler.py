@@ -329,9 +329,32 @@ async def handle_job_process(
     """
     config = JOB_TYPE_CONFIG.get(job_type, JOB_TYPE_CONFIG["router"])
     document_ids = payload.get("document_ids", [])
-    company_id = company_data.get("company_id") or payload.get("company_id")
+    company_id = (
+        company_data.get("company_id")
+        or company_data.get("collection_name")
+        or payload.get("company_id")
+        or payload.get("collection_name")
+    )
     mandate_path = company_data.get("mandate_path", "")
     company_name = company_data.get("company_name", company_id)
+
+    # Fallback: derive document_ids from jobs_data for inter-worker dispatches
+    # (workers send pre-built jobs_data without document_ids)
+    if not document_ids and payload.get("jobs_data"):
+        jobs_data_raw = payload["jobs_data"]
+        if job_type == "bankbookeeper":
+            for job_item in jobs_data_raw:
+                for tx in job_item.get("transactions", []):
+                    tid = tx.get("transaction_id") or tx.get("id")
+                    if tid:
+                        document_ids.append(str(tid))
+        else:
+            for job_item in jobs_data_raw:
+                jid = job_item.get("job_id") or job_item.get("drive_file_id")
+                if jid:
+                    document_ids.append(str(jid))
+        if document_ids:
+            logger.info(f"[JOB_ACTIONS] → document_ids derived from jobs_data: {len(document_ids)} items (job_type={job_type})")
 
     # Fallback: si mandate_path est vide, le récupérer depuis Firebase
     if not mandate_path and uid and company_id:
@@ -385,7 +408,7 @@ async def handle_job_process(
         aws_instance_id = f"aws_instance_id_{uuid.uuid4().hex[:8]}"
         pub_sub_id = f"klk_google_pubsub_id_{uuid.uuid4().hex[:8]}"
 
-        # Check if jobs_data is already prebuilt (agentic source)
+        # Check if jobs_data is already prebuilt (agentic source or inter-worker dispatch)
         if payload.get("jobs_data_prebuilt"):
             # Agentic source: jobs_data already resolved by the caller
             jobs_data = payload["jobs_data_prebuilt"]
@@ -396,8 +419,12 @@ async def handle_job_process(
                 payload=payload, company_data=company_data,
             )
             logger.info(f"[JOB_ACTIONS] → Built banker jobs_data ({len(jobs_data)} jobs)")
+        elif payload.get("jobs_data"):
+            # Inter-worker dispatch: jobs_data already built by the calling worker
+            jobs_data = payload["jobs_data"]
+            logger.info(f"[JOB_ACTIONS] → Using existing jobs_data from payload ({len(jobs_data)} items, source={source})")
         else:
-            # Generic builder for Router/AP (from cache)
+            # UI source: Generic builder for Router/AP (from cache)
             documents_info = await _get_documents_from_cache(
                 uid=uid,
                 company_id=company_id,
@@ -431,9 +458,22 @@ async def handle_job_process(
 
         # log_communication_mode must be a valid GMS mode (google_chat, pinnokio, telegram)
         # If not explicitly set or invalid, inherit from communication_mode (or default to pinnokio)
+        # For inter-worker dispatches, settings may already be in payload.settings list
         _valid_log_modes = ("google_chat", "pinnokio", "telegram")
-        _comm_mode = company_data.get("communication_mode", "pinnokio")
+        _comm_mode = company_data.get("communication_mode", "")
         _log_mode = company_data.get("log_communication_mode", "")
+        _dms_type = company_data.get("dms_type", "")
+
+        # Fallback: extract from payload.settings list (inter-worker dispatches)
+        if not _comm_mode and payload.get("settings"):
+            for s in payload["settings"]:
+                if isinstance(s, dict):
+                    _comm_mode = _comm_mode or s.get("communication_mode", "")
+                    _log_mode = _log_mode or s.get("log_communication_mode", "")
+                    _dms_type = _dms_type or s.get("dms_system", "")
+
+        _comm_mode = _comm_mode or "pinnokio"
+        _dms_type = _dms_type or "odoo"
         if _log_mode not in _valid_log_modes:
             _log_mode = _comm_mode if _comm_mode in _valid_log_modes else "pinnokio"
 
@@ -450,7 +490,7 @@ async def handle_job_process(
             "settings": [
                 {"communication_mode": _comm_mode},
                 {"log_communication_mode": _log_mode},
-                {"dms_system": company_data.get("dms_type", "odoo")},
+                {"dms_system": _dms_type},
             ],
         }
 
@@ -744,7 +784,12 @@ async def handle_job_stop(
     config = JOB_TYPE_CONFIG.get(job_type, JOB_TYPE_CONFIG["router"])
     job_ids = payload.get("job_ids", [])
     single_job_id = payload.get("job_id")
-    company_id = company_data.get("company_id") or payload.get("company_id")
+    company_id = (
+        company_data.get("company_id")
+        or company_data.get("collection_name")
+        or payload.get("company_id")
+        or payload.get("collection_name")
+    )
     mandate_path = company_data.get("mandate_path", "")
 
     # Normalize to list
@@ -879,7 +924,12 @@ async def handle_job_restart(
     """
     config = JOB_TYPE_CONFIG.get(job_type, JOB_TYPE_CONFIG["router"])
     job_id = payload.get("job_id")
-    company_id = company_data.get("company_id") or payload.get("company_id")
+    company_id = (
+        company_data.get("company_id")
+        or company_data.get("collection_name")
+        or payload.get("company_id")
+        or payload.get("collection_name")
+    )
     mandate_path = company_data.get("mandate_path", "")
 
     logger.info(
@@ -1043,7 +1093,12 @@ async def handle_job_delete(
     """
     config = JOB_TYPE_CONFIG.get(job_type, JOB_TYPE_CONFIG["router"])
     job_ids = payload.get("job_ids", [])
-    company_id = company_data.get("company_id") or payload.get("company_id")
+    company_id = (
+        company_data.get("company_id")
+        or company_data.get("collection_name")
+        or payload.get("company_id")
+        or payload.get("collection_name")
+    )
     mandate_path = company_data.get("mandate_path", "")
 
     logger.info(
@@ -2562,6 +2617,20 @@ async def _persist_jobs_to_task_manager(
         # Bank: 1 doc par transaction, job_id = {company_id}_{account_id}_{move_id}
         transactions_data = payload.get("transactions_data", [])
         bank_account_id = payload.get("bank_account_id", "")
+
+        # Fallback: extract from jobs_data if transactions_data empty (inter-worker dispatch)
+        if not transactions_data and jobs_data:
+            for jd in jobs_data:
+                acct_id = jd.get("bank_account_id", bank_account_id)
+                for tx in jd.get("transactions", []):
+                    tx_enriched = dict(tx)
+                    tx_enriched.setdefault("account_id", acct_id)
+                    tx_enriched.setdefault("journal_id", acct_id)
+                    tx_enriched.setdefault("account_name", jd.get("bank_account", ""))
+                    tx_enriched.setdefault("journal_name", jd.get("bank_account", ""))
+                    transactions_data.append(tx_enriched)
+            if transactions_data:
+                logger.info(f"[JOB_ACTIONS] → transactions_data derived from jobs_data: {len(transactions_data)} items")
         for tx in transactions_data:
             move_id = str(tx.get("id") or tx.get("move_id") or tx.get("transaction_id", ""))
             acct_id = str(tx.get("account_id") or tx.get("journal_id") or bank_account_id)
@@ -2652,6 +2721,8 @@ async def handle_reverse_reconciliation_dispatch(
     )
 
     try:
+        mandate_path = company_data.get("mandate_path", "")
+
         # Build URL for bankbookeeper worker
         base_url = _get_base_url(job_type="bankbookeeper")
         process_url = f"{base_url}/reverse-reconciliation-trigger"
@@ -2662,9 +2733,31 @@ async def handle_reverse_reconciliation_dispatch(
             "request_id": request_id,
             "user_id": uid,
             "collection_name": company_id,
-            "mandates_path": company_data.get("mandate_path", ""),
+            "mandates_path": mandate_path,
             "source": source,
         }
+
+        # Step 0: Register in active_jobs for cold start resilience
+        # If klk_bank is down, the job persists and will be picked up by polling
+        try:
+            firebase = get_firebase_management()
+            encoded_mandate = mandate_path.replace("/", "_").replace(".", "_dot_")
+            doc_path = f"active_jobs/reversereconciliation/jobs/{encoded_mandate}_{request_id}"
+            await asyncio.to_thread(
+                firebase.db.document(doc_path).set,
+                {
+                    "request_id": request_id,
+                    "mandate_path": mandate_path,
+                    "status": "running",
+                    "payload": jobbeur_payload,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "last_updated": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            logger.info(f"[JOB_ACTIONS] → Reverse recon registered in active_jobs: {doc_path}")
+        except Exception as reg_err:
+            logger.warning(f"[JOB_ACTIONS] Reverse recon active_jobs registration failed: {reg_err}")
 
         logger.info(
             f"[JOB_ACTIONS] → Calling HTTP endpoint: {process_url}"
