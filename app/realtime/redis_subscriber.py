@@ -184,6 +184,18 @@ class RedisSubscriber:
         await subscriber.stop()   # Arrête l'écoute
     """
 
+    # Department → Telegram module (for thread_key resolution in multi-canal mode)
+    _DEPARTMENT_TO_MODULE = {
+        "Router": "router",
+        "router": "router",
+        "APbookeeper": "apbookeeper",
+        "apbookeeper": "apbookeeper",
+        "Bankbookeeper": "banker",
+        "banker": "banker",
+        "bankbookeeper": "banker",
+        "general": "general",
+    }
+
     def __init__(self):
         """Initialise le RedisSubscriber."""
         self.redis = get_redis()
@@ -1531,6 +1543,44 @@ class RedisSubscriber:
             logger.error("[REDIS_SUBSCRIBER] unexpected_error channel=%s uid=%s error=%s", channel, uid, str(e), exc_info=True)
 
 
+    def _resolve_llm_thread_key(
+        self,
+        uid: str,
+        thread_key: str,
+        department: str,
+        communication_chat_type: str = "pinnokio",
+    ) -> str:
+        """
+        Resolve the correct Worker LLM thread_key based on active communication mode.
+
+        In Pinnokio mode: thread_key = job_id (unchanged).
+        In Telegram mode: thread_key = tg_{abs(chat_id)}_{module}, stored
+        by CommunicationResponseCollector when a Telegram session is created.
+
+        The mapping Redis key: comm_thread:{uid}:{module} → tg_xxx_module
+        """
+        # En mode pinnokio, le thread_key est toujours le job_id — pas de résolution
+        if communication_chat_type == "pinnokio":
+            return thread_key
+
+        module = self._DEPARTMENT_TO_MODULE.get(department)
+        if not module:
+            return thread_key
+
+        try:
+            mapping_key = f"comm_thread:{uid}:{module}"
+            resolved = self.redis.get(mapping_key)
+            if resolved:
+                logger.info(
+                    "[REDIS_SUBSCRIBER] llm_thread_key resolved: %s → %s (dept=%s module=%s)",
+                    thread_key, resolved, department, module,
+                )
+                return resolved
+        except Exception as e:
+            logger.debug("[REDIS_SUBSCRIBER] llm_thread_key resolution failed: %s", e)
+
+        return thread_key
+
     async def _handle_job_chat_message(
         self,
         uid: str,
@@ -1709,17 +1759,46 @@ class RedisSubscriber:
                         )
                     )
 
+                # Forward to Worker LLM so the agent knows a card arrived
+                # Resolve thread_key for multi-canal (Telegram uses tg_ prefix)
+                llm_thread_key = self._resolve_llm_thread_key(uid, thread_key, dept, comm_chat_type)
+                try:
+                    from app.llm_service.llm_gateway import get_llm_gateway
+                    gateway = get_llm_gateway()
+                    await gateway.enqueue_job_chat_message(
+                        user_id=uid,
+                        collection_name=collection_name,
+                        thread_key=llm_thread_key,
+                        job_id=job_id,
+                        message=message
+                    )
+                    logger.info(
+                        "[JOB_CHAT] %s forwarded to Worker LLM - uid=%s job_id=%s llm_thread=%s",
+                        message_type, uid, job_id, llm_thread_key
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[JOB_CHAT] Failed to enqueue %s to Worker LLM: %s",
+                        message_type, e
+                    )
+
                 logger.info("[REDIS_SUBSCRIBER] ═══════════════════════════════════════════════════════")
                 return
 
             # ── MESSAGE ou autre : déléguer au Worker LLM via LLMGateway ──
+            # Resolve thread_key for multi-canal (Telegram uses tg_ prefix)
+            msg_dept = (message.get("department") or message_data.get("department", "Router"))
+            msg_comm_type = (message.get("communication_chat_type")
+                             or message_data.get("communication_chat_type", "pinnokio"))
+            llm_thread_key = self._resolve_llm_thread_key(uid, thread_key, msg_dept, msg_comm_type)
+
             from app.llm_service.llm_gateway import get_llm_gateway
 
             gateway = get_llm_gateway()
             result = await gateway.enqueue_job_chat_message(
                 user_id=uid,
                 collection_name=collection_name,
-                thread_key=thread_key,
+                thread_key=llm_thread_key,
                 job_id=job_id,
                 message=message
             )

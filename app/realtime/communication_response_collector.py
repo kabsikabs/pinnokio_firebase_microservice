@@ -197,6 +197,16 @@ class CommunicationResponseCollector:
         # Thread key deterministe pour ce canal Telegram + module
         thread_key = f"tg_{abs(chat_id)}_{module}"
 
+        # Store mapping for backend → Worker LLM job_chat routing
+        # When a worker externe sends a job_chat message, the backend needs
+        # to resolve the correct thread_key for the active Telegram session.
+        try:
+            from app.redis_client import get_redis
+            r = get_redis()
+            r.set(f"comm_thread:{uid}:{module}", thread_key, ex=86400)
+        except Exception as e:
+            logger.debug("[RESPONSE_COLLECTOR] comm_thread mapping store failed: %s", e)
+
         if msg_type == "message":
             # Verifier si un wizard attend un text_input
             text = response.get("text", "")

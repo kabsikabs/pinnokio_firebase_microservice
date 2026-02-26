@@ -33,6 +33,15 @@ class LLMGateway:
     # Nom de la queue Redis pour les jobs LLM
     QUEUE_NAME = "queue:llm_jobs"
 
+    # chat_mode → Telegram module (for comm_thread cleanup)
+    _CHAT_MODE_TO_MODULE = {
+        "router_chat": "router",
+        "ap_chat": "apbookeeper",
+        "banker_chat": "banker",
+        "general_chat": "general",
+        "onboarding_chat": "onboarding",
+    }
+
     def __init__(self):
         self._redis = None
 
@@ -102,6 +111,17 @@ class LLMGateway:
                 f"[LLM_GATEWAY] Job enqueued: {job_id[:8]}... "
                 f"type=send_message user={user_id} thread={thread_key}"
             )
+
+            # Clear stale Telegram comm_thread mapping when Pinnokio session starts
+            # This prevents job_chat messages from being routed to an old tg_ thread
+            comm_type = kwargs.get("communication_chat_type", "pinnokio")
+            if comm_type == "pinnokio":
+                module = self._CHAT_MODE_TO_MODULE.get(chat_mode)
+                if module:
+                    try:
+                        self.redis.delete(f"comm_thread:{user_id}:{module}")
+                    except Exception:
+                        pass
 
             return {
                 "status": "queued",

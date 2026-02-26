@@ -1058,14 +1058,14 @@ async def _handle_external_card_response(
         try:
             redis_client = get_redis()
             redis_channel = f"user:{uid}/{company_id}/job_chats/{thread_key}/messages"
-            # Publier card_response_data directement au top-level
-            # Le worker filtre sur data.get('message_type') et lit
-            # data.get('type'), data.get('common'), data.get('message'), etc.
+            # Publier dans le format enveloppe standard job_chat_message
+            # Le worker unwrap via: if data['type']=='job_chat_message': data = data['message']
             redis_payload = {
-                **card_response_data,
+                "type": "job_chat_message",
                 "job_id": thread_key,
                 "collection_name": company_id,
                 "thread_key": thread_key,
+                "message": card_response_data,
             }
             redis_client.publish(redis_channel, json.dumps(redis_payload, default=str))
             logger.info(
