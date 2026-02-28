@@ -36,6 +36,7 @@ ARCHITECTURE (3-Level Cache):
 
 import json
 import logging
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -474,12 +475,19 @@ async def handle_routing_process(
                 logger.info(f"[ROUTING] → Rejecting optimistic update: {optimistic_update_id}")
                 await _reject_optimistic_update(uid, optimistic_update_id, "routing", result.get("error", "Process failed"))
 
+            error_payload = {
+                "error": result.get("error", "Process failed"),
+                "code": result.get("code", "PROCESS_ERROR"),
+            }
+            # Propagate extra fields (balance_info, message) for specific error codes
+            if result.get("balance_info"):
+                error_payload["balance_info"] = result["balance_info"]
+            if result.get("message"):
+                error_payload["message"] = result["message"]
+
             await hub.broadcast(uid, {
                 "type": WS_EVENTS.ROUTING.ERROR,
-                "payload": {
-                    "error": result.get("error", "Process failed"),
-                    "code": result.get("code", "PROCESS_ERROR")
-                }
+                "payload": error_payload,
             })
 
     except Exception as e:
@@ -758,36 +766,51 @@ async def handle_routing_oauth_init(
     Handle routing.oauth_init WebSocket event.
 
     Initiates OAuth flow for Google Drive re-authentication.
+    Generates the real Google OAuth URL with Drive-only scopes
+    and sends it to the frontend for popup redirect.
     """
+    import base64
+    import json as _json
     company_id = payload.get("company_id")
-    logger.info(f"[ROUTING] OAuth init requested for uid={uid}")
+    logger.info(f"[ROUTING] OAuth init requested for uid={uid} company_id={company_id}")
 
     # Get context from SessionStateManager
     context = _get_company_context(uid, company_id)
+    mandate_path = context.get("mandate_path", "")
 
     try:
-        # Use pending action manager to save state before redirect
-        from app.wrappers.pending_action_manager import get_pending_action_manager
-        pending_manager = get_pending_action_manager()
+        # 1. Generate OAuth URL with Drive-only scopes
+        from pinnokio_app.logique_metier.onboarding_flow import GoogleAuthManager
 
-        action_id = pending_manager.save_pending_action(
-            uid=uid,
-            action_type="oauth_drive",
-            data={
-                "return_page": "routing",
+        auth_manager = GoogleAuthManager(user_id=uid)
+        auth_manager.set_drive_only_scopes()
+
+        # Build state as base64-encoded JSON (expected by google_auth_callback)
+        state_data = {
+            "user_id": uid,
+            "source": "routing",
+            "communication_mode": "pinnokio",
+            "redirect_uri": os.getenv("GOOGLE_AUTH_REDIRECT_LOCAL", ""),
+            "context_params": {
+                "mandate_path": mandate_path,
                 "company_id": company_id,
-                "mandate_path": context.get("mandate_path", ""),
-                "input_drive_id": context.get("input_drive_doc_id", ""),
-            }
-        )
+                "session_id": session_id,
+            },
+        }
+        state_str = base64.b64encode(
+            _json.dumps(state_data).encode("utf-8")
+        ).decode("utf-8")
 
-        # Send OAuth URL to frontend
+        auth_url = auth_manager.get_authorization_url(state_str)
+        logger.info(f"[ROUTING] OAuth URL generated for uid={uid}")
+
+        # 2. Send OAuth URL to frontend for popup redirect
         await hub.broadcast(uid, {
             "type": WS_EVENTS.AUTH.OAUTH_REDIRECT,
             "payload": {
                 "provider": "google_drive",
-                "action_id": action_id,
-                "scopes": ["https://www.googleapis.com/auth/drive.readonly"]
+                "auth_url": auth_url,
+                "scopes": list(auth_manager.SCOPES),
             }
         })
 

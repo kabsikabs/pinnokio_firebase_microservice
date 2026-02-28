@@ -365,28 +365,24 @@ class MetricsCalculator:
         """
         Calcule les métriques Expenses depuis business:{uid}:{cid}:expenses.
 
-        Structure attendue:
-            {"items": [{"id": "...", "status": "open|closed|pending_approval", ...}]}
+        Recompte directement les items dans les listes catégorisées (comme
+        routing/AP/bank) pour que les metrics restent correctes après un
+        delta inséré par _update_business_cache_item.
         """
         data = self._get_business_data(uid, company_id, BusinessDomain.EXPENSES.value)
 
         if not data:
             return ExpenseMetrics()
 
-        items = data.get("items", [])
+        # Compter les items dans les 4 listes catégorisées (source de vérité)
+        to_process = data.get("to_process", [])
+        in_process = data.get("in_process", [])
+        pending = data.get("pending", [])
+        processed = data.get("processed", [])
 
-        open_count = 0
-        closed_count = 0
-        pending_approval = 0
-
-        for item in items:
-            status = (item.get("status") or "").lower()
-            if status in {"open", "to_process", "in_process"}:
-                open_count += 1
-            elif status in {"closed", "processed", "completed"}:
-                closed_count += 1
-            elif status in {"pending", "pending_approval", "awaiting_approval"}:
-                pending_approval += 1
+        open_count = len(to_process) + len(in_process) + len(pending)
+        closed_count = len(processed)
+        pending_approval = len(pending)
 
         return ExpenseMetrics(
             open_count=open_count,
@@ -527,6 +523,21 @@ class AsyncMetricsCalculator:
         if not data:
             return ModuleMetrics()
 
+        # Format pré-catégorisé (listes séparées par status)
+        to_process = data.get("to_process", [])
+        in_process = data.get("in_process", [])
+        pending = data.get("pending", [])
+        processed = data.get("processed", [])
+
+        if any([to_process, in_process, pending, processed]):
+            return ModuleMetrics(
+                to_process=len(to_process),
+                in_process=len(in_process),
+                pending=len(pending),
+                processed=len(processed),
+            )
+
+        # Fallback: format liste plate avec "items" key
         items = data.get("items", [])
         counts = self._count_by_status(items)
 
@@ -570,26 +581,26 @@ class AsyncMetricsCalculator:
         )
 
     async def get_expenses_metrics(self, uid: str, company_id: str) -> ExpenseMetrics:
-        """Calcule les métriques Expenses (async)."""
+        """
+        Calcule les métriques Expenses (async).
+
+        Recompte directement les items dans les listes catégorisées (comme
+        routing/AP/bank) pour que les metrics restent correctes après un
+        delta inséré par _update_business_cache_item.
+        """
         data = await self._get_business_data(uid, company_id, BusinessDomain.EXPENSES.value)
 
         if not data:
             return ExpenseMetrics()
 
-        items = data.get("items", [])
+        to_process = data.get("to_process", [])
+        in_process = data.get("in_process", [])
+        pending = data.get("pending", [])
+        processed = data.get("processed", [])
 
-        open_count = 0
-        closed_count = 0
-        pending_approval = 0
-
-        for item in items:
-            status = (item.get("status") or "").lower()
-            if status in {"open", "to_process", "in_process"}:
-                open_count += 1
-            elif status in {"closed", "processed", "completed"}:
-                closed_count += 1
-            elif status in {"pending", "pending_approval", "awaiting_approval"}:
-                pending_approval += 1
+        open_count = len(to_process) + len(in_process) + len(pending)
+        closed_count = len(processed)
+        pending_approval = len(pending)
 
         return ExpenseMetrics(
             open_count=open_count,

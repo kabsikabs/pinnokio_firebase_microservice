@@ -550,9 +550,10 @@ async def handle_refresh(
 
     # Re-populate domain caches from sources BEFORE reading metrics
     # Without this, full_data would read stale domain caches
+    cache_status = {}
     if company_data:
         try:
-            await _populate_widget_caches(uid, company_id, company_data, force_refresh=True)
+            cache_status = await _populate_widget_caches(uid, company_id, company_data, force_refresh=True)
             logger.info(f"[ORCHESTRATION] Refresh: Domain caches repopulated (force_refresh)")
         except Exception as pop_err:
             logger.warning(f"[ORCHESTRATION] Refresh: Cache repopulation error: {pop_err}")
@@ -582,6 +583,12 @@ async def handle_refresh(
             logger.info(
                 f"[ORCHESTRATION] Refresh: Fixed company data using transform_company_data_to_info"
             )
+
+    # Inject OAuth status from cache population
+    if result.get("success") and result.get("data"):
+        result["data"]["oauth"] = {
+            "drive_reauth_required": cache_status.get("drive_oauth_error", False),
+        }
 
     # Broadcast to user
     await hub.broadcast(uid, {
@@ -1428,6 +1435,11 @@ async def _run_company_phase(
                 "communication_chat_type": selected_mandate.get("communication_chat_type", selected_mandate.get("chat_type", "pinnokio")),
                 "communication_log_type": selected_mandate.get("communication_log_type", "pinnokio"),
             },
+            # Email provider type + auth status
+            "email_type": selected_mandate.get("email_type"),
+            "email_auth_status": "connected" if (
+                firebase_mgmt.user_app_permission_token(uid, service="gmail") or {}
+            ).get("token") else "none",
             # Champs plats conservés pour compatibilité backend
             "apbookeeper_approval_required": selected_mandate.get("apbookeeper_approval_required", False),
             "router_approval_required": selected_mandate.get("router_approval_required", False),
@@ -1617,6 +1629,8 @@ async def run_company_orchestration(
                 "communication_chat_type": full_mandate.get("communication_chat_type", full_mandate.get("chat_type", "pinnokio")),
                 "communication_log_type": full_mandate.get("communication_log_type", "pinnokio"),
             },
+            # Email provider type
+            "email_type": full_mandate.get("email_type"),
             # Flat workflow params for compatibility
             "apbookeeper_approval_required": full_mandate.get("apbookeeper_approval_required", False),
             "router_approval_required": full_mandate.get("router_approval_required", False),
@@ -1975,7 +1989,18 @@ async def _populate_widget_caches(
             f"client_uuid={bool(client_uuid)} bank_erp={bank_erp}"
         )
 
-    # 4. COA (accounts + functions) - Cache Niveau 2
+    # 4. Expenses from task_manager (requires mandate_path)
+    if mandate_path:
+        tasks.append(
+            _safe_cache_fetch(
+                "Expenses",
+                _populate_expenses_cache(uid, company_id, mandate_path)
+            )
+        )
+    else:
+        logger.warning(f"[ORCHESTRATION] No mandate_path for Expenses cache")
+
+    # 5. COA (accounts + functions) - Cache Niveau 2
     # Le COA est traité comme donnée critique de niveau entreprise
     # Il est pré-chargé pour que la page COA s'affiche immédiatement
     if mandate_path:
@@ -1989,10 +2014,20 @@ async def _populate_widget_caches(
         logger.warning(f"[ORCHESTRATION] No mandate_path for COA cache")
 
     # Execute all cache fetches in parallel
+    drive_oauth_error = False
     if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Check if Drive (first task when input_drive_id present) returned oauth_error
+        if input_drive_id and results:
+            drive_result = results[0]
+            if isinstance(drive_result, dict) and drive_result.get("oauth_error"):
+                drive_oauth_error = True
 
-    logger.info(f"[ORCHESTRATION] Widget caches populated for company={company_id}")
+    logger.info(
+        f"[ORCHESTRATION] Widget caches populated for company={company_id}"
+        f"{' (Drive OAuth re-auth required)' if drive_oauth_error else ''}"
+    )
+    return {"drive_oauth_error": drive_oauth_error}
 
 
 async def _safe_cache_fetch(name: str, coro):
@@ -2002,6 +2037,9 @@ async def _safe_cache_fetch(name: str, coro):
     Args:
         name: Human-readable name for logging
         coro: Coroutine to execute
+
+    Returns:
+        The result dict from the cache fetch (may contain oauth_error flag).
     """
     try:
         result = await coro
@@ -2019,8 +2057,57 @@ async def _safe_cache_fetch(name: str, coro):
             logger.warning(f"[CACHE] {name}: No data or error")
             if result and result.get("oauth_error"):
                 logger.warning(f"[CACHE] {name}: OAuth re-authentication required")
+        return result
     except Exception as e:
         logger.error(f"[CACHE] {name} fetch error: {e}")
+        return None
+
+
+async def _populate_expenses_cache(
+    uid: str,
+    company_id: str,
+    mandate_path: str
+) -> Dict[str, Any]:
+    """
+    Charge et cache les données Expenses dans business:{uid}:{cid}:expenses.
+
+    Utilise le handler expenses.list_expenses() qui fetch depuis task_manager
+    (dept=EXbookeeper) et cache en format pré-catégorisé.
+
+    Args:
+        uid: Firebase user ID
+        company_id: Company ID
+        mandate_path: Chemin mandat Firebase
+
+    Returns:
+        Dict avec success et data
+    """
+    try:
+        from ..frontend.pages.expenses.handlers import get_expenses_handlers
+
+        handlers = get_expenses_handlers()
+        result = await handlers.list_expenses(
+            user_id=uid,
+            company_id=company_id,
+            mandate_path=mandate_path,
+            force_refresh=False,  # Utilise cache existant si disponible
+        )
+
+        if result.get("success") and result.get("data"):
+            data = result["data"]
+            item_count = sum(
+                len(data.get(k, []))
+                for k in ("to_process", "in_process", "pending", "processed")
+            )
+            logger.info(
+                f"[ORCHESTRATION] Expenses cached: {item_count} items"
+            )
+
+        return result
+
+    except Exception as e:
+        logger.error(f"[ORCHESTRATION] Expenses cache population error: {e}")
+        return {"success": False, "error": str(e)}
 
 
 async def _populate_coa_cache(
@@ -2135,7 +2222,7 @@ async def _run_data_phase(
         # STEP 1: Populate Redis cache with data from external sources
         # This ensures metrics widgets have data to display
         # ════════════════════════════════════════════════════════════
-        await _populate_widget_caches(uid, company_id, company_data or {})
+        cache_status = await _populate_widget_caches(uid, company_id, company_data or {})
 
         if state_manager.is_cancelled(uid, session_id, orchestration_id):
             return
@@ -2221,6 +2308,12 @@ async def _run_data_phase(
                 "approval_waitlist": "completed"
             }
         })
+
+        # Inject OAuth status from cache population into result
+        if result.get("success") and result.get("data") and cache_status:
+            result["data"]["oauth"] = {
+                "drive_reauth_required": cache_status.get("drive_oauth_error", False),
+            }
 
         # Broadcast full dashboard data
         tasks_in_result = result.get("data", {}).get("tasks", [])

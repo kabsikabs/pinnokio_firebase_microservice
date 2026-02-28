@@ -317,12 +317,13 @@ async def handle_invoices_refresh(
 
     logger.info(f"[INVOICES] Refresh requested for company={company_id}, tab={tab}")
 
-    # Invalidate AP documents cache (business:{uid}:{cid}:invoices)
+    # Invalidate AP documents cache (new + legacy keys)
     try:
         redis_client = get_redis()
         cache_key = f"business:{uid}:{company_id}:invoices"
-        deleted = redis_client.delete(cache_key)
-        logger.info(f"[INVOICES] AP cache invalidated: key={cache_key} deleted={deleted}")
+        legacy_key = f"cache:{uid}:{company_id}:apbookeeper:documents"
+        deleted = redis_client.delete(cache_key, legacy_key)
+        logger.info(f"[INVOICES] AP cache invalidated: keys=[{cache_key}, {legacy_key}] deleted={deleted}")
     except Exception as e:
         logger.warning(f"[INVOICES] Failed to invalidate AP cache: {e}")
 
@@ -430,12 +431,17 @@ async def handle_invoices_process(
                 logger.info(f"[INVOICES] → Rejecting optimistic update: {optimistic_update_id}")
                 await _reject_optimistic_update(uid, optimistic_update_id, "invoices", result.get("error", "Process failed"))
 
+            _inv_err_payload = {
+                "error": result.get("error", "Process failed"),
+                "code": result.get("code", "PROCESS_ERROR"),
+            }
+            if result.get("balance_info"):
+                _inv_err_payload["balance_info"] = result["balance_info"]
+            if result.get("message"):
+                _inv_err_payload["message"] = result["message"]
             await hub.broadcast(uid, {
                 "type": WS_EVENTS.INVOICES.ERROR,
-                "payload": {
-                    "error": result.get("error", "Process failed"),
-                    "code": result.get("code", "PROCESS_ERROR")
-                }
+                "payload": _inv_err_payload,
             })
 
     except Exception as e:

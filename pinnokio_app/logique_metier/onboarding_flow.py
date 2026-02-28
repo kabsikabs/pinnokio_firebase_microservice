@@ -854,12 +854,14 @@ class GoogleAuthManager:
             raise Exception(f"Erreur lors du rafraîchissement du token: {str(e)}")    
     
     def _save_tokens_to_firebase(self, token_data):
-        """Sauvegarde les tokens dans Firebase"""
+        """Sauvegarde les tokens dans Firebase (document dédié Drive + legacy)."""
         try:
-
-            tokens_path = f'clients/{self.user_id}/cred_tokens/google_authcred_token'
-            firebase=FireBaseManagement()
-            firebase.set_document(tokens_path, token_data)
+            firebase = FireBaseManagement()
+            base = f'clients/{self.user_id}/cred_tokens'
+            # 1. Document dédié Drive (nouvelle convention)
+            firebase.set_document(f'{base}/google_drive_token', token_data)
+            # 2. Legacy (backward compat workers externes)
+            firebase.set_document(f'{base}/google_authcred_token', token_data)
         except Exception as e:
             raise Exception(f"Erreur lors de la sauvegarde des tokens: {str(e)}")
 

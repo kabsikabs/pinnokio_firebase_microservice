@@ -29,6 +29,7 @@ EXTERNAL_WORKER_CARD_IDS = {
     "job_menu_card",
     "bank_list_file_card",
     "bank_file_list_card",
+    "email_draft_approval_card",
 }
 
 # Mapping cardId -> invokedFunction par defaut (bouton principal)
@@ -40,6 +41,7 @@ DEFAULT_INVOKED_FUNCTION = {
     "job_menu_card": "navigate",
     "bank_list_file_card": "start_router_job",
     "bank_file_list_card": "start_router_job",
+    "email_draft_approval_card": "email_draft_decision",
 }
 
 # Mapping cardId -> champs formInputs attendus par les workers
@@ -51,6 +53,7 @@ FORM_FIELDS_BY_CARD = {
     "job_menu_card": ["next_step"],
     "bank_list_file_card": ["selected_files", "methode"],
     "bank_file_list_card": ["selected_files", "methode"],
+    "email_draft_approval_card": ["decision", "modified_body"],
 }
 
 

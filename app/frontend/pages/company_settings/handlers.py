@@ -86,20 +86,6 @@ class CompanySettingsHandlers:
         """Build the Firebase mandate path."""
         return f"clients/{user_id}/bo_clients/{parent_doc_id}/mandates/{mandate_doc_id}"
 
-    async def _invalidate_user_context_cache(self, user_id: str) -> None:
-        """Invalidate user context cache after settings change."""
-        try:
-            import httpx
-            async with httpx.AsyncClient() as client:
-                await client.post(
-                    "http://localhost:8000/invalidate-context",
-                    json={"user_id": user_id},
-                    timeout=5.0
-                )
-            logger.info(f"Context cache invalidated for user {user_id}")
-        except Exception as e:
-            logger.warning(f"Failed to invalidate context cache: {e}")
-
     # ============================================
     # FULL DATA (Donnees completes)
     # ============================================
@@ -301,6 +287,7 @@ class CompanySettingsHandlers:
                 self._get_telegram_users(user_id, mandate_path),
                 self._get_communication_rooms_config(mandate_path),
                 self._get_erp_connections(mandate_path),
+                self._get_email_settings(mandate_path),
                 return_exceptions=True
             )
 
@@ -308,6 +295,18 @@ class CompanySettingsHandlers:
             telegram_users = results[0] if not isinstance(results[0], Exception) else []
             rooms_config = results[1] if not isinstance(results[1], Exception) else {}
             erp_connections = results[2] if not isinstance(results[2], Exception) else {}
+            email_settings = results[3] if not isinstance(results[3], Exception) else None
+
+            # Read email_type from mandate root (needed because company-store
+            # does not persist settings to sessionStorage — on page refresh the
+            # ADDITIONAL_DATA response is the only reliable source)
+            email_type = None
+            try:
+                mandate_doc = self._firebase.get_raw_document(mandate_path)
+                if mandate_doc:
+                    email_type = mandate_doc.get("email_type")
+            except Exception as mt_err:
+                logger.warning(f"Error reading email_type from mandate: {mt_err}")
 
             # Log errors
             for i, r in enumerate(results):
@@ -319,6 +318,8 @@ class CompanySettingsHandlers:
                 "telegramUsers": telegram_users,
                 "communicationRoomsConfig": rooms_config,
                 "erpConnections": erp_connections,
+                "emailSettings": email_settings,
+                "emailType": email_type,
                 "meta": {
                     "cacheHit": False,
                     "durationMs": self._elapsed_ms(start_time),
@@ -700,6 +701,26 @@ class CompanySettingsHandlers:
             logger.error(f"Error fetching ERP connections: {e}")
             return {}
 
+    async def _get_email_settings(self, mandate_path: str) -> Optional[Dict[str, Any]]:
+        """Fetch email governance settings from Firebase."""
+        try:
+            doc = self._firebase.get_raw_document(f"{mandate_path}/setup/email_settings")
+            if not doc:
+                return None
+            return {
+                "contact_groups": doc.get("contact_groups", []),
+                "default_policy": doc.get("default_policy", {
+                    "approval_required": False,
+                    "semantic_tone": 5,
+                    "custom_prompt": "",
+                    "forbidden_terms": [],
+                    "required_terms": [],
+                }),
+            }
+        except Exception as e:
+            logger.error(f"Error fetching email settings: {e}")
+            return None
+
     # ============================================
     # SAVE METHODS
     # ============================================
@@ -745,7 +766,6 @@ class CompanySettingsHandlers:
             self._firebase.set_document(mandate_path, firebase_data, merge=True)
 
             # Invalidate caches
-            await self._invalidate_user_context_cache(user_id)
             await self._invalidate_page_cache(user_id, company_id)
 
             logger.info(f"Company info saved for company_id={company_id}")
@@ -794,7 +814,6 @@ class CompanySettingsHandlers:
             self._firebase.set_document(mandate_path, firebase_data, merge=True)
 
             # Invalidate caches
-            await self._invalidate_user_context_cache(user_id)
             await self._invalidate_page_cache(user_id, company_id)
 
             logger.info(f"Settings ({section}) saved for company_id={company_id}")
@@ -890,7 +909,6 @@ class CompanySettingsHandlers:
                 self._firebase.set_document(workflow_path, {"Accounting_param": accounting_param}, merge=True)
 
             # Invalidate caches
-            await self._invalidate_user_context_cache(user_id)
             await self._invalidate_page_cache(user_id, company_id)
 
             logger.info(f"Workflow ({section}) saved for company_id={company_id}")
@@ -963,7 +981,6 @@ class CompanySettingsHandlers:
                     )
 
             # Invalidate caches
-            await self._invalidate_user_context_cache(user_id)
             await self._invalidate_page_cache(user_id, company_id)
 
             logger.info(f"Context ({context_type}) saved for company_id={company_id}")
@@ -2109,3 +2126,232 @@ class CompanySettingsHandlers:
                 "error": str(e),
                 "report": report,
             }
+
+    # ============================================
+    # EMAIL SETTINGS
+    # ============================================
+
+    async def save_email_settings(
+        self,
+        user_id: str,
+        company_id: str,
+        mandate_path: str,
+        data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Save email governance settings.
+
+        Writes to Firebase: {mandate_path}/setup/email_settings
+
+        Args:
+            data: {
+                "contact_groups": [...],
+                "default_policy": {...}
+            }
+
+        Returns:
+            {"success": True} or {"success": False, "error": "..."}
+        """
+        try:
+            email_settings = {
+                "contact_groups": data.get("contact_groups", []),
+                "default_policy": data.get("default_policy", {}),
+                "updated_at": datetime.utcnow().isoformat(),
+                "updated_by": user_id,
+            }
+
+            doc_path = f"{mandate_path}/setup/email_settings"
+            self._firebase.set_document(doc_path, email_settings, merge=True)
+
+            # Invalidate cache
+            try:
+                await self._cache.invalidate_cached_data(
+                    user_id, company_id, "company_settings", "additional_data"
+                )
+            except Exception as cache_err:
+                logger.warning(f"Cache invalidation error: {cache_err}")
+
+            logger.info(
+                f"COMPANY_SETTINGS.save_email_settings OK "
+                f"company_id={company_id} groups={len(email_settings.get('contact_groups', []))}"
+            )
+            return {"success": True}
+
+        except Exception as e:
+            logger.error(f"COMPANY_SETTINGS.save_email_settings error: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def handle_email_approval(
+        self,
+        user_id: str,
+        company_id: str,
+        mandate_path: str,
+        draft_id: str,
+        decision: str,
+        modified_body: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Handle email draft approval/rejection/modification.
+
+        Args:
+            draft_id: ID of the pending email draft
+            decision: "approve" | "reject" | "modify"
+            modified_body: Updated body text (for modify)
+
+        Returns:
+            {"success": True} or {"success": False, "error": "..."}
+        """
+        try:
+            draft_path = f"{mandate_path}/pending_email_approvals/{draft_id}"
+            draft_doc = self._firebase.get_raw_document(draft_path)
+
+            if not draft_doc:
+                return {"success": False, "error": f"Draft {draft_id} not found"}
+
+            if decision == "approve":
+                # Dispatch email sending via Redis queue
+                import json
+                redis = None
+                try:
+                    from app.redis_client import get_redis
+                    redis = get_redis()
+                except Exception:
+                    pass
+
+                if redis:
+                    job_payload = {
+                        "action": "send_email",
+                        "draft_id": draft_id,
+                        "draft": draft_doc,
+                        "company_id": company_id,
+                        "mandate_path": mandate_path,
+                        "approved_by": user_id,
+                    }
+                    redis.lpush("queue:agentic_dispatch", json.dumps(job_payload))
+
+                # Mark as approved
+                self._firebase.set_document(draft_path, {
+                    "status": "approved",
+                    "approved_by": user_id,
+                    "approved_at": datetime.utcnow().isoformat(),
+                }, merge=True)
+
+            elif decision == "reject":
+                # Delete the draft
+                self._firebase.delete_document(draft_path)
+
+            elif decision == "modify":
+                # Update the draft body
+                update_data = {
+                    "status": "modified",
+                    "modified_by": user_id,
+                    "modified_at": datetime.utcnow().isoformat(),
+                }
+                if modified_body is not None:
+                    update_data["body"] = modified_body
+                self._firebase.set_document(draft_path, update_data, merge=True)
+
+            else:
+                return {"success": False, "error": f"Unknown decision: {decision}"}
+
+            logger.info(
+                f"COMPANY_SETTINGS.handle_email_approval OK "
+                f"draft_id={draft_id} decision={decision}"
+            )
+            return {"success": True}
+
+        except Exception as e:
+            logger.error(f"COMPANY_SETTINGS.handle_email_approval error: {e}")
+            return {"success": False, "error": str(e)}
+
+    # ────────────────────────────────────────────────────────────
+    # Email Provider Type
+    # ────────────────────────────────────────────────────────────
+
+    async def save_email_type(
+        self,
+        user_id: str,
+        company_id: str,
+        mandate_path: str,
+        email_type: str,
+    ) -> Dict[str, Any]:
+        """
+        Save the chosen email provider type to the mandate document.
+
+        Writes field ``email_type`` at the mandate root (e.g. "gmail").
+        """
+        try:
+            self._firebase.set_document(mandate_path, {
+                "email_type": email_type,
+            }, merge=True)
+
+            try:
+                await self._cache.invalidate_cached_data(
+                    user_id, company_id, "company_settings", "additional_data"
+                )
+            except Exception as cache_err:
+                logger.warning(f"Cache invalidation error: {cache_err}")
+
+            logger.info(
+                f"COMPANY_SETTINGS.save_email_type OK "
+                f"company_id={company_id} email_type={email_type}"
+            )
+            return {"success": True}
+
+        except Exception as e:
+            logger.error(f"COMPANY_SETTINGS.save_email_type error: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def initiate_email_auth(
+        self,
+        user_id: str,
+        provider: str,
+        session_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Initiate OAuth flow for the chosen email provider.
+
+        Gmail  → reuses GoogleAuthManager (same as onboarding).
+        Outlook → returns coming_soon placeholder.
+        """
+        try:
+            if provider == "outlook":
+                return {"success": True, "coming_soon": True}
+
+            # --- Gmail OAuth via GoogleAuthManager ---
+            import os
+            import base64
+            import json as _json
+
+            from pinnokio_app.logique_metier.onboarding_flow import GoogleAuthManager
+
+            auth_manager = GoogleAuthManager(user_id=user_id)
+            # Email-specific scopes (Gmail send + read)
+            auth_manager.SCOPES = [
+                "https://www.googleapis.com/auth/gmail.send",
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/userinfo.email",
+            ]
+
+            redirect_uri = os.getenv(
+                "GOOGLE_AUTH_REDIRECT_LOCAL",
+                "http://localhost:8000/google_auth_callback/",
+            )
+
+            state = {
+                "user_id": user_id,
+                "source": "email_settings",
+                "communication_mode": "pinnokio",
+                "redirect_uri": redirect_uri,
+                "session_id": session_id,
+            }
+            state_encoded = base64.b64encode(_json.dumps(state).encode()).decode()
+
+            auth_url = auth_manager.get_authorization_url(state=state_encoded)
+
+            logger.info(f"COMPANY_SETTINGS.initiate_email_auth OK provider=gmail uid={user_id}")
+            return {"success": True, "auth_url": auth_url}
+
+        except Exception as e:
+            logger.error(f"COMPANY_SETTINGS.initiate_email_auth error: {e}")
+            return {"success": False, "error": str(e)}

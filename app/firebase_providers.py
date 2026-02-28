@@ -1665,6 +1665,28 @@ class FirebaseManagement:
             print(f"Les types d'ERP existent déjà dans la collection settings_param/erp_type.")
             return erp_doc.to_dict().get('erp_types', [])
 
+    def load_email_types(self):
+        """
+        Charge les types d'email dans la collection /settings_param/email_type.
+        Si les données n'existent pas déjà, elles seront créées.
+        """
+        email_ref = self.db.collection('settings_param').document('email_type')
+        email_doc = email_ref.get()
+
+        if not email_doc.exists or not email_doc.to_dict().get('email_types'):
+            email_data = {
+                'email_types': [
+                    {'id': '1', 'active': True, 'email_displayname': 'Gmail', 'email_name': 'gmail'},
+                    {'id': '2', 'active': True, 'email_displayname': 'Outlook', 'email_name': 'outlook'}
+                ]
+            }
+            email_ref.set(email_data)
+            print(f"Les types d'email ont été chargés dans la collection settings_param/email_type.")
+            return email_data['email_types']
+        else:
+            print(f"Les types d'email existent déjà dans la collection settings_param/email_type.")
+            return email_doc.to_dict().get('email_types', [])
+
     def load_chat_types(self):
         """
         Charge les types de chat dans la collection /settings_param/chat_type.
@@ -1731,6 +1753,8 @@ class FirebaseManagement:
             return self.load_dms_types()
         elif param_type == 'chat':
             return self.load_chat_types()
+        elif param_type == 'email':
+            return self.load_email_types()
         elif param_type == 'currencies':
             return self.load_currencies()
         else:
@@ -1748,24 +1772,26 @@ class FirebaseManagement:
             list: Liste des paramètres
         """
         try:
-            if param_type not in ['erp', 'dms', 'chat', 'currencies','communication']:
+            if param_type not in ['erp', 'dms', 'chat', 'currencies', 'communication', 'email']:
                 print(f"Type de paramètre inconnu: {param_type}")
                 return []
-            
+
             collection_name = {
                 'erp': 'erp_type',
                 'dms': 'dms_type',
                 'chat': 'chat_type',
                 'currencies': 'currencies',
-                'communication': 'communication_type'
+                'communication': 'communication_type',
+                'email': 'email_type',
             }[param_type]
-            
+
             field_name = {
                 'erp': 'erp_types',
                 'dms': 'dms_types',
                 'chat': 'chat_types',
                 'currencies': 'currencies',
-                'communication': 'communication_types'
+                'communication': 'communication_types',
+                'email': 'email_types',
             }[param_type]
             
             param_ref = self.db.collection('settings_param').document(collection_name)
@@ -3912,6 +3938,16 @@ class FirebaseManagement:
                 expense_ref.set(expense_payload, merge=True)
                 created_or_updated += 1
 
+            # Update L1 balance cache after catchup (balance may have changed)
+            if created_or_updated > 0 and user_id and mandate_path:
+                try:
+                    from app.balance_service import get_balance_service_sync
+                    _bal_svc = get_balance_service_sync()
+                    _fresh = self.get_balance_info(mandate_path=mandate_path, user_id=user_id)
+                    _bal_svc.update_balance_cache(user_id, _fresh)
+                except Exception as _cache_err:
+                    logger.warning("[BILLING] L1 cache update after catchup failed: %s", _cache_err)
+
             return {
                 "success": True,
                 "days_back": days_back,
@@ -4254,29 +4290,48 @@ class FirebaseManagement:
         # Si aucun client correspondant n'est trouvé, ou si le business_name n'existe pas sous ce client
         return False
 
-    def user_app_permission_token(self,user_id):
-        """Récupère le jeton d'autorisation de l'utilisateur pour accéder à l'API Google Drive."""
+    # ── Mapping service → document Firestore dédié ──
+    _SERVICE_TOKEN_DOCS = {
+        "drive": "google_drive_token",
+        "gmail": "google_gmail_token",
+        "chat":  "google_chat_token",
+    }
+
+    def user_app_permission_token(self, user_id, service=None):
+        """Récupère le jeton OAuth Google pour *service* (drive | gmail | chat).
+
+        Stratégie de lecture :
+        1. Si *service* est fourni → tente le document dédié, fallback sur legacy.
+        2. Sans *service* → lit le document legacy (backward compat).
+        """
         if user_id:
             base_path = f'clients/{user_id}/cred_tokens'
         else:
             base_path = 'klk_vision'
-        
-        doc_ref = self.db.collection(base_path).document('google_authcred_token')
-        doc = doc_ref.get()
-        if doc.exists:
-            data=doc.to_dict()
-            token_data = {
-                        "token": data.get('token'),
-                        "refresh_token": data.get('refresh_token'),
-                        "token_uri": data.get('token_uri'),
-                        "client_id": data.get('client_id'),
-                        "client_secret": data.get('client_secret'),
-                        "expiry": data.get('expiry'),
-                        
-                    }
-            return token_data
-        else:
+
+        def _read_token_doc(doc_name):
+            doc_ref = self.db.collection(base_path).document(doc_name)
+            doc = doc_ref.get()
+            if doc.exists:
+                data = doc.to_dict()
+                return {
+                    "token": data.get('token'),
+                    "refresh_token": data.get('refresh_token'),
+                    "token_uri": data.get('token_uri'),
+                    "client_id": data.get('client_id'),
+                    "client_secret": data.get('client_secret'),
+                    "expiry": data.get('expiry'),
+                }
             return None
+
+        # Avec service → document dédié puis fallback legacy
+        if service and service in self._SERVICE_TOKEN_DOCS:
+            result = _read_token_doc(self._SERVICE_TOKEN_DOCS[service])
+            if result:
+                return result
+
+        # Legacy / fallback
+        return _read_token_doc('google_authcred_token')
 
 
     def check_if_users_exist(self,mail_to_invite):

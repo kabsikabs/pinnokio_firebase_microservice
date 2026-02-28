@@ -136,6 +136,7 @@ class RedisTTL:
     USER_PREFERENCES = 86400    # 24 heures (rarement modifiées)
     USER_COMPANIES = 3600       # 1 heure (liste sociétés)
     USER_SELECTED_COMPANY = 3600 # 1 heure (société sélectionnée)
+    USER_BALANCE = 300          # 5 minutes — solde utilisateur (invalidé après top-up)
     STATIC_DATA = 86400         # 24 heures (données référentielles)
     NOTIFICATIONS = 7200        # 2 heures (cache notifications)
     MESSAGES = 7200             # 2 heures (cache messages)
@@ -205,6 +206,11 @@ def build_user_companies_key(uid: str) -> str:
 def build_user_selected_company_key(uid: str) -> str:
     """Clé pour la société sélectionnée par l'utilisateur (Niveau 1 - USER)."""
     return f"{RedisNamespace.USER}:{uid}:selected_company_id"
+
+
+def build_user_balance_key(uid: str) -> str:
+    """Clé pour le cache L1 du solde utilisateur (Niveau 1 - USER, TTL 5 min)."""
+    return f"{RedisNamespace.USER}:{uid}:balance"
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -43,7 +43,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Optional, Callable
+from typing import Any, Dict, List, Optional, Callable, Tuple
 from redis.client import PubSub
 
 from app.redis_client import get_redis
@@ -79,6 +79,7 @@ CARD_ID_TO_DEPARTMENT = {
     "job_menu_card": "APbookeeper",
     "bank_list_file_card": "Bankbookeeper",
     "bank_file_list_card": "Bankbookeeper",
+    "email_draft_approval_card": "Router",
 }
 
 # ============================================
@@ -835,7 +836,7 @@ class RedisSubscriber:
         # → to_process
         "to_process": "to_process", "to_do": "to_process", "new": "to_process",
         "error": "to_process", "stopped": "to_process", "unprocessed": "to_process",
-        "to_reconcile": "to_process",
+        "to_reconcile": "to_process", "skipped": "to_process",
         # → in_process
         "in_process": "in_process", "on_process": "in_process", "processing": "in_process",
         "in_progress": "in_process", "in_queue": "in_process", "running": "in_process",
@@ -845,7 +846,7 @@ class RedisSubscriber:
         # → processed
         "processed": "processed", "completed": "processed", "done": "processed",
         "close": "processed", "closed": "processed", "matched": "processed",
-        "reconciled": "processed", "approved": "processed",
+        "reconciled": "processed", "approved": "processed", "routed": "processed",
     }
 
     # Mapping catégorie abstraite → clé concrète (identique pour tous les domaines)
@@ -854,6 +855,7 @@ class RedisSubscriber:
         "routing": _UNIVERSAL_KEY,
         "invoices": _UNIVERSAL_KEY,
         "bank": _UNIVERSAL_KEY,
+        "expenses": _UNIVERSAL_KEY,
     }
 
     def _get_target_category_key(self, domain: str, status: str) -> str:
@@ -1035,6 +1037,139 @@ class RedisSubscriber:
                 "[REDIS_SUBSCRIBER] business_cache_update_failed uid=%s domain=%s error=%s",
                 uid, domain, str(e), exc_info=True
             )
+
+    # ── Cross-domain: Router → target department cache ADD ──────────────
+    _TARGET_DEPT_KEYS = ["EXbookeeper", "exbookeeper", "APbookeeper", "Apbookeeper", "apbookeeper"]
+    _DEPT_KEY_TO_DOMAIN = {
+        "exbookeeper": "expenses",
+        "apbookeeper": "invoices",
+    }
+
+    async def _cross_domain_add_after_routing(
+        self,
+        uid: str,
+        company_id: str,
+        job_id: str,
+        collection_path: str,
+    ) -> List[Tuple[str, dict]]:
+        """
+        Après qu'un item Router passe à completed/routed, lire le document
+        Firebase task_manager pour récupérer department_data.{target} et
+        ajouter l'item dans le cache du domaine cible (expenses / invoices).
+
+        Le Redis notification du Router ne contient PAS department_data —
+        seul le document Firebase l'a (source de vérité).
+
+        Returns:
+            Liste de (target_domain, flat_item) pour chaque domaine cible ajouté.
+            Permet à l'appelant de publier les WSS events correspondants.
+        """
+        added_items: List[Tuple[str, dict]] = []
+        try:
+            # 1. Lire le document Firebase task_manager (sync I/O → thread)
+            doc_path = f"clients/{uid}/task_manager/{job_id}"
+            firebase = FirebaseManagement()
+            task_doc = await asyncio.to_thread(firebase.get_document, doc_path)
+
+            if not task_doc:
+                logger.warning(
+                    "[CROSS_DOMAIN] task_manager doc not found: %s — skipping",
+                    doc_path,
+                )
+                return added_items
+
+            dept_data = task_doc.get("department_data", {})
+            if not dept_data:
+                logger.info(
+                    "[CROSS_DOMAIN] no department_data in %s — nothing to cross-add",
+                    doc_path,
+                )
+                return added_items
+
+            # 2. Pour chaque département cible présent, bâtir un item et l'ajouter
+            processed_domains = set()
+            for dept_key in self._TARGET_DEPT_KEYS:
+                target_entry = dept_data.get(dept_key)
+                if not target_entry or not isinstance(target_entry, dict):
+                    continue
+
+                target_domain = self._DEPT_KEY_TO_DOMAIN.get(dept_key.lower())
+                if not target_domain or target_domain in processed_domains:
+                    continue
+                processed_domains.add(target_domain)
+
+                # 3. Construire l'item au format attendu par le cache cible
+                item = self._build_cross_domain_item(
+                    target_domain=target_domain,
+                    dept_entry=target_entry,
+                    task_doc=task_doc,
+                    job_id=job_id,
+                )
+
+                # 4. Injecter dans le cache cible comme nouvel item (to_process)
+                logger.info(
+                    "[CROSS_DOMAIN] ADD to %s cache — job_id=%s status=%s",
+                    target_domain, job_id, item.get("status", "to_process"),
+                )
+                self._update_business_cache_item(
+                    uid=uid,
+                    company_id=company_id,
+                    domain=target_domain,
+                    job_id=job_id,
+                    item_data=item,
+                    is_new=True,
+                )
+                added_items.append((target_domain, item))
+
+        except Exception as e:
+            logger.error(
+                "[CROSS_DOMAIN] failed uid=%s job_id=%s error=%s",
+                uid, job_id, str(e),
+                exc_info=True,
+            )
+        return added_items
+
+    @staticmethod
+    def _build_cross_domain_item(
+        target_domain: str,
+        dept_entry: dict,
+        task_doc: dict,
+        job_id: str,
+    ) -> dict:
+        """
+        Construit un item formaté pour le cache du domaine cible.
+
+        expenses → format ExpensesHandlers._transform_expenses
+        invoices → format standard AP cache
+        """
+        # Champs communs provenant du document racine task_manager
+        base = {
+            "job_id": task_doc.get("job_id", job_id),
+            "file_name": task_doc.get("file_name", dept_entry.get("file_name", "")),
+            "file_id": task_doc.get("file_id", dept_entry.get("file_id", "")),
+            "mandate_path": task_doc.get("mandate_path", ""),
+            "status": dept_entry.get("status", "to_process"),
+        }
+
+        if target_domain == "expenses":
+            # Format identique à ExpensesHandlers._transform_expenses
+            base["expense_id"] = task_doc.get("id", job_id)
+            base["supplier"] = dept_entry.get("supplier", "")
+            base["amount"] = dept_entry.get("amount", 0)
+            base["date"] = dept_entry.get("date", "")
+            base["currency"] = dept_entry.get("currency", "")
+            base["category"] = dept_entry.get("category", "")
+            base["description"] = dept_entry.get("description", "")
+
+        elif target_domain == "invoices":
+            # Format standard AP cache
+            base["supplier"] = dept_entry.get("supplier", "")
+            base["amount"] = dept_entry.get("amount", 0)
+            base["date"] = dept_entry.get("date", "")
+            base["currency"] = dept_entry.get("currency", "")
+            base["current_step"] = dept_entry.get("current_step", "")
+
+        return base
 
     @staticmethod
     def _normalize_department(dept: str) -> str:
@@ -1392,6 +1527,52 @@ class RedisSubscriber:
             if raw_status and "status" not in item_data:
                 item_data["status"] = message_data.get("status", raw_status)
 
+            # Aplatissement domain-specific: le cache initial stocke les champs
+            # métier au top-level, mais le delta Redis les a imbriqués dans
+            # department_data.{Department}. On les extrait pour cohérence.
+            dept_data = item_data.get("department_data", {})
+            if isinstance(dept_data, dict) and dept_data:
+                if domain == "routing":
+                    router_sub = dept_data.get("Router", {}) or dept_data.get("router", {})
+                    if isinstance(router_sub, dict) and router_sub.get("selected_service"):
+                        item_data["routed_to"] = router_sub["selected_service"]
+
+                elif domain == "expenses":
+                    # Aplatir department_data.EXbookeeper → top-level
+                    # (cohérent avec _fetch_from_task_manager / _build_cross_domain_item)
+                    ex_sub = dept_data.get("EXbookeeper", {}) or dept_data.get("exbookeeper", {})
+                    if isinstance(ex_sub, dict) and ex_sub:
+                        _EXPENSE_FLAT_KEYS = (
+                            "supplier", "amount", "date", "currency",
+                            "category", "description", "payment_method",
+                        )
+                        for k in _EXPENSE_FLAT_KEYS:
+                            if k in ex_sub and k not in item_data:
+                                item_data[k] = ex_sub[k]
+                        # expense_id doit correspondre au job_id pour le matching frontend
+                        if "expense_id" not in item_data:
+                            item_data["expense_id"] = job_id
+                        logger.debug(
+                            "[REDIS_SUBSCRIBER] → EXbookeeper flattened keys: %s",
+                            [k for k in _EXPENSE_FLAT_KEYS if k in ex_sub],
+                        )
+
+                elif domain == "invoices":
+                    # Aplatir department_data.APbookeeper → top-level
+                    ap_sub = (
+                        dept_data.get("APbookeeper", {})
+                        or dept_data.get("Apbookeeper", {})
+                        or dept_data.get("apbookeeper", {})
+                    )
+                    if isinstance(ap_sub, dict) and ap_sub:
+                        _AP_FLAT_KEYS = (
+                            "supplier", "amount", "date", "currency",
+                            "current_step", "current_step_technical",
+                        )
+                        for k in _AP_FLAT_KEYS:
+                            if k in ap_sub and k not in item_data:
+                                item_data[k] = ap_sub[k]
+
             self._update_business_cache_item(
                 uid=uid,
                 company_id=company_id,
@@ -1400,6 +1581,27 @@ class RedisSubscriber:
                 item_data=item_data,
                 is_new=is_new
             )
+
+            # Étape 1-cross: Cross-domain ADD when Router completes a routed item
+            # The Router writes department_data.{APbookeeper|EXbookeeper} in Firebase
+            # but the Redis notification only says department="Router".
+            # We read the Firebase doc to get the target department and ADD to its cache.
+            logger.info(
+                "[REDIS_SUBSCRIBER] → Step 1-cross CHECK: domain=%s raw_status=%r job_id=%s",
+                domain, raw_status, job_id,
+            )
+            cross_domain_items: List[Tuple[str, dict]] = []
+            if domain == "routing" and raw_status and raw_status.lower() in ("completed", "routed"):
+                logger.info(
+                    "[REDIS_SUBSCRIBER] → Step 1-cross TRIGGERED: cross-domain ADD for job_id=%s",
+                    job_id,
+                )
+                cross_domain_items = await self._cross_domain_add_after_routing(
+                    uid=uid,
+                    company_id=company_id,
+                    job_id=job_id,
+                    collection_path=message_data.get("collection_path", ""),
+                )
 
             # Étape 1a: Mise à jour active_jobs (suivi par-job)
             # Non-bloquant: met à jour jobs_status dans le document on_process
@@ -1532,6 +1734,47 @@ class RedisSubscriber:
             else:
                 logger.info("[REDIS_SUBSCRIBER] → Step 2: Skipping WebSocket publish (user not connected)")
                 logger.info("[REDIS_SUBSCRIBER] handle_task_manager SUCCESS - cache updated, no WS publish")
+
+            # Étape 2-cross: Publier WSS events pour les domaines cibles du cross-domain
+            # (ex: Router→Expenses, Router→Invoices).  Le cache a été mis à jour en Step 1-cross;
+            # il faut aussi pousser le delta WSS si l'utilisateur est sur la page cible.
+            if cross_domain_items and is_connected:
+                context = _get_user_context(uid)
+                current_company = context.get("company_id")
+                current_domain = context.get("current_domain")
+                for target_domain, flat_item in cross_domain_items:
+                    if current_company == company_id and current_domain == target_domain:
+                        try:
+                            item_status = (flat_item.get("status") or "to_process").lower()
+                            cross_payload = {
+                                "action": "update",
+                                "data": {
+                                    "type": "task_manager_created",
+                                    "job_id": job_id,
+                                    "department": department,
+                                    "collection_id": company_id,
+                                    "status": item_status,
+                                    "status_category": StatusNormalizer.get_category(item_status),
+                                    **flat_item,
+                                },
+                            }
+                            cross_published = await publish_business_event(
+                                uid=uid,
+                                company_id=company_id,
+                                domain=target_domain,
+                                event_type=f"{target_domain}.task_manager_update",
+                                payload=cross_payload,
+                            )
+                            if cross_published:
+                                logger.info(
+                                    "[REDIS_SUBSCRIBER] → Step 2-cross: published %s.task_manager_update for job_id=%s",
+                                    target_domain, job_id,
+                                )
+                        except Exception as cross_err:
+                            logger.warning(
+                                "[REDIS_SUBSCRIBER] → Step 2-cross: publish failed domain=%s error=%s",
+                                target_domain, cross_err,
+                            )
 
             duration_ms = (time.time() - start_time) * 1000
             logger.debug("[REDIS_SUBSCRIBER] → duration_ms=%.2f", duration_ms)

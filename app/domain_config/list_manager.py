@@ -77,6 +77,7 @@ class ListManager:
                 "routing": RoutingDomainConfig,
                 "invoices": InvoicesDomainConfig,
                 "banking": BankingDomainConfig,
+                "bank": BankingDomainConfig,
                 "expenses": ExpensesDomainConfig,
             }
 

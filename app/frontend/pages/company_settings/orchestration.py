@@ -72,23 +72,150 @@ async def _rebroadcast_company_details(
             "communication_log_type": selected_mandate.get("communication_log_type", "pinnokio"),
         }
 
+        # Load email_settings if present
+        email_settings = None
+        try:
+            email_settings_doc = firebase_mgmt.get_document(f"{mandate_path}/setup/email_settings")
+            if email_settings_doc:
+                email_settings = email_settings_doc
+        except Exception:
+            pass
+
+        # Read email_type from mandate
+        email_type = selected_mandate.get("email_type")
+
+        # Check email auth status (token exists?)
+        email_auth_status = "none"
+        try:
+            token = firebase_mgmt.user_app_permission_token(uid, service="gmail")
+            if token and token.get("token"):
+                email_auth_status = "connected"
+        except Exception:
+            pass
+
         # Broadcast as COMPANY.DETAILS partial update so the existing
         # handleCompanyDetailsUpdate handler can pick it up and sync the store
+        payload_data = {
+            "contact_space_id": company_id,
+            "mandate_path": mandate_path,
+            "workflow_params": workflow_params,
+            "communication_settings": communication_settings,
+            "email_type": email_type,
+            "email_auth_status": email_auth_status,
+            "_partialUpdate": True,
+        }
+        if email_settings is not None:
+            payload_data["email_settings"] = email_settings
+
         await hub.broadcast(uid, {
             "type": WS_EVENTS.COMPANY.DETAILS,
-            "payload": {
-                "contact_space_id": company_id,
-                "mandate_path": mandate_path,
-                "workflow_params": workflow_params,
-                "communication_settings": communication_settings,
-                "_partialUpdate": True,
-            }
+            "payload": payload_data,
         })
 
         logger.info(f"[COMPANY_SETTINGS] Re-broadcasted company details for company_id={company_id}")
 
+        # Refresh Redis L2 cache + invalidate Worker LLM cache
+        _refresh_company_context_cache(uid, company_id, selected_mandate, workflow_params)
+
     except Exception as e:
         logger.warning(f"[COMPANY_SETTINGS] Failed to re-broadcast company details: {e}")
+
+
+def _refresh_company_context_cache(
+    uid: str,
+    company_id: str,
+    selected_mandate: Dict[str, Any],
+    workflow_params: Dict[str, Any],
+) -> None:
+    """
+    Update Redis L2 company context cache after a settings save.
+
+    Reads the existing cache, merges fresh fields from the re-fetched mandate,
+    and writes it back. Also deletes the Worker LLM cache key to force reload.
+    """
+    import json
+    from app.redis_client import get_redis
+    from app.llm_service.redis_namespaces import build_company_context_key
+
+    COMPANY_SELECTION_TTL = 86400  # 24h — same as dashboard_orchestration_handlers
+
+    try:
+        redis_client = get_redis()
+        context_key = build_company_context_key(uid, company_id)
+
+        # 1. Read existing L2 cache
+        cached = redis_client.get(context_key)
+        if not cached:
+            logger.info(f"[SETTINGS_CACHE] No L2 cache to refresh for {context_key}")
+            # No cache → nothing to merge. Next page access will do a full fetch.
+            # Still delete Worker cache just in case.
+            redis_client.delete(f"context:{uid}:{company_id}")
+            return
+
+        existing = json.loads(cached if isinstance(cached, str) else cached.decode())
+
+        # 2. Merge workflow_params (complete dict from _build_workflow_params)
+        existing["workflow_params"] = workflow_params
+
+        # 3. Merge flat fields from re-fetched mandate (source of truth)
+        flat_fields = [
+            "router_automated_workflow", "router_approval_required",
+            "router_communication_method",
+            "apbookeeper_approval_required", "apbookeeper_approval_contact_creation",
+            "apbookeeper_communication_method",
+            "banker_approval_required", "banker_approval_threshold_workflow",
+            "banker_communication_method",
+            "dms_type", "chat_type", "communication_chat_type", "communication_log_type",
+            "legal_name", "legal_status", "country", "address",
+            "phone_number", "email", "website", "language",
+            "has_vat", "vat_number", "ownership_type", "base_currency",
+        ]
+        for field in flat_fields:
+            if field in selected_mandate:
+                existing[field] = selected_mandate[field]
+
+        # 4. Promote critical workflow fields to flat keys
+        #    (routing/orchestration.py reads context.get("router_automated_workflow"))
+        existing["router_automated_workflow"] = workflow_params.get(
+            "router_automated_workflow",
+            existing.get("router_automated_workflow", True),
+        )
+        existing["router_approval_required"] = workflow_params.get(
+            "router_approval_required",
+            existing.get("router_approval_required", False),
+        )
+
+        # 4b. Sync communication_chat_type ← chat_type (save_settings writes both)
+        #     fetch_single_mandate may NOT return communication_chat_type,
+        #     so we force-sync from chat_type to avoid stale L2 cache values.
+        if "chat_type" in existing:
+            existing["communication_chat_type"] = existing["chat_type"]
+
+        # 5. Merge communication_settings (nested)
+        prev_comm = existing.get("communication_settings", {})
+        existing["communication_settings"] = {
+            "dms_type": selected_mandate.get("dms_type", prev_comm.get("dms_type", "odoo")),
+            "chat_type": selected_mandate.get("chat_type", prev_comm.get("chat_type", "pinnokio")),
+            "communication_log_type": selected_mandate.get(
+                "communication_log_type", prev_comm.get("communication_log_type", "pinnokio")
+            ),
+        }
+
+        # 6. Merge context_details if present (save_context flow)
+        if "context_details" in selected_mandate:
+            existing["context_details"] = selected_mandate["context_details"]
+
+        # 7. Write back to Redis
+        redis_client.setex(context_key, COMPANY_SELECTION_TTL, json.dumps(existing))
+        logger.info(f"[SETTINGS_CACHE] L2 cache refreshed: {context_key}")
+
+        # 8. Delete Worker LLM Redis cache (forces reload from Firebase)
+        worker_key = f"context:{uid}:{company_id}"
+        deleted = redis_client.delete(worker_key)
+        logger.info(f"[SETTINGS_CACHE] Worker cache deleted: {worker_key} (deleted={deleted})")
+
+    except Exception as e:
+        logger.warning(f"[SETTINGS_CACHE] Failed to refresh L2 cache: {e}")
 
 
 # ============================================
@@ -1116,4 +1243,231 @@ async def handle_delete_company(
         await hub.broadcast(uid, {
             "type": WS_EVENTS.COMPANY_SETTINGS.ERROR,
             "payload": {"error": str(e), "code": "DELETE_COMPANY_ERROR"}
+        })
+
+
+# ============================================
+# EMAIL SETTINGS
+# ============================================
+
+async def handle_save_email_settings(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """
+    Handle company_settings.save_email_settings WebSocket event.
+
+    Args:
+        payload: {
+            "company_id": str,
+            "mandate_path": str,
+            "data": {
+                "contact_groups": [...],
+                "default_policy": {...}
+            }
+        }
+    """
+    company_id = payload.get("company_id")
+    mandate_path = payload.get("mandate_path")
+    data = payload.get("data", {})
+
+    if not company_id or not mandate_path:
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.ERROR,
+            "payload": {"error": "Missing company_id or mandate_path"}
+        })
+        return
+
+    try:
+        handlers = get_company_settings_handlers()
+        result = await handlers.save_email_settings(
+            user_id=uid,
+            company_id=company_id,
+            mandate_path=mandate_path,
+            data=data,
+        )
+
+        # Broadcast save result
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.EMAIL_SETTINGS_SAVED,
+            "payload": {
+                "success": result.get("success"),
+                "error": result.get("error"),
+                "company_id": company_id,
+            }
+        })
+
+        # Re-broadcast COMPANY.DETAILS to sync stores (includes email_settings)
+        if result.get("success"):
+            await _rebroadcast_company_details(uid, company_id, mandate_path)
+
+    except Exception as e:
+        logger.error(f"[COMPANY_SETTINGS] Save email settings failed: {e}")
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.ERROR,
+            "payload": {"error": str(e)}
+        })
+
+
+async def handle_email_approve_draft(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """
+    Handle company_settings.email_approve_draft WebSocket event.
+
+    Args:
+        payload: {
+            "company_id": str,
+            "mandate_path": str,
+            "draft_id": str,
+            "decision": "approve" | "reject" | "modify",
+            "modified_body": str (optional, for modify)
+        }
+    """
+    company_id = payload.get("company_id")
+    mandate_path = payload.get("mandate_path")
+    draft_id = payload.get("draft_id")
+    decision = payload.get("decision")
+
+    if not company_id or not mandate_path or not draft_id or not decision:
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.ERROR,
+            "payload": {"error": "Missing required parameters for email approval"}
+        })
+        return
+
+    try:
+        handlers = get_company_settings_handlers()
+        result = await handlers.handle_email_approval(
+            user_id=uid,
+            company_id=company_id,
+            mandate_path=mandate_path,
+            draft_id=draft_id,
+            decision=decision,
+            modified_body=payload.get("modified_body"),
+        )
+
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.EMAIL_DRAFT_APPROVED,
+            "payload": {
+                "success": result.get("success"),
+                "error": result.get("error"),
+                "draft_id": draft_id,
+                "decision": decision,
+                "company_id": company_id,
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"[COMPANY_SETTINGS] Email approval failed: {e}")
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.ERROR,
+            "payload": {"error": str(e)}
+        })
+
+
+# ============================================
+# EMAIL PROVIDER TYPE
+# ============================================
+
+async def handle_save_email_type(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """
+    Handle company_settings.save_email_type WebSocket event.
+
+    Payload: { company_id, mandate_path, email_type }
+    """
+    company_id = payload.get("company_id")
+    mandate_path = payload.get("mandate_path")
+    email_type = payload.get("email_type")
+
+    if not company_id or not mandate_path or not email_type:
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.ERROR,
+            "payload": {"error": "Missing company_id, mandate_path or email_type"}
+        })
+        return
+
+    try:
+        handlers = get_company_settings_handlers()
+        result = await handlers.save_email_type(
+            user_id=uid,
+            company_id=company_id,
+            mandate_path=mandate_path,
+            email_type=email_type,
+        )
+
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.EMAIL_TYPE_SAVED,
+            "payload": {
+                "success": result.get("success"),
+                "error": result.get("error"),
+                "email_type": email_type,
+                "company_id": company_id,
+            }
+        })
+
+        if result.get("success"):
+            await _rebroadcast_company_details(uid, company_id, mandate_path)
+
+    except Exception as e:
+        logger.error(f"[COMPANY_SETTINGS] Save email type failed: {e}")
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.ERROR,
+            "payload": {"error": str(e)}
+        })
+
+
+async def handle_initiate_email_auth(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """
+    Handle company_settings.initiate_email_auth WebSocket event.
+
+    Payload: { provider }
+    """
+    provider = payload.get("provider", "gmail")
+
+    try:
+        handlers = get_company_settings_handlers()
+        result = await handlers.initiate_email_auth(
+            user_id=uid,
+            provider=provider,
+            session_id=session_id,
+        )
+
+        if result.get("coming_soon"):
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.COMPANY_SETTINGS.EMAIL_AUTH_URL,
+                "payload": {
+                    "success": True,
+                    "coming_soon": True,
+                    "provider": provider,
+                }
+            })
+            return
+
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.EMAIL_AUTH_URL,
+            "payload": {
+                "success": result.get("success"),
+                "error": result.get("error"),
+                "auth_url": result.get("auth_url"),
+                "provider": provider,
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"[COMPANY_SETTINGS] Initiate email auth failed: {e}")
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.ERROR,
+            "payload": {"error": str(e)}
         })

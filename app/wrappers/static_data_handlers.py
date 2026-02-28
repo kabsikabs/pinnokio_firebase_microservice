@@ -123,7 +123,8 @@ class StaticDataHandlers:
                     "erps": [...],
                     "dms": [...],
                     "currencies": [...],
-                    "communicationTypes": [...]
+                    "communicationTypes": [...],
+                    "emailTypes": [...]
                 }
             }
         """
@@ -149,6 +150,7 @@ class StaticDataHandlers:
             dms_task = asyncio.to_thread(self._load_dms)
             currencies_task = asyncio.to_thread(self._load_currencies)
             communication_task = asyncio.to_thread(self._load_communication_types)
+            email_task = asyncio.to_thread(self._load_email_types)
 
             # Wait for all tasks
             results = await asyncio.gather(
@@ -158,6 +160,7 @@ class StaticDataHandlers:
                 dms_task,
                 currencies_task,
                 communication_task,
+                email_task,
                 return_exceptions=True
             )
 
@@ -168,6 +171,7 @@ class StaticDataHandlers:
             dms = results[3] if not isinstance(results[3], Exception) else []
             currencies = results[4] if not isinstance(results[4], Exception) else []
             communication_types = results[5] if not isinstance(results[5], Exception) else []
+            email_types = results[6] if not isinstance(results[6], Exception) else []
 
             # countries_data is a tuple (country_id_map, countries_list)
             country_id_map, countries_list = countries_data
@@ -188,7 +192,8 @@ class StaticDataHandlers:
                 "erps": erps,
                 "dms": dms,
                 "currencies": currencies,
-                "communicationTypes": communication_types
+                "communicationTypes": communication_types,
+                "emailTypes": email_types
             }
 
             # Cache in Redis
@@ -205,7 +210,8 @@ class StaticDataHandlers:
                 f"erps={len(erps)}, "
                 f"dms={len(dms)}, "
                 f"currencies={len(currencies)}, "
-                f"communicationTypes={len(communication_types)}"
+                f"communicationTypes={len(communication_types)}, "
+                f"emailTypes={len(email_types)}"
             )
 
             return {
@@ -366,6 +372,27 @@ class StaticDataHandlers:
                 {"code": "EUR", "name": "Euro", "region": "Europe"},
                 {"code": "USD", "name": "US Dollar", "region": "United States"},
                 {"code": "GBP", "name": "British Pound", "region": "United Kingdom"}
+            ]
+
+    def _load_email_types(self) -> List[Dict[str, Any]]:
+        """Load email provider types from Firebase."""
+        try:
+            email_types = self.firebase.get_param_data('email')
+            if not isinstance(email_types, list):
+                return []
+            return [
+                {
+                    "id": item.get("email_name", str(item.get("id", ""))),
+                    "name": item.get("email_displayname", item.get("name", item.get("email_name", "")))
+                }
+                for item in email_types
+                if isinstance(item, dict) and item.get("active", True)
+            ]
+        except Exception as e:
+            logger.warning(f"[STATIC_DATA] Error loading email types: {e}")
+            return [
+                {"id": "gmail", "name": "Gmail"},
+                {"id": "outlook", "name": "Outlook"}
             ]
 
     def _load_communication_types(self) -> List[Dict[str, Any]]:

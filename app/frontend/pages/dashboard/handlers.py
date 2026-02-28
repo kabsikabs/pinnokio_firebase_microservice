@@ -359,9 +359,9 @@ class DashboardHandlers:
     def _default_metrics(self) -> Dict[str, Any]:
         """Retourne les métriques par défaut."""
         return {
-            "router": {"toProcess": 0, "inProcess": 0, "processed": 0},
+            "router": {"toProcess": 0, "inProcess": 0, "pending": 0, "processed": 0},
             "ap": {"toProcess": 0, "inProcess": 0, "pending": 0, "processed": 0},
-            "bank": {"toProcess": 0, "inProcess": 0, "pending": 0},
+            "bank": {"toProcess": 0, "inProcess": 0, "pending": 0, "matched": 0},
             "expenses": {"open": 0, "closed": 0, "pendingApproval": 0},
             "summary": {
                 "totalDocumentsToProcess": 0,
@@ -469,7 +469,7 @@ class DashboardHandlers:
         les données de stockage de la base vectorielle.
         """
         try:
-            from .chroma_vector_service import get_chroma_vector_service
+            from app.chroma_vector_service import get_chroma_vector_service
 
             # Récupérer le service ChromaDB
             chroma_service = get_chroma_vector_service()
@@ -535,7 +535,7 @@ class DashboardHandlers:
         - expenses/details: Expenses metrics (from {mandate_path}/working_doc/expenses_details/items)
         """
         try:
-            from .cache.unified_cache_manager import get_firebase_cache_manager
+            from app.cache.unified_cache_manager import get_firebase_cache_manager
 
             cache = get_firebase_cache_manager()
             metrics = self._default_metrics()
@@ -588,7 +588,14 @@ class DashboardHandlers:
                     metrics["bank"]["toProcess"] = len(data.get("to_process", []))
                     metrics["bank"]["inProcess"] = len(data.get("in_process", []))
                     metrics["bank"]["pending"] = len(data.get("pending", []))
-                    logger.info(f"_get_metrics: Bank from cache - toProcess={metrics['bank']['toProcess']}")
+                    metrics["bank"]["matched"] = len(data.get("processed", []))
+                    logger.info(
+                        f"_get_metrics: Bank from cache - "
+                        f"toProcess={metrics['bank']['toProcess']}, "
+                        f"inProcess={metrics['bank']['inProcess']}, "
+                        f"pending={metrics['bank']['pending']}, "
+                        f"matched={metrics['bank']['matched']}"
+                    )
             except Exception as e:
                 logger.warning(f"_get_metrics: Bank cache error: {e}")
 
@@ -929,8 +936,8 @@ class DashboardHandlers:
             return None
 
         try:
-            from .cache.unified_cache_manager import get_firebase_cache_manager
-            from .firebase_providers import get_firebase_management
+            from app.cache.unified_cache_manager import get_firebase_cache_manager
+            from app.firebase_providers import get_firebase_management
 
             # 1. Tentative de récupération depuis le cache Redis (sauf force_refresh)
             # billing_history (PAS expenses) = Historique des dépenses (task_manager)

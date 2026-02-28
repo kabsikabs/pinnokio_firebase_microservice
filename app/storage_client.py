@@ -225,6 +225,25 @@ class StorageClientSingleton:
             logger.error(f"[GCS] list_blobs failed: {e}")
             return []
 
+    def generate_signed_url(self, blob_name: str, expiration_hours: int = 168) -> str:
+        """
+        Generate a signed URL for a GCS blob.
+
+        Args:
+            blob_name: Path of the blob in the default bucket.
+            expiration_hours: URL validity in hours (default 168 = 7 days).
+
+        Returns:
+            Signed URL string.
+        """
+        from datetime import timedelta
+
+        blob = self._bucket.blob(blob_name)
+        return blob.generate_signed_url(
+            expiration=timedelta(hours=expiration_hours),
+            method="GET",
+        )
+
     def folder_exists_or_create(self, bucket_name: str, folder_path: str):
         """
         Vérifie si un dossier existe dans le bucket, sinon le crée.

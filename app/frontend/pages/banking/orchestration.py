@@ -592,12 +592,17 @@ async def handle_banking_process(
             if optimistic_update_id:
                 await _reject_optimistic_update(uid, optimistic_update_id, "banking", result.get("error", "Process failed"))
 
+            _banking_err_payload = {
+                "error": result.get("error", "Process failed"),
+                "code": result.get("code", "PROCESS_ERROR"),
+            }
+            if result.get("balance_info"):
+                _banking_err_payload["balance_info"] = result["balance_info"]
+            if result.get("message"):
+                _banking_err_payload["message"] = result["message"]
             await hub.broadcast(uid, {
                 "type": WS_EVENTS.BANKING.ERROR,
-                "payload": {
-                    "error": result.get("error", "Process failed"),
-                    "code": result.get("code", "PROCESS_ERROR"),
-                }
+                "payload": _banking_err_payload,
             })
 
     except Exception as e:

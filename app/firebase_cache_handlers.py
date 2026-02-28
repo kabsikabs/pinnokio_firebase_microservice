@@ -608,10 +608,12 @@ class FirebaseCacheHandlers:
             erp_map = {str(tx.get("move_id") or tx.get("id")): tx for tx in erp_transactions}
 
             # A. In Process (cross-ref ERP, flat list avec batch_id sur chaque item)
-            # Note: si absent de l'ERP, on garde quand même en in_process.
-            # Le process en cours détectera que la transaction est déjà réconciliée.
-            # Les batches sont calculés à la volée par l'orchestration (pas stockés dans le cache).
+            # FILTRE CROISÉ: seules les transactions encore présentes dans l'ERP
+            # (non réconciliées) sont affichées. Si la transaction a déjà été
+            # réconciliée dans Odoo, elle n'apparaît plus dans erp_map et est
+            # considérée comme fantôme (task_manager stale).
             in_process_list = []
+            phantom_in_process = 0
 
             for batch_id, items in fb_jobs.get("in_process", {}).items():
                 for item in items:
@@ -619,21 +621,40 @@ class FirebaseCacheHandlers:
                     if not tx_id:
                         continue  # Skip items sans transaction_id (docs batch-level fantômes)
                     erp_tx = erp_map.pop(tx_id, None)
+                    if erp_tx is None:
+                        phantom_in_process += 1
+                        continue  # Transaction déjà réconciliée dans ERP → fantôme
                     normalized = _normalize_from_task_manager(item, erp_tx=erp_tx, status="on_process")
                     normalized["batch_id"] = batch_id
                     in_process_list.append(normalized)
 
+            if phantom_in_process:
+                logger.info(
+                    f"[BANK] Filtered {phantom_in_process} phantom in_process "
+                    f"(task_manager stale, already reconciled in ERP)"
+                )
+
             # B. Pending (cross-ref ERP)
-            # Une transaction pending peut être en attente d'approbation (pas dans l'ERP)
-            # → on l'affiche toujours, avec fallback sur banker_data si absent de l'ERP.
+            # FILTRE CROISÉ: même logique — une transaction pending dont le move_id
+            # n'est plus dans l'ERP a déjà été réconciliée → fantôme.
             pending_list = []
+            phantom_pending = 0
             for item in fb_jobs.get("pending", []):
                 tx_id = str(item.get("transaction_id") or "")
                 if not tx_id:
                     continue  # Skip items sans transaction_id
                 erp_tx = erp_map.pop(tx_id, None)
+                if erp_tx is None:
+                    phantom_pending += 1
+                    continue  # Transaction déjà réconciliée dans ERP → fantôme
                 normalized = _normalize_from_task_manager(item, erp_tx=erp_tx, status="pending")
                 pending_list.append(normalized)
+
+            if phantom_pending:
+                logger.info(
+                    f"[BANK] Filtered {phantom_pending} phantom pending "
+                    f"(task_manager stale, already reconciled in ERP)"
+                )
 
             # C. Processed (full Firestore docs, extract department_data.banker)
             processed_list = []

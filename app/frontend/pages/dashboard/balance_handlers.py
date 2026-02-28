@@ -255,6 +255,14 @@ class BalanceHandlers:
                 }
             })
 
+            # Update L1 cache + broadcast real-time delta
+            try:
+                from app.balance_service import get_balance_service
+                _bal_svc = get_balance_service()
+                await _bal_svc.refresh_and_broadcast(uid, company_id, mandate_path)
+            except Exception as _bal_err:
+                logger.warning(f"[BALANCE] L1 cache update failed (non-blocking): {_bal_err}")
+
             logger.info(
                 f"[BALANCE] Refreshed: uid={uid} company_id={company_id} "
                 f"balance={balance_data.get('currentBalance', 0):.2f}"

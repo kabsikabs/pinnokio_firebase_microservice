@@ -205,6 +205,10 @@ class WebSocketHub:
         else:
             self._logger.info("ws_broadcast uid=%s type=%s channel=%s connections=%s", uid, msg_type, channel, sent_count)
 
+    async def send_to_user(self, uid: str, message: dict) -> None:
+        """Alias for broadcast — sends message to all WS connections for a user."""
+        await self.broadcast(uid, message)
+
     def broadcast_threadsafe(self, uid: str, message: dict) -> None:
         """Déclenche un broadcast depuis un thread quelconque via la loop serveur."""
         loop = self._loop

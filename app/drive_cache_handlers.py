@@ -286,7 +286,7 @@ class DriveCacheHandlers:
                 )
 
                 # Détecter erreurs OAuth
-                if "invalid_grant" in error_text or "unauthorized" in error_text:
+                if "invalid_grant" in error_text or "unauthorized" in error_text or "invalid_scope" in error_text:
                     return {
                         "data": None,
                         "oauth_error": True,
@@ -328,7 +328,7 @@ class DriveCacheHandlers:
             logger.error(f"DRIVE_CACHE._fetch_from_drive error={e}")
 
             # Détecter erreurs OAuth dans les exceptions
-            if "invalid_grant" in error_str or "oauth" in error_str:
+            if "invalid_grant" in error_str or "oauth" in error_str or "invalid_scope" in error_str:
                 return {
                     "data": None,
                     "oauth_error": True,

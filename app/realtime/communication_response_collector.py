@@ -220,6 +220,13 @@ class CommunicationResponseCollector:
             from app.llm_service.llm_gateway import get_llm_gateway
 
             gateway = get_llm_gateway()
+
+            # Attachments from TG microservice (même shape que POST /upload/chat-file)
+            enqueue_kwargs = {}
+            attachments = response.get("attachments")
+            if attachments:
+                enqueue_kwargs["attachments"] = attachments
+
             await gateway.enqueue_message(
                 user_id=uid,
                 collection_name=company_id,
@@ -228,10 +235,11 @@ class CommunicationResponseCollector:
                 chat_mode=self._MODULE_TO_CHAT_MODE.get(module, "general_chat"),
                 communication_chat_type="telegram",
                 external_thread_id=str(chat_id),
+                **enqueue_kwargs,
             )
             logger.info(
-                "[RESPONSE_COLLECTOR] Telegram message enqueued uid=%s thread=%s module=%s",
-                uid, thread_key, module,
+                "[RESPONSE_COLLECTOR] Telegram message enqueued uid=%s thread=%s module=%s attachments=%s",
+                uid, thread_key, module, len(attachments) if attachments else 0,
             )
 
         elif msg_type == "callback":

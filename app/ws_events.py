@@ -49,6 +49,7 @@ class AuthEvents:
     LOGIN_ERROR = "auth.login_error"
     OAUTH_SUCCESS = "auth.oauth_success"
     OAUTH_ERROR = "auth.oauth_error"
+    OAUTH_REDIRECT = "auth.oauth_redirect"
     FIREBASE_TOKEN = "auth.firebase_token"
     LOGOUT = "auth.logout"
     SESSION_CONFIRMED = "auth.session_confirmed"
@@ -302,6 +303,7 @@ class BalanceEvents:
     TOP_UP_COMPLETE = "balance.top_up_complete"  # Payment completed
     REFRESH = "balance.refresh"             # Request balance refresh
     REFRESHED = "balance.refreshed"         # Balance data updated
+    BALANCE_UPDATE = "balance.balance_update"  # Real-time balance push (L1 cache delta)
     ERROR = "balance.error"                 # Error occurred
 
 
@@ -568,6 +570,20 @@ class CompanySettingsEvents:
     TELEGRAM_REGISTRATION_FAILED = "company_settings.telegram_registration_failed"
     TELEGRAM_REMOVE_USER = "company_settings.telegram_remove_user"
     TELEGRAM_USER_REMOVED = "company_settings.telegram_user_removed"
+
+    # Email settings
+    SAVE_EMAIL_SETTINGS = "company_settings.save_email_settings"
+    EMAIL_SETTINGS_SAVED = "company_settings.email_settings_saved"
+
+    # Email provider type
+    SAVE_EMAIL_TYPE = "company_settings.save_email_type"
+    EMAIL_TYPE_SAVED = "company_settings.email_type_saved"
+    INITIATE_EMAIL_AUTH = "company_settings.initiate_email_auth"
+    EMAIL_AUTH_URL = "company_settings.email_auth_url"
+
+    # Email approval
+    EMAIL_APPROVE_DRAFT = "company_settings.email_approve_draft"
+    EMAIL_DRAFT_APPROVED = "company_settings.email_draft_approved"
 
     # Asset management
     SAVE_ASSET_CONFIG = "company_settings.save_asset_config"

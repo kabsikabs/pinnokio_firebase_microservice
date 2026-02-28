@@ -402,9 +402,46 @@ async def handle_job_process(
             "code": "NO_DOCUMENTS",
         }
 
+    # ── Balance check before dispatch ──
+    try:
+        from app.balance_service import get_balance_service, COST_PER_ITEM
+
+        _bal_svc = get_balance_service()
+        _cost_per = COST_PER_ITEM.get(job_type, 0.5)
+        _estimated_cost = len(document_ids) * _cost_per
+
+        if _estimated_cost > 0:
+            _bal_result = await _bal_svc.check_balance(
+                uid=uid,
+                mandate_path=mandate_path,
+                estimated_cost=_estimated_cost,
+                operation=f"job_{job_type}",
+            )
+            if not _bal_result.sufficient:
+                logger.warning(
+                    "[JOB_ACTIONS] INSUFFICIENT BALANCE uid=%s job_type=%s "
+                    "balance=%.2f required=%.2f",
+                    uid, job_type,
+                    _bal_result.current_balance, _bal_result.required_balance,
+                )
+                return {
+                    "success": False,
+                    "error": "insufficient_balance",
+                    "code": "INSUFFICIENT_BALANCE",
+                    "balance_info": {
+                        "currentBalance": _bal_result.current_balance,
+                        "requiredBalance": _bal_result.required_balance,
+                        "missingAmount": _bal_result.missing_amount,
+                    },
+                    "message": _bal_result.message,
+                }
+    except Exception as _bal_err:
+        # Failsafe: never block jobs on balance check failure
+        logger.warning("[JOB_ACTIONS] Balance check error (failsafe): %s", _bal_err)
+
     try:
         # Generate batch identifiers
-        batch_id = f"batch_{uuid.uuid4().hex[:10]}"
+        batch_id = payload.get("batch_id") or f"batch_{uuid.uuid4().hex[:10]}"
         aws_instance_id = f"aws_instance_id_{uuid.uuid4().hex[:8]}"
         pub_sub_id = f"klk_google_pubsub_id_{uuid.uuid4().hex[:8]}"
 
@@ -2570,7 +2607,7 @@ async def _persist_jobs_to_task_manager(
     firebase = get_firebase_management()
     config = JOB_TYPE_CONFIG[job_type]
     mandate_path = company_data.get("mandate_path", "")
-    company_id = company_data.get("company_id", "")
+    company_id = company_data.get("company_id") or company_data.get("collection_name", "")
     task_mgr_path = f"clients/{uid}/task_manager"
 
     # Build file_name lookup from jobs_data
@@ -2694,11 +2731,11 @@ async def handle_reverse_reconciliation_dispatch(
     """
     Dispatch a reverse reconciliation request to the Bank worker.
 
-    Simplified path compared to handle_job_process:
-    - HTTP POST to bankbookeeper /reverse-reconciliation-trigger
-    - No notifications created
-    - No optimistic list change
-    - No task_manager persistence (caller manages its own tracking)
+    Uses the same centralized pattern as handle_job_process:
+    - ActiveJobManager.register_job (cold start resilience)
+    - ensure_worker_running (ECS/LOCAL)
+    - Heartbeat check → conditional HTTP POST
+    - No notifications, no optimistic list change, no task_manager persistence
 
     Args:
         uid: Firebase user ID
@@ -2715,9 +2752,10 @@ async def handle_reverse_reconciliation_dispatch(
     logger.info(
         f"[JOB_ACTIONS] ═══════════════════════════════════════════════════════════"
     )
+    requesting_dept = payload.get("requesting_department", "unknown")
     logger.info(
         f"[JOB_ACTIONS] handle_reverse_reconciliation_dispatch START - "
-        f"uid={uid} request_id={request_id} company_id={company_id}"
+        f"uid={uid} request_id={request_id} company_id={company_id} requesting_dept={requesting_dept}"
     )
 
     try:
@@ -2735,70 +2773,113 @@ async def handle_reverse_reconciliation_dispatch(
             "collection_name": company_id,
             "mandates_path": mandate_path,
             "source": source,
+            "requesting_job_id": payload.get("requesting_job_id"),
+            "requesting_department": payload.get("requesting_department"),
         }
 
-        # Step 0: Register in active_jobs for cold start resilience
-        # If klk_bank is down, the job persists and will be picked up by polling
+        # ═══════════════════════════════════════════════════════════════════
+        # Step 1: Register in active_jobs via ActiveJobManager
+        # Same pattern as handle_job_process Step 1.5
+        # ═══════════════════════════════════════════════════════════════════
         try:
-            firebase = get_firebase_management()
-            encoded_mandate = mandate_path.replace("/", "_").replace(".", "_dot_")
-            doc_path = f"active_jobs/reversereconciliation/jobs/{encoded_mandate}_{request_id}"
-            await asyncio.to_thread(
-                firebase.db.document(doc_path).set,
-                {
-                    "request_id": request_id,
-                    "mandate_path": mandate_path,
-                    "status": "running",
-                    "payload": jobbeur_payload,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    "started_at": datetime.now(timezone.utc).isoformat(),
-                    "last_updated": datetime.now(timezone.utc).isoformat(),
-                }
+            reg_result = ActiveJobManager.register_job(
+                mandate_path=mandate_path,
+                job_data=jobbeur_payload,
+                job_key=request_id,
+                job_type="reversereconciliation",
             )
-            logger.info(f"[JOB_ACTIONS] → Reverse recon registered in active_jobs: {doc_path}")
+            logger.info(
+                f"[JOB_ACTIONS] → Step 1: active_jobs registered (reversereconciliation): "
+                f"status={reg_result.get('status')} should_start={reg_result.get('should_start')} "
+                f"position={reg_result.get('position_in_queue')}"
+            )
         except Exception as reg_err:
-            logger.warning(f"[JOB_ACTIONS] Reverse recon active_jobs registration failed: {reg_err}")
+            logger.warning(f"[JOB_ACTIONS] → Step 1: active_jobs registration failed: {reg_err}")
 
-        logger.info(
-            f"[JOB_ACTIONS] → Calling HTTP endpoint: {process_url}"
-        )
+        # ═══════════════════════════════════════════════════════════════════
+        # Step 2: Ensure worker is running (ECS in PROD, subprocess in LOCAL)
+        # Same pattern as handle_job_process Step 1.6
+        # ═══════════════════════════════════════════════════════════════════
+        ecs_starting = False
+        try:
+            environment = os.environ.get("PINNOKIO_ENVIRONMENT", "PROD").upper()
+            if environment == "LOCAL":
+                from ..local_worker_manager import LocalWorkerManager
+                worker_status = LocalWorkerManager.ensure_worker_running("bankbookeeper")
+            else:
+                from ..ecs_manager import ECSManager
+                worker_status = ECSManager.ensure_worker_running("bankbookeeper")
 
-        # HTTP POST to bank worker
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                process_url,
-                json=jobbeur_payload,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                status_code = response.status
-                response_text = await response.text()
+            logger.info(f"[JOB_ACTIONS] → Step 2: Worker status={worker_status.get('status')} (env={environment})")
 
-                if status_code in (200, 202):
-                    logger.info(
-                        f"[JOB_ACTIONS] handle_reverse_reconciliation_dispatch SUCCESS - "
-                        f"request_id={request_id} status={status_code}"
-                    )
-                    return {
-                        "success": True,
-                        "request_id": request_id,
-                        "dispatch_method": "http",
-                        "status_code": status_code,
-                    }
-                else:
-                    logger.error(
-                        f"[JOB_ACTIONS] handle_reverse_reconciliation_dispatch HTTP FAILED - "
-                        f"status={status_code} body={response_text[:200]}"
-                    )
-                    return {
-                        "success": False,
-                        "request_id": request_id,
-                        "error": f"HTTP {status_code}: {response_text[:200]}",
-                        "code": "HTTP_ERROR",
-                    }
+            if worker_status.get("status") in ("starting", "provisioning"):
+                ecs_starting = True
+        except Exception as ecs_err:
+            logger.warning(f"[JOB_ACTIONS] → Step 2: Worker check failed: {ecs_err}")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # Step 3: Check heartbeat → conditional HTTP dispatch
+        # Same pattern as handle_job_process Step 1.7
+        # ═══════════════════════════════════════════════════════════════════
+        skip_http = False
+        if ecs_starting:
+            logger.info("[JOB_ACTIONS] → Step 3: Worker starting up, skipping HTTP dispatch")
+            skip_http = True
+        else:
+            try:
+                redis = get_redis()
+                hb_key = "worker:banker:heartbeat"
+                heartbeat = redis.get(hb_key)
+                if not heartbeat:
+                    logger.info(f"[JOB_ACTIONS] → Step 3: No heartbeat ({hb_key}), skipping HTTP dispatch")
+                    skip_http = True
+            except Exception as hb_err:
+                logger.warning(f"[JOB_ACTIONS] → Step 3: Heartbeat check failed: {hb_err}")
+
+        dispatch_method = "http"
+
+        if skip_http:
+            dispatch_method = "ecs_starting" if ecs_starting else "active_jobs_pending"
+            logger.info(
+                f"[JOB_ACTIONS] handle_reverse_reconciliation_dispatch OK - "
+                f"request_id={request_id} dispatch_method={dispatch_method} (worker will poll active_jobs)"
+            )
+        else:
+            logger.info(f"[JOB_ACTIONS] → Step 4: Calling HTTP endpoint: {process_url}")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    process_url,
+                    json=jobbeur_payload,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    status_code = response.status
+                    response_text = await response.text()
+
+                    if status_code in (200, 202):
+                        logger.info(
+                            f"[JOB_ACTIONS] handle_reverse_reconciliation_dispatch SUCCESS - "
+                            f"request_id={request_id} status={status_code}"
+                        )
+                    else:
+                        # HTTP failed but job is in active_jobs — worker will poll
+                        dispatch_method = "active_jobs_fallback"
+                        logger.warning(
+                            f"[JOB_ACTIONS] handle_reverse_reconciliation_dispatch HTTP FAILED - "
+                            f"status={status_code} body={response_text[:200]} "
+                            f"(fallback: worker will poll active_jobs)"
+                        )
+
+        return {
+            "success": True,
+            "request_id": request_id,
+            "dispatch_method": dispatch_method,
+        }
 
     except Exception as e:
+        # Even on exception, the job may already be in active_jobs (registered in Step 1)
         logger.error(
-            f"[JOB_ACTIONS] handle_reverse_reconciliation_dispatch FAILED: {e}",
+            f"[JOB_ACTIONS] handle_reverse_reconciliation_dispatch FAILED: {e} "
+            f"(job may still be picked up via active_jobs polling)",
             exc_info=True,
         )
         return {
@@ -2807,6 +2888,325 @@ async def handle_reverse_reconciliation_dispatch(
             "error": str(e),
             "code": "DISPATCH_ERROR",
         }
+
+
+# ============================================
+# REVERSE RECON RESULT — Post-scoring orchestration
+# ============================================
+
+async def _get_banker_workflow_params(mandate_path: str) -> Dict[str, Any]:
+    """Fetch Banker_param from Firebase mandate workflow_params."""
+    firebase = get_firebase_management()
+    try:
+        doc = await asyncio.to_thread(
+            firebase.db.document(f"{mandate_path}/setup/workflow_params").get
+        )
+        if doc.exists:
+            banker_param = (doc.to_dict() or {}).get("Banker_param", {})
+            return {
+                "banker_approval_required": bool(banker_param.get("banker_approval_required", False)),
+                "banker_approval_thresholdworkflow": banker_param.get("banker_approval_thresholdworkflow", ""),
+            }
+    except Exception as e:
+        logger.warning(f"[JOB_ACTIONS] Failed to get Banker params: {e}")
+    return {"banker_approval_required": False, "banker_approval_thresholdworkflow": ""}
+
+
+async def _cleanup_reverse_recon_active_job(mandate_path: str, request_id: str):
+    """Delete the reverse recon entry from active_jobs (standard + legacy paths).
+    Safety net — normally finish_and_start_next handles cleanup."""
+    try:
+        firebase = get_firebase_management()
+        encoded = mandate_path.replace("/", "_").replace(".", "_dot_")
+
+        # Standard paths (on_process / pending) — same as other job types
+        for sub in ("on_process", "pending"):
+            doc_path = f"active_jobs/reversereconciliation/{sub}/{encoded}_{request_id}"
+            try:
+                await asyncio.to_thread(firebase.db.document(doc_path).delete)
+                logger.debug(f"[JOB_ACTIONS] Reverse recon cleanup: {doc_path}")
+            except Exception:
+                pass
+
+        # Legacy path (jobs/) — backwards compat during migration
+        legacy_path = f"active_jobs/reversereconciliation/jobs/{encoded}_{request_id}"
+        try:
+            await asyncio.to_thread(firebase.db.document(legacy_path).delete)
+            logger.debug(f"[JOB_ACTIONS] Reverse recon legacy cleanup: {legacy_path}")
+        except Exception:
+            pass
+
+        logger.info(f"[JOB_ACTIONS] Reverse recon active_job cleaned for {request_id}")
+    except Exception as e:
+        logger.warning(f"[JOB_ACTIONS] Reverse recon cleanup failed: {e}")
+
+
+async def handle_reverse_recon_result(
+    uid: str,
+    payload: Dict[str, Any],
+    company_data: Dict[str, Any],
+    source: str = "reverse_recon_result",
+) -> Dict[str, Any]:
+    """
+    Handle the post-scoring result from klk_bank reverse reconciliation.
+
+    Replicates the logic previously in Router (new_router.py:5877-6058):
+    - Parse scoring results
+    - Collect matched items
+    - Build banker payload (grouped by bank_account_id)
+    - Dispatch via handle_job_process(bankbookeeper)
+    - Cleanup active_jobs
+
+    Args:
+        uid: Firebase user ID
+        payload: Contains 'response' (scoring result) and 'original_context'
+        company_data: Company context (mandate_path, collection_name)
+        source: Source identifier
+
+    Returns:
+        {success, message, ...}
+    """
+    response = payload.get("response", {})
+    original_context = payload.get("original_context", {})
+    request_id = response.get("request_id", "unknown")
+    mandate_path = (
+        company_data.get("mandate_path")
+        or original_context.get("mandates_path", "")
+    )
+    collection_name = (
+        company_data.get("collection_name")
+        or original_context.get("collection_name", "")
+    )
+    client_uuid = (
+        company_data.get("client_uuid")
+        or original_context.get("client_uuid", "")
+    )
+    settings = original_context.get("settings", [])
+    automated_workflow = original_context.get("automated_workflow", True)
+
+    logger.info(
+        f"[JOB_ACTIONS] ═══════════════════════════════════════════════════════════"
+    )
+    logger.info(
+        f"[JOB_ACTIONS] handle_reverse_recon_result START - "
+        f"uid={uid} request_id={request_id} status={response.get('status')}"
+    )
+
+    # ── Step 1: Early exit for non-actionable statuses ──
+    status = response.get("status", "unknown")
+    if status in ("no_match", "error", "no_transactions"):
+        logger.info(
+            f"[JOB_ACTIONS] Reverse recon result: {status} — no banker dispatch needed"
+        )
+        await _cleanup_reverse_recon_active_job(mandate_path, request_id)
+        return {
+            "success": True,
+            "request_id": request_id,
+            "status": status,
+            "message": f"Reverse recon result: {status} — no dispatch",
+        }
+
+    # ── Step 2: Collect matched items from results ──
+    results_array = response.get("results", [])
+    matched_items = []
+
+    for result in results_array:
+        item_id = result.get("item_id")
+        item_status = result.get("status", "unknown")
+        match_data = result.get("match_data", {})
+        original_item = result.get("original_item", {})
+
+        if item_status == "matched" and match_data:
+            transaction_id = match_data.get("transaction_id")
+            if transaction_id:
+                matched_items.append({
+                    "item_id": item_id,
+                    "original_item": original_item,
+                    "match_data": match_data,
+                    "transaction_id": transaction_id,
+                    "decision_zone": result.get("decision_zone"),
+                })
+
+    logger.info(
+        f"[JOB_ACTIONS] Reverse recon: {len(matched_items)}/{len(results_array)} items matched"
+    )
+
+    if not matched_items:
+        logger.info("[JOB_ACTIONS] No matched items — skipping banker dispatch")
+        await _cleanup_reverse_recon_active_job(mandate_path, request_id)
+        return {
+            "success": True,
+            "request_id": request_id,
+            "status": "no_match",
+            "message": "No matched items in results",
+        }
+
+    # ── Step 3: Check automated_workflow ──
+    if not automated_workflow:
+        logger.info(
+            f"[JOB_ACTIONS] automated_workflow=False — {len(matched_items)} matched items, "
+            f"awaiting manual action"
+        )
+        await _cleanup_reverse_recon_active_job(mandate_path, request_id)
+        return {
+            "success": True,
+            "request_id": request_id,
+            "status": "awaiting_manual",
+            "matched_count": len(matched_items),
+            "message": "automated_workflow disabled — no auto dispatch",
+        }
+
+    # ── Step 4: Fetch banker params from Firebase ──
+    banker_params = await _get_banker_workflow_params(mandate_path)
+    banker_approval_required = banker_params["banker_approval_required"]
+    banker_approval_thresholdworkflow = banker_params["banker_approval_thresholdworkflow"]
+
+    # ── Step 5: Group by bank_account_id ──
+    bank_accounts_dict: Dict[str, Dict] = {}
+    first_journal_name = None
+
+    for item in matched_items:
+        match_data = item["match_data"]
+        original = item.get("original_item", {})
+
+        bank_account_id = str(match_data.get("bank_account_id", ""))
+        journal_name = match_data.get("journal_name", "")
+
+        if first_journal_name is None and journal_name:
+            first_journal_name = journal_name
+
+        if bank_account_id not in bank_accounts_dict:
+            bank_accounts_dict[bank_account_id] = {
+                "bank_account": journal_name,
+                "bank_account_id": bank_account_id,
+                "transactions": [],
+                "banker_approval_required": banker_approval_required,
+                "banker_approval_thresholdworkflow": banker_approval_thresholdworkflow,
+            }
+
+        # ── Build instructions_report ──
+        match_score = match_data.get("match_score", 0)
+        agent_confidence = match_data.get("agent_confidence", 0)
+        decision_zone = item.get("decision_zone", "unknown")
+        justification = match_data.get("justification", "")
+        supplier_name = original.get("supplier_name") or "N/A"
+        concern = original.get("concern") or "N/A"
+        currency = original.get("currency") or "N/A"
+        amount = match_data.get("amount") or original.get("amount") or 0
+
+        score_pct = f"{match_score:.2%}" if isinstance(match_score, (int, float)) else str(match_score)
+        instructions_report = (
+            f"RAPPORT DE RECONCILIATION INVERSE\n"
+            f"Score de matching: {score_pct} | Confiance agent: {agent_confidence}/10 | Zone: {decision_zone}\n"
+            f"Fournisseur: {supplier_name} | Objet: {concern} | Montant: {amount} {currency}\n"
+            f"Justification: {justification or 'Aucune'}"
+        )
+
+        # ── Build transaction dict ──
+        transaction = {
+            "transaction_id": str(item.get("transaction_id", "")),
+            "transaction_name": match_data.get("transaction_name", ""),
+            "date": match_data.get("date") or original.get("date", ""),
+            "ref": original.get("job_id", "") or item.get("item_id", ""),
+            "amount": amount,
+            "currency_name": currency,
+            "partner_name": supplier_name,
+            "transaction_type": "",
+            "payment_ref": concern,
+            "journal_name": journal_name,
+            "journal_id": bank_account_id,
+            "instructions": instructions_report,
+            "pending": False,
+            "status": "in_queue",
+        }
+
+        bank_accounts_dict[bank_account_id]["transactions"].append(transaction)
+
+    # ── Step 6: Build banker batch payload ──
+    banker_batch_id = f"bank_batch_{uuid.uuid4().hex[:10]}"
+    jobs_data = list(bank_accounts_dict.values())
+
+    # Extract communication settings from the original Router settings
+    communication_mode = "pinnokio"
+    log_communication_mode = "pinnokio"
+    dms_system = "google_drive"
+    for s in settings:
+        if isinstance(s, dict):
+            if "communication_mode" in s:
+                communication_mode = s["communication_mode"]
+            if "log_communication_mode" in s:
+                log_communication_mode = s["log_communication_mode"]
+            if "dms_system" in s:
+                dms_system = s["dms_system"]
+
+    banker_batch_payload = {
+        "collection_name": collection_name,
+        "batch_id": banker_batch_id,
+        "journal_name": first_journal_name or "",
+        "jobs_data": jobs_data,
+        "start_instructions": "",
+        "settings": [
+            {"communication_mode": communication_mode},
+            {"log_communication_mode": log_communication_mode},
+            {"dms_system": dms_system},
+        ],
+        "client_uuid": client_uuid,
+        "user_id": uid,
+        "mandates_path": mandate_path,
+    }
+
+    logger.info(
+        f"[JOB_ACTIONS] → Dispatching banker batch {banker_batch_id} "
+        f"({len(matched_items)} transactions across {len(bank_accounts_dict)} accounts)"
+    )
+
+    # ── Step 7: Dispatch via handle_job_process ──
+    try:
+        dispatch_result = await handle_job_process(
+            uid=uid,
+            job_type="bankbookeeper",
+            payload=banker_batch_payload,
+            company_data={
+                "mandate_path": mandate_path,
+                "collection_name": collection_name,
+                "company_id": collection_name,
+                "client_uuid": client_uuid,
+            },
+            source="reverse_recon_banker_dispatch",
+        )
+
+        if dispatch_result.get("success"):
+            logger.info(
+                f"[JOB_ACTIONS] handle_reverse_recon_result SUCCESS — "
+                f"banker batch {banker_batch_id} dispatched"
+            )
+        else:
+            logger.error(
+                f"[JOB_ACTIONS] handle_reverse_recon_result — banker dispatch FAILED: "
+                f"{dispatch_result.get('error', 'unknown')}"
+            )
+    except Exception as dispatch_err:
+        logger.error(
+            f"[JOB_ACTIONS] handle_reverse_recon_result — banker dispatch exception: {dispatch_err}",
+            exc_info=True,
+        )
+        dispatch_result = {"success": False, "error": str(dispatch_err)}
+
+    # ── Step 8: Cleanup active_jobs ──
+    await _cleanup_reverse_recon_active_job(mandate_path, request_id)
+
+    return {
+        "success": dispatch_result.get("success", False),
+        "request_id": request_id,
+        "banker_batch_id": banker_batch_id,
+        "matched_count": len(matched_items),
+        "status": "dispatched" if dispatch_result.get("success") else "dispatch_failed",
+        "message": (
+            f"{len(matched_items)} matched item(s) dispatched to banker"
+            if dispatch_result.get("success")
+            else f"Banker dispatch failed: {dispatch_result.get('error', 'unknown')}"
+        ),
+    }
 
 
 # ============================================
@@ -2819,6 +3219,7 @@ __all__ = [
     "handle_job_restart",
     "handle_job_delete",
     "handle_reverse_reconciliation_dispatch",
+    "handle_reverse_recon_result",
     "create_and_publish_notification",
     "JOB_TYPE_CONFIG",
 ]

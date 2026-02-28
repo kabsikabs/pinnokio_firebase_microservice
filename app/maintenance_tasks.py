@@ -333,6 +333,16 @@ def finalize_daily_chat_billing(target_date: str | None = None, days_back: int =
                 try:
                     _ = fbm.get_user_balance(mandate_path=mp)
                     balances_updated += 1
+                    # Update L1 Redis cache (no WSS from Celery — no hub)
+                    try:
+                        from app.balance_service import get_balance_service_sync
+                        _bal_svc = get_balance_service_sync()
+                        _uid = mp.split('/')[1] if '/' in mp else None
+                        if _uid:
+                            _fresh = fbm.get_balance_info(mandate_path=mp)
+                            _bal_svc.update_balance_cache(_uid, _fresh)
+                    except Exception as _cache_err:
+                        logger.warning("[BILLING_CRON] L1 cache update failed (non-blocking): %s", _cache_err)
                 except Exception as e:
                     logger.error("[BILLING_CRON] balance_update_error mandate_path=%s error=%s", mp, repr(e))
 

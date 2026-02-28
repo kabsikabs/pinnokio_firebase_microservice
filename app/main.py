@@ -43,6 +43,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from .endpoints.file_upload_endpoints import router as file_upload_router
+app.include_router(file_upload_router)
+
 START_TIME = time.time()
 VERSION = os.getenv("SERVICE_VERSION", "0.1.0")
 
@@ -455,14 +458,25 @@ async def google_auth_callback(request: Request):
             
         logger.info(f"[GOOGLE_AUTH_CALLBACK] 📦 Payload préparé - token={'présent' if token_data.get('token') else 'MANQUANT'} expiry={token_data.get('expiry')} client_id={'présent' if token_data.get('client_id') else 'MANQUANT'}")
             
-        # ⭐ Utiliser FirebaseManagement.set_document() comme dans GoogleAuthManager
-        # Chemin: clients/{user_id}/cred_tokens/google_authcred_token
+        # ⭐ Router vers le bon document selon la source du state OAuth
         try:
-            tokens_path = f'clients/{user_id}/cred_tokens/google_authcred_token'
-            logger.info(f"[GOOGLE_AUTH_CALLBACK] 💾 Sauvegarde via FirebaseManagement.set_document() - path={tokens_path}")
             fb_management = get_firebase_management()
-            fb_management.set_document(tokens_path, token_data, merge=True)
-            logger.info(f"[GOOGLE_AUTH_CALLBACK] ✅ Firebase mis à jour avec succès - user={user_id} path={tokens_path}")
+            base_cred_path = f'clients/{user_id}/cred_tokens'
+
+            if source == 'email_settings':
+                # Gmail uniquement → document dédié (ne touche PAS le Drive token)
+                gmail_path = f'{base_cred_path}/google_gmail_token'
+                logger.info(f"[GOOGLE_AUTH_CALLBACK] 💾 Sauvegarde Gmail token - path={gmail_path}")
+                fb_management.set_document(gmail_path, token_data, merge=True)
+            else:
+                # Onboarding / ré-auth générale → Drive dédié + legacy
+                drive_path = f'{base_cred_path}/google_drive_token'
+                legacy_path = f'{base_cred_path}/google_authcred_token'
+                logger.info(f"[GOOGLE_AUTH_CALLBACK] 💾 Sauvegarde Drive + legacy - drive={drive_path} legacy={legacy_path}")
+                fb_management.set_document(drive_path, token_data, merge=True)
+                fb_management.set_document(legacy_path, token_data, merge=True)
+
+            logger.info(f"[GOOGLE_AUTH_CALLBACK] ✅ Firebase mis à jour avec succès - user={user_id} source={source}")
         except Exception as e:
             logger.error(f"[GOOGLE_AUTH_CALLBACK] ❌ Erreur sauvegarde Firebase: {e}", exc_info=True)
             return HTMLResponse(content=f"<h1>Erreur Sauvegarde</h1><p>{e}</p>", status_code=500)
@@ -628,6 +642,48 @@ async def google_auth_callback(request: Request):
                                 logger.info(f"[GOOGLE_AUTH_CALLBACK] 🚀 Tâche background lancée - réponse HTTP immédiate")
                             else:
                                 logger.warning(f"[GOOGLE_AUTH_CALLBACK] ⚠️ mandate_path manquant dans context_params - impossible de déclencher handle_oauth_complete")
+
+                        # ⭐ ROUTING: Si source == 'routing', re-trigger l'orchestration routing
+                        elif source == 'routing':
+                            logger.info("[GOOGLE_AUTH_CALLBACK] 🎯 Détection OAuth ROUTING - Auto-refresh routing data")
+                            routing_company_id = context_params.get('company_id', '')
+                            routing_session_id = context_params.get('session_id', '')
+
+                            # Broadcast OAuth success immediately
+                            try:
+                                await hub.broadcast(user_id, {
+                                    "type": WS_EVENTS.AUTH.OAUTH_SUCCESS,
+                                    "payload": {
+                                        "success": True,
+                                        "provider": "google_drive",
+                                        "source": "routing",
+                                    }
+                                })
+                                logger.info(f"[GOOGLE_AUTH_CALLBACK] ✅ auth.oauth_success broadcast pour routing")
+                            except Exception as broadcast_err:
+                                logger.error(f"[GOOGLE_AUTH_CALLBACK] ❌ Erreur broadcast oauth_success: {broadcast_err}")
+
+                            # Trigger routing orchestration in background to reload Drive data
+                            if routing_company_id:
+                                from .frontend.pages.routing.orchestration import handle_routing_orchestrate_init
+                                import asyncio
+
+                                async def run_routing_refresh():
+                                    try:
+                                        await handle_routing_orchestrate_init(
+                                            uid=user_id,
+                                            session_id=routing_session_id,
+                                            payload={"company_id": routing_company_id},
+                                        )
+                                        logger.info(f"[GOOGLE_AUTH_CALLBACK] ✅ Routing orchestration refreshed after OAuth")
+                                    except Exception as routing_err:
+                                        logger.error(f"[GOOGLE_AUTH_CALLBACK] ❌ Routing refresh error: {routing_err}", exc_info=True)
+
+                                asyncio.create_task(run_routing_refresh())
+                                logger.info(f"[GOOGLE_AUTH_CALLBACK] 🚀 Routing refresh task launched in background")
+                            else:
+                                logger.warning(f"[GOOGLE_AUTH_CALLBACK] ⚠️ company_id manquant - routing refresh skipped")
+
                     else:
                         logger.warning(f"[GOOGLE_AUTH_CALLBACK] ⚠️ user_id manquant pour broadcast")
 
@@ -2349,19 +2405,89 @@ async def websocket_endpoint(ws: WebSocket):
                         content = msg_payload.get("content", "")
                         company_id = msg_payload.get("company_id")
                         chat_mode = msg_payload.get("chat_mode", "general_chat")
+                        attachments = msg_payload.get("attachments")  # list[dict] from frontend upload
 
-                        logger.info(f"[WS] Chat send_message - uid={uid} thread={thread_key} content_len={len(content)}")
+                        logger.info(f"[WS] Chat send_message - uid={uid} thread={thread_key} content_len={len(content)} attachments={len(attachments) if attachments else 0}")
+
+                        # ── Balance check before enqueue ──
+                        try:
+                            from .balance_service import (
+                                get_balance_service,
+                                CHAT_COST_PER_TURN,
+                                CHAT_ZERO_BALANCE_THRESHOLD,
+                                CHAT_LOW_BALANCE_THRESHOLD,
+                            )
+
+                            _bal_svc = get_balance_service()
+
+                            # Resolve mandate_path from company context cache
+                            _chat_mandate_path = None
+                            try:
+                                from .llm_service.redis_namespaces import build_company_context_key
+                                _ctx_key = build_company_context_key(uid, company_id)
+                                _ctx_raw = get_redis().get(_ctx_key)
+                                if _ctx_raw:
+                                    _chat_mandate_path = _json.loads(_ctx_raw).get("mandatePath")
+                            except Exception:
+                                pass
+
+                            _bal_result = await _bal_svc.check_balance(
+                                uid=uid,
+                                mandate_path=_chat_mandate_path,
+                                estimated_cost=CHAT_COST_PER_TURN,
+                                operation="chat",
+                            )
+
+                            if _bal_result.current_balance <= CHAT_ZERO_BALANCE_THRESHOLD:
+                                # HARD BLOCK: balance <= 0
+                                response = {
+                                    "type": "chat.message_error",
+                                    "payload": {
+                                        "success": False,
+                                        "error": "insufficient_balance",
+                                        "code": "INSUFFICIENT_BALANCE",
+                                        "message": _bal_result.message,
+                                        "balance_info": {
+                                            "currentBalance": _bal_result.current_balance,
+                                            "requiredBalance": _bal_result.required_balance,
+                                        },
+                                    },
+                                }
+                                await ws.send_text(_json.dumps(response))
+                                logger.warning(f"[WS] Chat BLOCKED (zero balance) uid={uid}")
+                                continue
+
+                            if _bal_result.current_balance < CHAT_LOW_BALANCE_THRESHOLD:
+                                # SOFT WARNING: low balance — let the message through
+                                await hub.send_to_user(uid, {
+                                    "type": "balance.balance_update",
+                                    "payload": {
+                                        "action": "warning",
+                                        "data": {
+                                            "currentBalance": _bal_result.current_balance,
+                                            "warning": True,
+                                            "message": "Your balance is running low. Please top up to continue using services.",
+                                        },
+                                    },
+                                })
+                        except Exception as _bal_err:
+                            # Failsafe: never block chat on balance check failure
+                            logger.warning(f"[WS] Chat balance check error (failsafe): {_bal_err}")
 
                         try:
                             # Enqueue message for Worker processing
                             # Worker will handle streaming via Redis PubSub → WorkerBroadcastListener → WebSocket
                             gateway = get_llm_gateway()
+                            enqueue_kwargs = {}
+                            if attachments:
+                                enqueue_kwargs["attachments"] = attachments
                             queue_result = await gateway.enqueue_message(
                                 user_id=uid,
                                 collection_name=company_id,
                                 thread_key=thread_key,
                                 message=content,
                                 chat_mode=chat_mode,
+                                **enqueue_kwargs,
                             )
 
                             logger.info(f"[WS] Chat send_message enqueued: job_id={queue_result.get('job_id', 'unknown')[:8]}...")
@@ -2499,6 +2625,106 @@ async def websocket_endpoint(ws: WebSocket):
                             payload=msg_payload
                         )
                         logger.info(f"[WS] Routing delete handled - uid={uid}")
+
+                    elif msg_type == "routing.oauth_init":
+                        from .frontend.pages.routing.orchestration import handle_routing_oauth_init
+                        await handle_routing_oauth_init(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Routing oauth_init handled - uid={uid}")
+
+                    elif msg_type == "routing.upload":
+                        # ── Upload files to Google Drive (input_drive_doc_id) ──
+                        import base64 as _b64
+                        from .ws_hub import hub as _hub
+                        company_id = msg_payload.get("company_id", "")
+                        ws_files = msg_payload.get("files", [])
+                        logger.info(f"[WS] Routing upload - uid={uid} company={company_id} files={len(ws_files)}")
+
+                        async def _ws_drive_upload(_uid, _company_id, _files):
+                            """Background: decode base64, lookup Drive folder, upload each file."""
+                            try:
+                                from .redis_client import get_redis as _get_redis
+                                _r = _get_redis()
+                                ctx_key = f"company:{_uid}:{_company_id}:context"
+                                raw_ctx = _r.get(ctx_key)
+                                if not raw_ctx:
+                                    logger.error(f"[ROUTING_UPLOAD_WS] Context not found: {ctx_key}")
+                                    await _hub.broadcast(_uid, {"type": "routing.error", "payload": {"error": "Company context not found", "file_name": ""}})
+                                    return
+                                ctx = _json.loads(raw_ctx) if isinstance(raw_ctx, str) else raw_ctx
+                                input_drive_id = ctx.get("input_drive_doc_id") or ctx.get("inputDriveDocId")
+                                mandate_path = ctx.get("mandatePath", ctx.get("mandate_path", ""))
+                                if not input_drive_id:
+                                    logger.error(f"[ROUTING_UPLOAD_WS] input_drive_doc_id missing in context")
+                                    await _hub.broadcast(_uid, {"type": "routing.error", "payload": {"error": "input_drive_doc_id not found in company context", "file_name": ""}})
+                                    return
+
+                                from .driveClientService import DriveClientServiceSingleton
+                                drive = DriveClientServiceSingleton()
+
+                                for f in _files:
+                                    fname = f.get("name", "unknown")
+                                    ftype = f.get("type", "application/octet-stream")
+                                    fdata = f.get("data", "")
+                                    try:
+                                        file_bytes = _b64.b64decode(fdata)
+                                    except Exception as dec_err:
+                                        logger.error(f"[ROUTING_UPLOAD_WS] base64 decode failed for {fname}: {dec_err}")
+                                        await _hub.broadcast(_uid, {"type": "routing.error", "payload": {"error": f"Decode error: {fname}", "file_name": fname}})
+                                        continue
+
+                                    result = await drive.upload_file_to_drive(
+                                        user_id=_uid,
+                                        file_bytes=file_bytes,
+                                        file_name=fname,
+                                        folder_id=input_drive_id,
+                                        mime_type=ftype,
+                                    )
+                                    if not result.get("success"):
+                                        err = result.get("error", "Drive upload failed")
+                                        logger.error(f"[ROUTING_UPLOAD_WS] Drive failed for {fname}: {err}")
+                                        await _hub.broadcast(_uid, {
+                                            "type": "routing.error",
+                                            "payload": {"error": err, "file_name": fname, "oauth_reauth_required": result.get("oauth_reauth_required", False)},
+                                        })
+                                        continue
+
+                                    logger.info(f"[ROUTING_UPLOAD_WS] ✅ Uploaded {fname} → file_id={result.get('file_id')}")
+                                    await _hub.broadcast(_uid, {
+                                        "type": "routing.uploaded",
+                                        "payload": {
+                                            "file_id": result.get("file_id"),
+                                            "file_name": result.get("file_name", fname),
+                                            "web_view_link": result.get("web_view_link"),
+                                            "company_id": _company_id,
+                                        },
+                                    })
+
+                                # Refresh Drive cache after all uploads
+                                try:
+                                    from .drive_cache_handlers import drive_cache_handlers
+                                    await drive_cache_handlers.refresh_documents(
+                                        user_id=_uid,
+                                        company_id=_company_id,
+                                        input_drive_id=input_drive_id,
+                                        mandate_path=mandate_path,
+                                    )
+                                    logger.info(f"[ROUTING_UPLOAD_WS] Cache refreshed uid={_uid}")
+                                except Exception as cache_err:
+                                    logger.warning(f"[ROUTING_UPLOAD_WS] Cache refresh failed: {cache_err}")
+                            except Exception as exc:
+                                logger.error(f"[ROUTING_UPLOAD_WS] Background task failed: {exc}", exc_info=True)
+                                try:
+                                    await _hub.broadcast(_uid, {"type": "routing.error", "payload": {"error": str(exc), "file_name": ""}})
+                                except Exception:
+                                    pass
+
+                        import asyncio as _aio_upload
+                        _aio_upload.create_task(_ws_drive_upload(uid, company_id, ws_files))
+                        logger.info(f"[WS] Routing upload task launched - uid={uid}")
 
                     # ============================================
                     # INVOICES EVENTS (APBookkeeper)
@@ -2695,6 +2921,42 @@ async def websocket_endpoint(ws: WebSocket):
                             payload=msg_payload
                         )
                         logger.info(f"[WS] Company settings create_fiscal_folders handled - uid={uid}")
+
+                    elif msg_type == "company_settings.save_email_settings":
+                        from .frontend.pages.company_settings import handle_save_email_settings
+                        await handle_save_email_settings(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings save_email_settings handled - uid={uid}")
+
+                    elif msg_type == "company_settings.email_approve_draft":
+                        from .frontend.pages.company_settings.orchestration import handle_email_approve_draft
+                        await handle_email_approve_draft(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings email_approve_draft handled - uid={uid}")
+
+                    elif msg_type == "company_settings.save_email_type":
+                        from .frontend.pages.company_settings import handle_save_email_type
+                        await handle_save_email_type(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings save_email_type handled - uid={uid}")
+
+                    elif msg_type == "company_settings.initiate_email_auth":
+                        from .frontend.pages.company_settings import handle_initiate_email_auth
+                        await handle_initiate_email_auth(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings initiate_email_auth handled - uid={uid}")
 
                     elif msg_type == "company_settings.telegram_start_registration":
                         from .frontend.pages.company_settings.telegram_handler import handle_telegram_start_registration

@@ -31,6 +31,8 @@ google-auth-oauthlib==1.2.1
 google-auth-httplib2==0.2.0
 # Dépendances pour l'interface utilisateur
 colorama==0.4.6
+# Multipart form data pour FastAPI UploadFile
+python-multipart>=0.0.9
 Pillow>=10.0.0
 # Dépendances pour la conversion PDF en images
 pdf2image>=1.16.0

@@ -359,6 +359,16 @@ class ChatHandlers:
             except Exception as redis_err:
                 logger.warning(f"[CHAT] Failed to delete Redis chat history: {redis_err}")
 
+            # Clean GCS chat files (non-blocking)
+            try:
+                from app.storage_client import get_storage_client
+                storage = get_storage_client()
+                gcs_result = storage.delete_path(f"chat_files/{thread_key}/", recursive=True)
+                if gcs_result.get("deleted_count", 0) > 0:
+                    logger.info(f"[CHAT] GCS files deleted: chat_files/{thread_key}/ count={gcs_result['deleted_count']}")
+            except Exception as gcs_err:
+                logger.warning(f"[CHAT] GCS cleanup failed (non-blocking): {gcs_err}")
+
             # Invalidate sessions cache
             await self._cache_manager.invalidate_cache(
                 user_id=uid,

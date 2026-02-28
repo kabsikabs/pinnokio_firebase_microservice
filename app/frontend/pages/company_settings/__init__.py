@@ -45,6 +45,10 @@ from .orchestration import (
     handle_delete_asset_model,
     handle_load_asset_accounts,
     handle_delete_company,
+    handle_save_email_settings,
+    handle_email_approve_draft,
+    handle_save_email_type,
+    handle_initiate_email_auth,
 )
 from .telegram_handler import (
     handle_telegram_start_registration,
@@ -74,6 +78,12 @@ __all__ = [
     "handle_load_asset_accounts",
     # Company Deletion
     "handle_delete_company",
+    # Email Settings
+    "handle_save_email_settings",
+    "handle_email_approve_draft",
+    # Email Provider Type
+    "handle_save_email_type",
+    "handle_initiate_email_auth",
     # Telegram
     "handle_telegram_start_registration",
     "handle_telegram_remove_user",

@@ -94,7 +94,7 @@ class DriveClientServiceSingleton:
     def _get_user_tokens(self, user_id: str) -> dict:
         """Récupère les tokens Firebase pour l'utilisateur"""
         firebase_instance = FirebaseManagement()
-        service_account_info = firebase_instance.user_app_permission_token(user_id=user_id)
+        service_account_info = firebase_instance.user_app_permission_token(user_id=user_id, service="drive")
 
         if not isinstance(service_account_info, dict):
             raise ValueError(f"Tokens invalides pour user_id={user_id}")
@@ -882,6 +882,71 @@ class DriveClientServiceSingleton:
         except Exception as e:
             print(f"Une erreur est survenue : {e}")
             return None
+
+    async def upload_file_to_drive(
+        self, user_id: str, file_bytes: bytes, file_name: str,
+        folder_id: str, mime_type: str = "application/octet-stream",
+    ) -> dict:
+        """
+        Upload a file to a Google Drive folder.
+
+        Uses MediaIoBaseUpload with resumable=True for robustness.
+        Runs blocking Drive API call in executor to avoid blocking the event loop.
+
+        Args:
+            user_id: Firebase UID (for OAuth credentials).
+            file_bytes: Raw file content.
+            file_name: Target filename in Drive.
+            folder_id: Drive folder ID to upload into.
+            mime_type: MIME type of the file.
+
+        Returns:
+            {"success": True, "file_id": str, "file_name": str, "web_view_link": str}
+            or {"success": False, "error": str, "oauth_reauth_required": bool}
+        """
+        import io
+        from googleapiclient.http import MediaIoBaseUpload
+
+        try:
+            creds = self._initialize_prod_credentials(user_id)
+            service = build('drive', 'v3', credentials=creds)
+
+            file_metadata = {
+                'name': file_name,
+                'parents': [folder_id],
+            }
+            media = MediaIoBaseUpload(
+                io.BytesIO(file_bytes),
+                mimetype=mime_type,
+                resumable=True,
+            )
+
+            created_file = await asyncio.to_thread(
+                service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields='id, name, webViewLink',
+                ).execute
+            )
+
+            return {
+                "success": True,
+                "file_id": created_file.get("id"),
+                "file_name": created_file.get("name"),
+                "web_view_link": created_file.get("webViewLink"),
+            }
+
+        except HttpError as http_err:
+            error_msg = str(http_err)
+            reauth = http_err.resp.status in (401, 403)
+            return {"success": False, "error": error_msg, "oauth_reauth_required": reauth}
+
+        except RuntimeError as rt_err:
+            # _initialize_prod_credentials raises RuntimeError on cred failure
+            return {"success": False, "error": str(rt_err), "oauth_reauth_required": True}
+
+        except Exception as e:
+            return {"success": False, "error": str(e), "oauth_reauth_required": False}
 
     def timestamp(self):
         """Méthode utilitaire"""
