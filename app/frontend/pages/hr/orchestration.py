@@ -40,9 +40,8 @@ Events handled:
     - hr.active_contract_get → Get active contract for an employee
 
 Rubrics Storage:
-    System rubrics come from Jobber (get_payroll_items).
-    Company-specific overrides are stored in Firestore:
-    Path: {mandate_path}/hr/rubric_overrides/{rubric_code}
+    System rubrics come from Neon (hr.payroll_items_catalog).
+    Company-specific overrides are stored in Neon (hr.company_payroll_items).
     Structure: {
         is_active: bool,
         custom_label: str,
@@ -160,6 +159,69 @@ def _save_page_state(
     except Exception as e:
         logger.warning(f"[HR] Failed to save page state: {e}")
         return False
+
+
+async def _resolve_hr_company_id(
+    uid: str,
+    company_id: str,
+    payload: Dict[str, Any],
+) -> Optional[str]:
+    """
+    Resolve the PostgreSQL hr_company_id from multiple sources.
+
+    Resolution order:
+    1. Explicit in payload (hr_company_id)
+    2. From page_state:hr cache (set during orchestrate_init)
+    3. Fallback: ensure_company via mandate_path (creates if needed)
+
+    Returns:
+        PostgreSQL company UUID string, or None if resolution failed.
+    """
+    # 1. Explicit in payload
+    hr_company_id = payload.get("hr_company_id")
+    if hr_company_id:
+        return hr_company_id
+
+    # 2. From page_state cache (fastest path after init)
+    try:
+        from app.wrappers.page_state_manager import get_page_state_manager
+
+        page_manager = get_page_state_manager()
+        page_state = page_manager.get_page_state(
+            uid=uid,
+            company_id=company_id,
+            page="hr",
+        )
+        if page_state and isinstance(page_state, dict):
+            cached_id = (
+                page_state.get("hr_company_id")
+                or page_state.get("data", {}).get("hr_company_id")
+            )
+            if cached_id:
+                return cached_id
+    except Exception as e:
+        logger.debug("[HR] page_state lookup for hr_company_id failed: %s", e)
+
+    # 3. Fallback: resolve via ensure_company (mandate_path required)
+    mandate_path = payload.get("mandate_path")
+    if not mandate_path and company_id:
+        context = _get_company_context(uid, company_id)
+        mandate_path = context.get("mandate_path")
+
+    if mandate_path:
+        try:
+            handlers = get_hr_rpc_handlers()
+            company_result = await handlers.ensure_company(
+                account_firebase_uid=uid,
+                mandate_path=mandate_path,
+                company_name=payload.get("company_name", ""),
+                country=payload.get("country", "CH"),
+            )
+            return company_result.get("company_id")
+        except Exception as e:
+            logger.error("[HR] ensure_company fallback failed: %s", e)
+
+    return None
 
 
 def _invalidate_page_state(uid: str, company_id: str) -> bool:
@@ -487,12 +549,13 @@ async def handle_employees_list(
     payload: Dict[str, Any],
 ) -> None:
     """Handle hr.employees_list - List all employees."""
-    hr_company_id = payload.get("hr_company_id")
+    company_id = payload.get("company_id")
+    hr_company_id = await _resolve_hr_company_id(uid, company_id, payload)
 
     if not hr_company_id:
         await hub.broadcast(uid, {
             "type": WS_EVENTS.HR.ERROR,
-            "payload": {"error": "Missing hr_company_id"}
+            "payload": {"error": "Missing hr_company_id", "code": "MISSING_HR_COMPANY_ID"}
         })
         return
 
@@ -525,13 +588,14 @@ async def handle_employee_get(
     payload: Dict[str, Any],
 ) -> None:
     """Handle hr.employee_get - Get single employee details."""
-    hr_company_id = payload.get("hr_company_id")
+    company_id = payload.get("company_id")
     employee_id = payload.get("employee_id")
+    hr_company_id = await _resolve_hr_company_id(uid, company_id, payload)
 
     if not hr_company_id or not employee_id:
         await hub.broadcast(uid, {
             "type": WS_EVENTS.HR.ERROR,
-            "payload": {"error": "Missing hr_company_id or employee_id"}
+            "payload": {"error": "Missing hr_company_id or employee_id", "code": "MISSING_HR_COMPANY_ID"}
         })
         return
 
@@ -570,13 +634,13 @@ async def handle_employee_create(
     Invalidates page state cache after successful creation.
     """
     company_id = payload.get("company_id")
-    hr_company_id = payload.get("hr_company_id")
     data = payload.get("data", {})
 
+    hr_company_id = await _resolve_hr_company_id(uid, company_id, payload)
     if not hr_company_id:
         await hub.broadcast(uid, {
             "type": WS_EVENTS.HR.ERROR,
-            "payload": {"error": "Missing hr_company_id"}
+            "payload": {"error": "Missing hr_company_id", "code": "MISSING_HR_COMPANY_ID"}
         })
         return
 
@@ -584,20 +648,32 @@ async def handle_employee_create(
         handlers = get_hr_rpc_handlers()
 
         # Map frontend EmployeeFormData to backend create_employee params
+        # cluster_code is a regional code (CH-GE, CH-VD) — NOT the department name
+        cluster = data.get("cluster_code", "CH-GE")
+        # Derive country_code from cluster_code (CH-GE → CH) if not provided
+        country = data.get("countryCode") or (cluster.split("-")[0] if "-" in cluster else cluster)
+
         result = await handlers.create_employee(
             company_id=hr_company_id,
             identifier=data.get("email", ""),  # Use email as identifier
             first_name=data.get("firstName", ""),
             last_name=data.get("lastName", ""),
             birth_date=data.get("birthDate", "2000-01-01"),
-            cluster_code=data.get("department", "DEFAULT"),
+            cluster_code=cluster,
             hire_date=data.get("startDate", ""),
             firebase_user_id=uid,
-            # Additional fields
+            # Additional optional fields (must match hr.employees columns)
             email=data.get("email"),
             phone=data.get("phone"),
-            position=data.get("position"),
-            status=data.get("status", "active"),
+            gender=data.get("gender"),
+            nationality=data.get("nationality"),
+            address=data.get("address"),
+            city=data.get("city"),
+            postal_code=data.get("postalCode"),
+            country_code=country,
+            tax_status=data.get("taxStatus"),
+            family_status=data.get("familyStatus"),
+            permit_type=data.get("permitType"),
         )
 
         if result.get("employee_id"):
@@ -644,14 +720,14 @@ async def handle_employee_update(
     Invalidates page state cache after successful update.
     """
     company_id = payload.get("company_id")
-    hr_company_id = payload.get("hr_company_id")
     employee_id = payload.get("employee_id")
     data = payload.get("data", {})
+    hr_company_id = await _resolve_hr_company_id(uid, company_id, payload)
 
     if not hr_company_id or not employee_id:
         await hub.broadcast(uid, {
             "type": WS_EVENTS.HR.ERROR,
-            "payload": {"error": "Missing hr_company_id or employee_id"}
+            "payload": {"error": "Missing hr_company_id or employee_id", "code": "MISSING_HR_COMPANY_ID"}
         })
         return
 
@@ -671,7 +747,9 @@ async def handle_employee_update(
         if "position" in data:
             update_fields["position"] = data["position"]
         if "department" in data:
-            update_fields["cluster_code"] = data["department"]
+            update_fields["department"] = data["department"]
+        if "cluster_code" in data:
+            update_fields["cluster_code"] = data["cluster_code"]
         if "status" in data:
             update_fields["status"] = data["status"]
 
@@ -726,13 +804,13 @@ async def handle_employee_delete(
     Invalidates page state cache after successful deletion.
     """
     company_id = payload.get("company_id")
-    hr_company_id = payload.get("hr_company_id")
     employee_id = payload.get("employee_id")
+    hr_company_id = await _resolve_hr_company_id(uid, company_id, payload)
 
     if not hr_company_id or not employee_id:
         await hub.broadcast(uid, {
             "type": WS_EVENTS.HR.ERROR,
-            "payload": {"error": "Missing hr_company_id or employee_id"}
+            "payload": {"error": "Missing hr_company_id or employee_id", "code": "MISSING_HR_COMPANY_ID"}
         })
         return
 
@@ -770,15 +848,22 @@ async def handle_payroll_calculate(
     session_id: str,
     payload: Dict[str, Any],
 ) -> None:
-    """Handle hr.payroll_calculate - Calculate payroll (async job)."""
-    hr_company_id = payload.get("hr_company_id")
+    """Handle hr.payroll_calculate - Calculate payroll (async job).
+
+    Uses the centralized handle_job_process(job_type="hr") dispatch.
+    The worker receives the job via active_jobs polling or HTTP,
+    calculates, and publishes results via Redis task_manager.
+    """
+    company_id = payload.get("company_id")
     period = payload.get("period")  # Format: "2024-01"
     mandate_path = payload.get("mandate_path")
+    employee_ids = payload.get("employee_ids")  # Optional: specific employees
+    hr_company_id = await _resolve_hr_company_id(uid, company_id, payload)
 
     if not hr_company_id or not period:
         await hub.broadcast(uid, {
             "type": WS_EVENTS.HR.ERROR,
-            "payload": {"error": "Missing hr_company_id or period"}
+            "payload": {"error": "Missing hr_company_id or period", "code": "MISSING_HR_COMPANY_ID"}
         })
         return
 
@@ -786,31 +871,42 @@ async def handle_payroll_calculate(
         # Parse period
         year, month = period.split("-")
 
-        handlers = get_hr_rpc_handlers()
+        # Build company_data from Level 2 cache (same pattern as other pages)
+        if not mandate_path and company_id:
+            context = _get_company_context(uid, company_id)
+            mandate_path = context.get("mandate_path")
 
-        # Submit batch payroll calculation (async)
-        result = await handlers.submit_payroll_batch(
-            user_id=uid,
-            company_id=hr_company_id,
-            year=int(year),
-            month=int(month),
-            session_id=session_id,
-            mandate_path=mandate_path,
+        company_data = _get_company_context(uid, company_id) if company_id else {}
+        if mandate_path:
+            company_data["mandate_path"] = mandate_path
+        # hr_company_id is the Neon UUID, use as company_id for the worker
+        company_data["company_id"] = hr_company_id
+
+        # Submit via centralized dispatch
+        from app.tools.hr_jobber_client import get_hr_jobber_client
+        client = get_hr_jobber_client()
+
+        result = await client.submit_batch_payroll(
+            uid=uid,
+            company_data=company_data,
+            period={"year": int(year), "month": int(month)},
+            employee_ids=employee_ids,
         )
 
         # Notify that calculation started
         await hub.broadcast(uid, {
             "type": WS_EVENTS.HR.PAYROLL_CALCULATING,
             "payload": {
-                "success": True,
-                "job_id": result.get("job_id"),
+                "success": result.get("success", False),
+                "batch_id": result.get("batch_id"),
                 "period": period,
+                "dispatch_method": result.get("dispatch_method"),
             }
         })
 
         logger.info(
-            f"[HR] Payroll calculation started: job_id={result.get('job_id')} "
-            f"period={period}"
+            "[HR] Payroll calculation started: batch_id=%s period=%s dispatch=%s",
+            result.get("batch_id"), period, result.get("dispatch_method"),
         )
 
     except Exception as e:
@@ -925,12 +1021,13 @@ async def handle_metrics_get(
     payload: Dict[str, Any],
 ) -> None:
     """Handle hr.metrics_get - Get HR metrics."""
-    hr_company_id = payload.get("hr_company_id")
+    company_id = payload.get("company_id")
+    hr_company_id = await _resolve_hr_company_id(uid, company_id, payload)
 
     if not hr_company_id:
         await hub.broadcast(uid, {
             "type": WS_EVENTS.HR.ERROR,
-            "payload": {"error": "Missing hr_company_id"}
+            "payload": {"error": "Missing hr_company_id", "code": "MISSING_HR_COMPANY_ID"}
         })
         return
 
@@ -978,31 +1075,62 @@ async def handle_metrics_get(
 
 async def _get_rubric_overrides(mandate_path: str) -> Dict[str, Dict[str, Any]]:
     """
-    Load company-specific rubric overrides from Firestore.
-
-    Path: {mandate_path}/hr/rubric_overrides/{rubric_code}
+    Load company-specific rubric overrides from Neon (hr.company_payroll_items).
 
     Returns:
         Dict mapping rubric_code to override data
     """
     try:
-        from app.firebase_providers import get_firebase_management
+        from app.tools.neon_hr_manager import get_neon_hr_manager
 
-        firebase = get_firebase_management()
-        collection_path = f"{mandate_path}/hr/rubric_overrides"
+        manager = get_neon_hr_manager()
+        company_id = await manager.get_company_id_from_mandate_path(mandate_path)
+        if not company_id:
+            logger.warning(f"[HR] No Neon company found for mandate_path={mandate_path}")
+            return {}
 
-        # Get all documents in the collection
-        docs = await asyncio.to_thread(
-            firebase.get_collection,
-            collection_path
-        )
+        pool = await manager.get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT
+                    cat.code AS rubric_code,
+                    cpi.is_enabled AS is_active,
+                    cpi.custom_label,
+                    cpi.custom_rate_employee AS custom_rate,
+                    cpi.debit_account_employee::text,
+                    cpi.credit_account_employee::text,
+                    cpi.debit_account_employer::text,
+                    cpi.credit_account_employer::text,
+                    cpi.updated_at
+                FROM hr.company_payroll_items cpi
+                JOIN hr.payroll_items_catalog cat ON cpi.catalog_item_id = cat.id
+                WHERE cpi.company_id = $1
+            """, company_id)
 
         overrides = {}
-        if docs:
-            for doc_id, doc_data in docs.items():
-                overrides[doc_id] = doc_data
+        for row in rows:
+            code = row["rubric_code"]
+            override = {}
+            if row["is_active"] is not None:
+                override["is_active"] = row["is_active"]
+            if row["custom_label"]:
+                override["custom_label"] = row["custom_label"]
+            if row["custom_rate"] is not None:
+                override["custom_rate"] = float(row["custom_rate"])
+            if row["debit_account_employee"]:
+                override["debit_account_employee"] = row["debit_account_employee"]
+            if row["credit_account_employee"]:
+                override["credit_account_employee"] = row["credit_account_employee"]
+            if row["debit_account_employer"]:
+                override["debit_account_employer"] = row["debit_account_employer"]
+            if row["credit_account_employer"]:
+                override["credit_account_employer"] = row["credit_account_employer"]
+            if row["updated_at"]:
+                override["updated_at"] = row["updated_at"].isoformat()
+            if override:
+                overrides[code] = override
 
-        logger.info(f"[HR] Loaded {len(overrides)} rubric overrides from Firestore")
+        logger.info(f"[HR] Loaded {len(overrides)} rubric overrides from Neon")
         return overrides
 
     except Exception as e:
@@ -1017,29 +1145,69 @@ async def _save_rubric_override(
     uid: str
 ) -> bool:
     """
-    Save a rubric override to Firestore.
+    Save a rubric override to Neon (hr.company_payroll_items).
 
-    Path: {mandate_path}/hr/rubric_overrides/{rubric_code}
+    Finds the catalog item by code, then upserts the company override.
     """
     try:
-        from app.firebase_providers import get_firebase_management
+        from app.tools.neon_hr_manager import get_neon_hr_manager
 
-        firebase = get_firebase_management()
-        doc_path = f"{mandate_path}/hr/rubric_overrides/{rubric_code}"
+        manager = get_neon_hr_manager()
+        company_id = await manager.get_company_id_from_mandate_path(mandate_path)
+        if not company_id:
+            logger.error(f"[HR] No Neon company found for mandate_path={mandate_path}")
+            return False
 
-        # Add metadata
-        data_with_meta = {
-            **override_data,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "updated_by": uid,
-        }
+        pool = await manager.get_pool()
+        async with pool.acquire() as conn:
+            # Find the catalog item by code
+            catalog_row = await conn.fetchrow(
+                "SELECT id FROM hr.payroll_items_catalog WHERE code = $1 LIMIT 1",
+                rubric_code
+            )
+            if not catalog_row:
+                logger.error(f"[HR] Catalog item not found: {rubric_code}")
+                return False
 
-        await asyncio.to_thread(
-            firebase.set_document,
-            doc_path,
-            data_with_meta,
-            True  # merge=True
-        )
+            catalog_item_id = catalog_row["id"]
+
+            # Build SET clause dynamically from override_data
+            set_parts = ["updated_at = NOW()"]
+            params = [company_id, catalog_item_id]
+            param_idx = 3
+
+            field_mapping = {
+                "is_active": "is_enabled",
+                "custom_label": "custom_label",
+                "custom_rate": "custom_rate_employee",
+                "debit_account_employee": "debit_account_employee",
+                "credit_account_employee": "credit_account_employee",
+                "debit_account_employer": "debit_account_employer",
+                "credit_account_employer": "credit_account_employer",
+            }
+
+            for field, col in field_mapping.items():
+                if field in override_data:
+                    val = override_data[field]
+                    # Account fields are UUID references — store as UUID or NULL
+                    if col.endswith("_employee") and col.startswith(("debit_", "credit_")):
+                        if val and val.strip():
+                            from uuid import UUID as PyUUID
+                            val = PyUUID(val)
+                        else:
+                            val = None
+                    set_parts.append(f"{col} = ${param_idx}")
+                    params.append(val)
+                    param_idx += 1
+
+            set_clause = ", ".join(set_parts)
+
+            await conn.execute(f"""
+                INSERT INTO hr.company_payroll_items (company_id, catalog_item_id, is_enabled)
+                VALUES ($1, $2, TRUE)
+                ON CONFLICT (company_id, catalog_item_id)
+                DO UPDATE SET {set_clause}
+            """, *params)
 
         logger.info(f"[HR] Rubric override saved: {rubric_code}")
         return True
@@ -1384,7 +1552,7 @@ async def handle_contracts_list(
     """
     company_id = payload.get("company_id")
     employee_id = payload.get("employee_id")
-    hr_company_id = payload.get("hr_company_id")
+    hr_company_id = await _resolve_hr_company_id(uid, company_id, payload)
 
     if not employee_id:
         await hub.broadcast(uid, {
@@ -1466,9 +1634,9 @@ async def handle_contract_create(
     """
     company_id = payload.get("company_id")
     employee_id = payload.get("employee_id")
-    hr_company_id = payload.get("hr_company_id")
     mandate_path = payload.get("mandate_path")
     data = payload.get("data", {})
+    hr_company_id = await _resolve_hr_company_id(uid, company_id, payload)
 
     if not employee_id:
         await hub.broadcast(uid, {
@@ -1597,9 +1765,9 @@ async def handle_contract_update(
     """
     company_id = payload.get("company_id")
     contract_id = payload.get("contract_id")
-    hr_company_id = payload.get("hr_company_id")
     employee_id = payload.get("employee_id")
     data = payload.get("data", {})
+    hr_company_id = await _resolve_hr_company_id(uid, company_id, payload)
 
     if not contract_id:
         await hub.broadcast(uid, {
@@ -1668,7 +1836,7 @@ async def handle_active_contract_get(
     """
     company_id = payload.get("company_id")
     employee_id = payload.get("employee_id")
-    hr_company_id = payload.get("hr_company_id")
+    hr_company_id = await _resolve_hr_company_id(uid, company_id, payload)
 
     if not employee_id:
         await hub.broadcast(uid, {

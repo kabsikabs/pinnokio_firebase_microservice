@@ -25,7 +25,8 @@ import asyncio
 import os
 import threading
 import logging
-from datetime import date
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Optional, Dict, Any, List, Union
 from uuid import UUID
 
@@ -112,6 +113,11 @@ class NeonHRManager:
         """
         # Priorité 1: Variable d'environnement
         if url := os.getenv("NEON_DATABASE_URL"):
+            # asyncpg ne supporte pas channel_binding dans l'URL — le retirer
+            if 'channel_binding=' in url:
+                import re
+                url = re.sub(r'[&?]channel_binding=[^&]*', '', url)
+                url = url.replace('?&', '?').rstrip('?')
             logger.info("✅ Utilisation de NEON_DATABASE_URL depuis l'environnement")
             return url
         
@@ -143,13 +149,18 @@ class NeonHRManager:
         if self._pool is None:
             async with self._pool_lock:
                 if self._pool is None:
-                    self._pool = await asyncpg.create_pool(
-                        self._database_url,
-                        min_size=2,
+                    # Ne PAS passer ssl= si l'URL contient déjà sslmode=
+                    # (conflit asyncpg: double négociation SSL → timeout)
+                    pool_kwargs = dict(
+                        min_size=1,
                         max_size=10,
                         command_timeout=60,
-                        # SSL requis pour Neon
-                        ssl='require' if 'neon.tech' in self._database_url else 'prefer',
+                    )
+                    if 'sslmode=' not in self._database_url:
+                        pool_kwargs['ssl'] = 'require' if 'neon.tech' in self._database_url else 'prefer'
+                    self._pool = await asyncpg.create_pool(
+                        self._database_url,
+                        **pool_kwargs,
                     )
                     logger.info("✅ Pool PostgreSQL Neon créé (min=2, max=10)")
         return self._pool
@@ -409,24 +420,52 @@ class NeonHRManager:
         hire_date: Union[str, date],
         **kwargs
     ) -> UUID:
-        """Crée un nouvel employé."""
-        # Convertir les dates strings en objets date
+        """Crée un nouvel employé.
+
+        Required columns: company_id, identifier, first_name, last_name,
+                          birth_date, cluster_code, hire_date
+        Optional columns via kwargs: email, phone, position, department, status
+        """
         birth_date_obj = _to_date(birth_date)
         hire_date_obj = _to_date(hire_date)
-        
+
+        # Build optional columns dynamically
+        optional_cols = []
+        optional_vals = []
+        _ALLOWED_OPTIONAL = {
+            "email": str, "phone": str, "gender": str,
+            "nationality": str, "tax_status": str,
+            "family_status": str, "dependents": int,
+            "address": str, "city": str, "postal_code": str,
+            "country_code": str, "permit_type": str,
+        }
+        param_idx = 8  # $1-$7 are the required columns
+        for col, _ in _ALLOWED_OPTIONAL.items():
+            val = kwargs.get(col)
+            if val is not None:
+                optional_cols.append(col)
+                optional_vals.append(val)
+                param_idx += 1
+
+        cols = "company_id, identifier, first_name, last_name, birth_date, cluster_code, hire_date"
+        placeholders = "$1, $2, $3, $4, $5, $6, $7"
+        if optional_cols:
+            cols += ", " + ", ".join(optional_cols)
+            placeholders += ", " + ", ".join(
+                f"${i}" for i in range(8, 8 + len(optional_cols))
+            )
+
         pool = await self.get_pool()
         async with pool.acquire() as conn:
             result = await conn.fetchrow(
-                """
-                INSERT INTO hr.employees (
-                    company_id, identifier, first_name, last_name, 
-                    birth_date, cluster_code, hire_date
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                f"""
+                INSERT INTO hr.employees ({cols})
+                VALUES ({placeholders})
                 RETURNING id
                 """,
                 company_id, identifier, first_name, last_name,
-                birth_date_obj, cluster_code, hire_date_obj
+                birth_date_obj, cluster_code, hire_date_obj,
+                *optional_vals,
             )
             logger.info(f"✅ Employé créé: {first_name} {last_name} ({result['id']})")
             return result["id"]
@@ -448,11 +487,15 @@ class NeonHRManager:
         
         allowed_fields = [
             "identifier", "first_name", "last_name", "birth_date",
-            "cluster_code", "hire_date", "is_active"
+            "gender", "nationality", "cluster_code", "tax_status",
+            "family_status", "dependents", "address", "city",
+            "postal_code", "email", "phone", "hire_date",
+            "termination_date", "is_active", "country_code",
+            "permit_type",
         ]
-        
+
         # Champs qui nécessitent une conversion date
-        date_fields = ["birth_date", "hire_date"]
+        date_fields = ["birth_date", "hire_date", "termination_date"]
         
         for field, value in fields.items():
             if field in allowed_fields:
@@ -677,6 +720,163 @@ class NeonHRManager:
             
             rows = await conn.fetch(query, *params)
             return [dict(row) for row in rows]
+
+    # ═══════════════════════════════════════════════════════════════
+    # ENDPOINTS RULES ENGINE (cascade résolution)
+    # ═══════════════════════════════════════════════════════════════
+
+    async def resolve_rules_cascade(
+        self,
+        company_id: UUID,
+        cluster_code: str,
+        as_of_date: Union[str, date, None] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Résout les règles de paie avec héritage cascade.
+
+        Appelle la fonction PL/pgSQL hr.resolve_cascade_rules qui remonte
+        la hiérarchie des clusters (canton → pays) et applique les overrides
+        société (company_payroll_items).
+
+        Args:
+            company_id: UUID de la société
+            cluster_code: Code du cluster (ex: 'CH-GE')
+            as_of_date: Date de référence (None = aujourd'hui)
+
+        Returns:
+            Liste des règles résolues avec source_level indiquant
+            l'origine ('cluster' ou 'country').
+        """
+        as_of = _to_date(as_of_date) or date.today()
+        pool = await self.get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM hr.resolve_cascade_rules($1, $2, $3)",
+                company_id, cluster_code, as_of
+            )
+            return [dict(row) for row in rows]
+
+    async def get_calculation_rules(
+        self,
+        company_id: UUID,
+        cluster_code: str,
+        item_codes: List[str] = None,
+        as_of_date: Union[str, date, None] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Récupère les règles de calcul filtrées par codes.
+
+        Wrapper autour de resolve_rules_cascade avec filtre optionnel
+        sur les codes de rubriques.
+
+        Args:
+            company_id: UUID de la société
+            cluster_code: Code du cluster (ex: 'CH-GE')
+            item_codes: Liste de codes à filtrer (None = tous)
+            as_of_date: Date de référence (None = aujourd'hui)
+
+        Returns:
+            Liste des règles filtrées
+        """
+        all_rules = await self.resolve_rules_cascade(
+            company_id, cluster_code, as_of_date
+        )
+        if item_codes:
+            codes_set = set(item_codes)
+            return [r for r in all_rules if r.get("code") in codes_set]
+        return all_rules
+
+    async def get_country_profile(
+        self,
+        country_code: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Récupère le profil pays (paramètres par défaut).
+
+        Args:
+            country_code: Code pays ISO 2 lettres (ex: 'CH')
+
+        Returns:
+            Dictionnaire avec weekly_hours_default, annual_leave_days_default,
+            has_thirteenth_month, social_security_system, settings, etc.
+            None si le pays n'est pas configuré.
+        """
+        pool = await self.get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM hr.country_profiles WHERE country_code = $1",
+                country_code
+            )
+            return dict(row) if row else None
+
+    async def get_payroll_items(
+        self,
+        country_code: str = "CH",
+        cluster_code: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Récupère les rubriques de paie depuis le catalogue.
+
+        Lecture directe Neon (pas un job worker).
+
+        Args:
+            country_code: Code pays ISO 2 lettres (ex: 'CH')
+            cluster_code: Optionnel, filtre par cluster/CCT
+
+        Returns:
+            Liste des rubriques actives triées par sort_order
+        """
+        pool = await self.get_pool()
+        async with pool.acquire() as conn:
+            if cluster_code:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, code, version, label_fr, label_en, label_de, label_it,
+                           nature, category, country_code, cluster_code,
+                           rate_employee, rate_employer,
+                           ceiling_type, ceiling_amount, calculation_base,
+                           is_mandatory, is_taxable, applies_to_13th,
+                           sort_order, effective_from, effective_to,
+                           legal_reference, legal_article
+                    FROM hr.payroll_items_catalog
+                    WHERE country_code = $1
+                      AND (cluster_code = $2 OR cluster_code IS NULL)
+                      AND is_active = true
+                    ORDER BY sort_order, code
+                    """,
+                    country_code, cluster_code,
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, code, version, label_fr, label_en, label_de, label_it,
+                           nature, category, country_code, cluster_code,
+                           rate_employee, rate_employer,
+                           ceiling_type, ceiling_amount, calculation_base,
+                           is_mandatory, is_taxable, applies_to_13th,
+                           sort_order, effective_from, effective_to,
+                           legal_reference, legal_article
+                    FROM hr.payroll_items_catalog
+                    WHERE country_code = $1
+                      AND is_active = true
+                    ORDER BY sort_order, code
+                    """,
+                    country_code,
+                )
+            return [_row_to_dict(row) for row in rows]
+
+
+def _row_to_dict(row) -> Dict[str, Any]:
+    """Convertit un asyncpg Record en dict JSON-safe."""
+    d = dict(row)
+    for k, v in d.items():
+        if isinstance(v, UUID):
+            d[k] = str(v)
+        elif isinstance(v, (date, datetime)):
+            d[k] = v.isoformat()
+        elif isinstance(v, Decimal):
+            d[k] = float(v)
+    return d
 
 
 # ═══════════════════════════════════════════════════════════════════════════

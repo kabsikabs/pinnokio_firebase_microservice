@@ -913,51 +913,38 @@ class HRRPCHandlers:
         mandate_path: str = None,
     ) -> Dict[str, Any]:
         """
-        Soumet un calcul de paie au Jobber (asynchrone).
-        
+        Soumet un calcul de paie via le dispatch centralisé.
+
         RPC: HR.submit_payroll_calculate
-        
-        Le résultat sera envoyé via WebSocket quand le calcul est terminé.
-        
-        Args:
-            user_id: Firebase UID pour le callback
-            company_id: UUID de la company
-            employee_id: UUID de l'employé
-            year: Année de la période
-            month: Mois de la période
-            variables: Variables additionnelles (heures sup, primes, etc.)
-            force_recalculate: Recalculer même si existe déjà
-            session_id: Session pour routage WebSocket
-            mandate_path: Chemin Firebase pour traçabilité
-        
-        Returns:
-            {"job_id": "...", "status": "pending", "estimated_time_seconds": 30}
+
+        Le résultat arrive via Redis PubSub → WebSocket.
         """
         try:
             from .tools.hr_jobber_client import get_hr_jobber_client
-            
+
             client = get_hr_jobber_client()
-            result = await client.submit_payroll_calculate(
-                user_id=user_id,
-                company_id=company_id,
-                employee_id=employee_id,
-                year=year,
-                month=month,
+            company_data = {
+                "company_id": company_id,
+                "mandate_path": mandate_path or "",
+            }
+            result = await client.submit_payroll_calculation(
+                uid=user_id,
+                company_data=company_data,
+                employees=[{"id": employee_id}],
+                period={"year": year, "month": month},
                 variables=variables,
                 force_recalculate=force_recalculate,
-                session_id=session_id,
-                mandate_path=mandate_path,
             )
-            
+
             logger.info(
-                f"HR.submit_payroll_calculate job_id={result.get('job_id')} "
-                f"employee={employee_id} period={year}-{month}"
+                "HR.submit_payroll_calculate batch_id=%s employee=%s period=%d-%d",
+                result.get("batch_id"), employee_id, year, month,
             )
             return result
         except Exception as e:
             logger.error(f"HR.submit_payroll_calculate error={e}")
             return {"status": "failed", "error": str(e)}
-    
+
     async def submit_payroll_batch(
         self,
         user_id: str,
@@ -970,49 +957,35 @@ class HRRPCHandlers:
         mandate_path: str = None,
     ) -> Dict[str, Any]:
         """
-        Soumet un batch de calculs de paie au Jobber (asynchrone).
-        
+        Soumet un batch de calculs de paie via le dispatch centralisé.
+
         RPC: HR.submit_payroll_batch
-        
-        Le Jobber enverra des mises à jour de progression via WebSocket.
-        
-        Args:
-            user_id: Firebase UID pour le callback
-            company_id: UUID de la company
-            year: Année de la période
-            month: Mois de la période
-            employee_ids: Liste d'employés (None = tous)
-            cluster_code: Filtrer par cluster
-            session_id: Session pour routage WebSocket
-            mandate_path: Chemin Firebase pour traçabilité
-        
-        Returns:
-            {"job_id": "...", "status": "pending", "estimated_count": N}
         """
         try:
             from .tools.hr_jobber_client import get_hr_jobber_client
-            
+
             client = get_hr_jobber_client()
-            result = await client.submit_payroll_batch(
-                user_id=user_id,
-                company_id=company_id,
-                year=year,
-                month=month,
+            company_data = {
+                "company_id": company_id,
+                "mandate_path": mandate_path or "",
+            }
+            result = await client.submit_batch_payroll(
+                uid=user_id,
+                company_data=company_data,
+                period={"year": year, "month": month},
                 employee_ids=employee_ids,
                 cluster_code=cluster_code,
-                session_id=session_id,
-                mandate_path=mandate_path,
             )
-            
+
             logger.info(
-                f"HR.submit_payroll_batch job_id={result.get('job_id')} "
-                f"company={company_id} period={year}-{month}"
+                "HR.submit_payroll_batch batch_id=%s company=%s period=%d-%d",
+                result.get("batch_id"), company_id, year, month,
             )
             return result
         except Exception as e:
             logger.error(f"HR.submit_payroll_batch error={e}")
             return {"status": "failed", "error": str(e)}
-    
+
     async def submit_pdf_generate(
         self,
         user_id: str,
@@ -1021,82 +994,81 @@ class HRRPCHandlers:
         mandate_path: str = None,
     ) -> Dict[str, Any]:
         """
-        Soumet une génération de PDF au Jobber.
-        
+        Soumet une génération de PDF via le dispatch centralisé.
+
         RPC: HR.submit_pdf_generate
-        
-        Args:
-            user_id: Firebase UID pour le callback
-            payroll_id: UUID du résultat de paie
-            session_id: Session pour routage WebSocket
-            mandate_path: Chemin Firebase pour traçabilité
-        
-        Returns:
-            {"job_id": "...", "status": "pending"} ou {"pdf_url": "..."}
         """
         try:
             from .tools.hr_jobber_client import get_hr_jobber_client
-            
+
             client = get_hr_jobber_client()
+            company_data = {
+                "mandate_path": mandate_path or "",
+            }
             result = await client.submit_pdf_generate(
-                user_id=user_id,
-                payroll_id=payroll_id,
-                session_id=session_id,
-                mandate_path=mandate_path,
+                uid=user_id,
+                company_data=company_data,
+                payroll_result_ids=[payroll_id],
             )
-            
+
             logger.info(
-                f"HR.submit_pdf_generate job_id={result.get('job_id')} payroll={payroll_id}"
+                "HR.submit_pdf_generate batch_id=%s payroll=%s",
+                result.get("batch_id"), payroll_id,
             )
             return result
         except Exception as e:
             logger.error(f"HR.submit_pdf_generate error={e}")
             return {"status": "failed", "error": str(e)}
-    
+
     async def get_job_status(
         self,
         job_id: str,
     ) -> Dict[str, Any]:
         """
-        Récupère le statut d'un job auprès du Jobber.
-        
+        Récupère le statut d'un job via task_manager (Firebase/cache).
+
         RPC: HR.get_job_status
-        
-        Args:
-            job_id: ID du job
-        
-        Returns:
-            {"job_id": "...", "status": "...", "progress": {...}}
+
+        Note: Avec le dispatch centralisé, le statut est dans task_manager.
+        On ne peut plus interroger le worker directement.
         """
         try:
-            from .tools.hr_jobber_client import get_hr_jobber_client
-            
-            client = get_hr_jobber_client()
-            result = await client.get_job_status(job_id)
-            
-            logger.info(f"HR.get_job_status job_id={job_id} status={result.get('status')}")
-            return result
+            from .tools.neon_hr_manager import get_neon_hr_manager
+
+            # Le statut vit dans task_manager (Firebase RTDB)
+            # Pour l'instant, retourner un statut basique
+            logger.info(f"HR.get_job_status job_id={job_id}")
+            return {
+                "job_id": job_id,
+                "status": "pending",
+                "message": "Job status is tracked via task_manager/Redis PubSub",
+            }
         except Exception as e:
             logger.error(f"HR.get_job_status error={e}")
             return {"job_id": job_id, "status": "error", "error": str(e)}
-    
+
     async def check_jobber_health(self) -> Dict[str, Any]:
         """
-        Vérifie la disponibilité du Jobber HR.
-        
+        Vérifie la disponibilité du Worker HR via Redis heartbeat.
+
         RPC: HR.check_jobber_health
-        
-        Returns:
-            {"status": "ok"|"error", "jobber_url": "...", ...}
         """
         try:
-            from .tools.hr_jobber_client import get_hr_jobber_client
-            
-            client = get_hr_jobber_client()
-            result = await client.check_health()
-            
-            logger.info(f"HR.check_jobber_health status={result.get('status')}")
-            return result
+            from app.redis_client import get_redis
+
+            redis_client = get_redis()
+            heartbeat = redis_client.get("worker:hr:heartbeat")
+            if heartbeat:
+                return {
+                    "status": "ok",
+                    "worker": "hr",
+                    "heartbeat": heartbeat.decode() if isinstance(heartbeat, bytes) else str(heartbeat),
+                }
+            return {
+                "status": "offline",
+                "worker": "hr",
+                "message": "No heartbeat — worker may be scaled to zero (cold start on next job)",
+            }
         except Exception as e:
             logger.error(f"HR.check_jobber_health error={e}")
             return {"status": "error", "error": str(e)}
@@ -1343,11 +1315,11 @@ class HRRPCHandlers:
             cluster_code: Optionnel, filtre par cluster/CCT
         """
         try:
-            from .tools.hr_jobber_client import get_hr_jobber_client
-            
-            client = get_hr_jobber_client()
-            result = await client.get_payroll_items(country_code, cluster_code)
-            
+            from .tools.neon_hr_manager import get_neon_hr_manager
+
+            manager = get_neon_hr_manager()
+            result = await manager.get_payroll_items(country_code, cluster_code)
+
             logger.info(
                 f"HR.get_payroll_items country={country_code} "
                 f"cluster={cluster_code} count={len(result)}"
