@@ -49,8 +49,16 @@ class ECSManager:
             "container": "klk_apbookeeper",
         },
         "bankbookeeper": {
-            "service": os.getenv("ECS_SERVICE_BANKER", "klk_task_bank_service-afec4qu1"),
+            "service": os.getenv("ECS_SERVICE_BANKER", "klk_banker_service"),
             "container": "klk_banker",
+        },
+        "hr": {
+            "service": os.getenv("ECS_SERVICE_HR", "pinnokio_hr_worker_service"),
+            "container": "hr_worker",
+        },
+        "llm_worker": {
+            "service": os.getenv("ECS_SERVICE_LLM", "pinnokio_llm_worker_service"),
+            "container": "llm_worker",
         },
     }
     CLUSTER = os.getenv("ECS_CLUSTER_NAME", "pinnokio_cluster")
