@@ -1581,6 +1581,36 @@ class RedisSubscriber:
                             if k in ap_sub and k not in item_data:
                                 item_data[k] = ap_sub[k]
 
+                elif domain in ("bank", "banking"):
+                    # Aplatir department_data.Bankbookeeper → top-level
+                    bk_sub = (
+                        dept_data.get("Bankbookeeper", {})
+                        or dept_data.get("banker", {})
+                        or dept_data.get("Banker", {})
+                    )
+                    if isinstance(bk_sub, dict) and bk_sub:
+                        _BANK_FLAT_KEYS = (
+                            "step_id", "step_label", "result_code",
+                            "reconciliation_details",
+                        )
+                        for k in _BANK_FLAT_KEYS:
+                            if k in bk_sub and k not in item_data:
+                                item_data[k] = bk_sub[k]
+                        logger.debug(
+                            "[REDIS_SUBSCRIBER] → Bankbookeeper flattened keys: %s",
+                            [k for k in _BANK_FLAT_KEYS if k in bk_sub],
+                        )
+
+            # Aplatir les clés dot-path department_data.Bankbookeeper.* → top-level
+            # (venant de update_task_manager_transaction_direct qui utilise des dot-paths)
+            if domain in ("bank", "banking"):
+                _DOT_PREFIX = "department_data.Bankbookeeper."
+                dot_keys_to_flatten = [k for k in item_data if isinstance(k, str) and k.startswith(_DOT_PREFIX)]
+                for dk in dot_keys_to_flatten:
+                    short_key = dk[len(_DOT_PREFIX):]
+                    if short_key and short_key not in item_data:
+                        item_data[short_key] = item_data[dk]
+
             self._update_business_cache_item(
                 uid=uid,
                 company_id=company_id,

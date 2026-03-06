@@ -559,9 +559,14 @@ class FirebaseCacheHandlers:
                 banker = item if "transaction_id" in item else item.get("department_data", {}).get("Bankbookeeper", {}) or item.get("department_data", {}).get("banker", {}) or item.get("department_data", {}).get("Banker", {})
                 tx_id = str(banker.get("transaction_id") or item.get("task_id", ""))
 
+                # Extraire reconciliation_details et result_code depuis department_data
+                recon_details = banker.get("reconciliation_details")
+                result_code = banker.get("result_code", "")
+                step_label = banker.get("step_label", "")
+
                 if erp_tx:
                     amount = float(erp_tx.get("amount", 0) or 0)
-                    return {
+                    base = {
                         "id": tx_id,
                         "transaction_id": tx_id,
                         "account_id": str(banker.get("bank_account_id") or erp_tx.get("journal_id") or ""),
@@ -576,14 +581,14 @@ class FirebaseCacheHandlers:
                         "transaction_type": "credit" if amount >= 0 else "debit",
                         "status": item.get("status", status),
                         "batch_id": banker.get("batch_id", ""),
-                        "current_step": item.get("current_step", ""),
+                        "current_step": step_label or item.get("current_step", ""),
                         "job_id": item.get("task_id", ""),
                         "created_at": erp_tx.get("date", ""),
                         "updated_at": erp_tx.get("date", ""),
                     }
                 else:
                     amount = float(banker.get("txn_amount", 0) or 0)
-                    return {
+                    base = {
                         "id": tx_id,
                         "transaction_id": tx_id,
                         "account_id": str(banker.get("bank_account_id") or ""),
@@ -598,11 +603,18 @@ class FirebaseCacheHandlers:
                         "transaction_type": "credit" if amount >= 0 else "debit",
                         "status": item.get("status", status),
                         "batch_id": banker.get("batch_id", ""),
-                        "current_step": item.get("current_step", ""),
+                        "current_step": step_label or item.get("current_step", ""),
                         "job_id": item.get("task_id", ""),
                         "created_at": banker.get("transaction_date", ""),
                         "updated_at": banker.get("transaction_date", ""),
                     }
+
+                # Enrichir avec reconciliation_details et result_code si présents
+                if recon_details and isinstance(recon_details, dict):
+                    base["reconciliation_details"] = recon_details
+                if result_code:
+                    base["result_code"] = result_code
+                return base
 
             # Indexer les transactions ERP par ID pour recherche rapide
             erp_map = {str(tx.get("move_id") or tx.get("id")): tx for tx in erp_transactions}

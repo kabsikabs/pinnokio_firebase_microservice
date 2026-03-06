@@ -138,7 +138,9 @@ CATEGORY_STATUS_GROUPS: Dict[StatusCategory, Set[NormalizedStatus]] = {
 
 FUNCTION_SPECIFIC_OVERRIDES: Dict[str, Dict[str, NormalizedStatus]] = {
     "router": {
-        # Pour Router: success/completed → routed (pas completed)
+        # Router envoie désormais "routed" directement (fix BUG-RT-002).
+        # On garde "success"/"completed" → routed comme filet de sécurité
+        # pour les éventuels messages en transit lors du déploiement.
         "success": NormalizedStatus.ROUTED,
         "completed": NormalizedStatus.ROUTED,
     },
