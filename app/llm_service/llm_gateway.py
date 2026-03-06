@@ -18,6 +18,7 @@ from typing import Any, Optional
 
 from ..redis_client import get_redis
 from ..config import get_settings
+from ..ecs_manager import ECSManager
 
 logger = logging.getLogger("llm_service.gateway")
 
@@ -51,6 +52,16 @@ class LLMGateway:
         if self._redis is None:
             self._redis = get_redis()
         return self._redis
+
+    @staticmethod
+    def _ensure_llm_worker():
+        """Trigger ECS cold start for the LLM worker if not running."""
+        try:
+            result = ECSManager.ensure_worker_running("llm_worker")
+            if result.get("status") == "starting":
+                logger.info("[LLM_GATEWAY] Cold start triggered for llm_worker")
+        except Exception as e:
+            logger.warning(f"[LLM_GATEWAY] Cold start check failed (non-blocking): {e}")
 
     async def enqueue_message(
         self,
@@ -106,6 +117,7 @@ class LLMGateway:
         try:
             # Enqueue le job (LPUSH pour FIFO avec BRPOP)
             self.redis.lpush(self.QUEUE_NAME, json.dumps(job))
+            self._ensure_llm_worker()
 
             logger.info(
                 f"[LLM_GATEWAY] Job enqueued: {job_id[:8]}... "
@@ -172,6 +184,7 @@ class LLMGateway:
 
         try:
             self.redis.lpush(self.QUEUE_NAME, json.dumps(job))
+            self._ensure_llm_worker()
 
             logger.info(
                 f"[LLM_GATEWAY] LPT callback enqueued: {job_id[:8]}... "
@@ -223,6 +236,7 @@ class LLMGateway:
 
         try:
             self.redis.lpush(self.QUEUE_NAME, json.dumps(job))
+            self._ensure_llm_worker()
 
             logger.info(
                 f"[LLM_GATEWAY] Scheduled task enqueued: {job_id[:8]}... "
@@ -283,6 +297,7 @@ class LLMGateway:
 
         try:
             self.redis.lpush(self.QUEUE_NAME, json.dumps(job))
+            self._ensure_llm_worker()
 
             logger.info(
                 f"[LLM_GATEWAY] Job enqueued: {job_id[:8]}... "
@@ -354,6 +369,7 @@ class LLMGateway:
 
         try:
             self.redis.lpush(self.QUEUE_NAME, json.dumps(job))
+            self._ensure_llm_worker()
 
             logger.info(
                 f"[LLM_GATEWAY] Job enqueued: {job_id[:8]}... "
@@ -408,6 +424,7 @@ class LLMGateway:
 
         try:
             self.redis.lpush(self.QUEUE_NAME, json.dumps(job))
+            self._ensure_llm_worker()
 
             logger.info(
                 f"[LLM_GATEWAY] Job enqueued: {job_id[:8]}... "
@@ -455,6 +472,7 @@ class LLMGateway:
 
         try:
             self.redis.lpush(self.QUEUE_NAME, json.dumps(job))
+            self._ensure_llm_worker()
 
             logger.info(
                 f"[LLM_GATEWAY] Job enqueued: {job_id[:8]}... "
@@ -505,6 +523,7 @@ class LLMGateway:
 
         try:
             self.redis.lpush(self.QUEUE_NAME, json.dumps(job))
+            self._ensure_llm_worker()
 
             logger.info(
                 f"[LLM_GATEWAY] Job enqueued: {job_id[:8]}... "
@@ -561,6 +580,7 @@ class LLMGateway:
 
         try:
             self.redis.lpush(self.QUEUE_NAME, json.dumps(job))
+            self._ensure_llm_worker()
 
             logger.info(
                 f"[LLM_GATEWAY] Job enqueued: {queue_job_id[:8]}... "
