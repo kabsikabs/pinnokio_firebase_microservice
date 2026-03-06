@@ -628,7 +628,10 @@ async def handle_banking_stop(
     """
     Handle banking.stop WebSocket event.
 
-    Stops processing of transactions or batches.
+    Uses centralized handle_job_stop (same pattern as invoices/routing).
+    Supports two modes:
+      - transaction_ids: individual transaction stops (resolved to batch via scanning)
+      - batch_ids: full batch stops
     """
     transaction_ids = payload.get("transaction_ids", [])
     batch_ids = payload.get("batch_ids", [])
@@ -636,14 +639,35 @@ async def handle_banking_stop(
 
     logger.info(f"[BANKING] Stop requested: transactions={len(transaction_ids)}, batches={len(batch_ids)}")
 
+    # Build job_ids list: batch_ids are direct batch stops,
+    # transaction_ids are individual items (resolved via _stop_by_scanning)
+    job_ids = list(batch_ids)
+    if transaction_ids:
+        job_ids.extend(transaction_ids)
+
+    if not job_ids:
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.BANKING.ERROR,
+            "payload": {"error": "No transactions or batches to stop", "code": "NO_ITEMS"}
+        })
+        return
+
     try:
-        from .handlers import get_banking_handlers
-        handlers = get_banking_handlers()
-        result = await handlers.stop_processing(
-            uid,
-            company_id,
-            transaction_ids=transaction_ids,
-            batch_ids=batch_ids
+        context = _get_company_context(uid, company_id)
+
+        from app.wrappers.job_actions_handler import handle_job_stop
+
+        result = await handle_job_stop(
+            uid=uid,
+            job_type="banker",
+            payload={
+                "job_ids": job_ids,
+                "transaction_ids": transaction_ids if transaction_ids else None,
+            },
+            company_data={
+                "company_id": company_id,
+                "mandate_path": context.get("mandate_path", ""),
+            }
         )
 
         stopped_payload = dict(result) if isinstance(result, dict) else {"success": True}

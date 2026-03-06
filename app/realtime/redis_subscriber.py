@@ -1183,6 +1183,14 @@ class RedisSubscriber:
             return "Banker"
         elif dept_lower in ("chat", "chat_usage", "chat_daily"):
             return "Chat"
+        elif dept_lower in ("exbookeeper", "ex_bookeeper"):
+            return "EXbookeeper"
+        elif dept_lower in ("hr", "payroll"):
+            return "HR"
+        elif dept_lower == "onboarding":
+            return "Onboarding"
+        elif dept_lower in ("reverse_reconciliation", "reversereconciliation"):
+            return "Reverse_reconciliation"
         return dept or "Other"
 
     def _update_billing_history_cache(
