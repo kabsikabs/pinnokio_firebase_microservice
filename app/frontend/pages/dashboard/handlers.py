@@ -173,7 +173,7 @@ class DashboardHandlers:
             # Récupérer les données en parallèle
             results = await asyncio.gather(
                 self._get_company_info(user_id, company_id),
-                self._get_storage_info(user_id, company_id),
+                self._get_storage_info(user_id, company_id, mandate_path),
                 self._get_metrics(user_id, company_id, mandate_path),  # Pass mandate_path for expenses metrics
                 self._get_jobs_by_category(user_id, company_id),
                 self._get_pending_approvals(user_id, company_id),
@@ -462,67 +462,69 @@ class DashboardHandlers:
                 "totalTopping": 0.0
             }
 
-    async def _get_storage_info(self, user_id: str, company_id: str) -> Dict[str, Any]:
-        """Récupère les infos de stockage depuis ChromaDB.
+    # Average size per chunk in Firestore: ~text(2KB) + embedding(768*4=3KB) + metadata(0.5KB) ≈ 5.5KB
+    _AVG_CHUNK_BYTES = 5500
+    _MAX_STORAGE_BYTES = 500 * 1024 * 1024  # 500MB per mandate (free plan)
 
-        Utilise ChromaVectorService.analyze_storage_full() pour récupérer
-        les données de stockage de la base vectorielle.
+    async def _get_storage_info(
+        self, user_id: str, company_id: str, mandate_path: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Récupère les infos de stockage RAG depuis Firestore.
+
+        Counts indexed_files and document_chunks for the mandate,
+        estimates total storage from chunk count * average chunk size.
         """
+        empty = {
+            "used": 0,
+            "total": self._MAX_STORAGE_BYTES,
+            "percentage": 0,
+            "documentsCount": 0,
+            "chunksCount": 0,
+            "details": "",
+            "lastUpdated": datetime.utcnow().isoformat() + "Z",
+        }
+
+        if not mandate_path:
+            empty["details"] = "No mandate selected"
+            return empty
+
         try:
-            from app.chroma_vector_service import get_chroma_vector_service
+            from app.firebase_client import get_firestore
+            import asyncio
 
-            # Récupérer le service ChromaDB
-            chroma_service = get_chroma_vector_service()
+            db = get_firestore()
 
-            # Analyser le stockage pour cette company (collection = company_id)
-            max_storage_gb = 10.0  # 10GB limite par défaut
-            result = chroma_service.analyze_storage_full(company_id, max_storage_gb)
+            # Count files and chunks in parallel (Firestore aggregation)
+            def _count_files():
+                docs = list(db.collection(f"{mandate_path}/indexed_files").stream())
+                return len(docs)
 
-            if result.get("success"):
-                storage_data = result["data"]
-                # Convertir GB en bytes pour cohérence avec le frontend
-                used_bytes = int(storage_data["storage_size_gb"] * (1024 ** 3))
-                total_bytes = int(max_storage_gb * (1024 ** 3))
+            def _count_chunks():
+                docs = list(db.collection(f"{mandate_path}/document_chunks").select([]).stream())
+                return len(docs)
 
-                # Extraire le nombre de documents depuis storage_details
-                details = storage_data.get("storage_details", "")
-                documents_count = 0
-                if "Total amount of documents:" in details:
-                    try:
-                        doc_line = details.split("\n")[0]
-                        documents_count = int(doc_line.split(":")[1].strip())
-                    except (IndexError, ValueError):
-                        pass
+            files_count, chunks_count = await asyncio.gather(
+                asyncio.to_thread(_count_files),
+                asyncio.to_thread(_count_chunks),
+            )
 
-                return {
-                    "used": used_bytes,
-                    "total": total_bytes,
-                    "percentage": storage_data["storage_percentage"],
-                    "documentsCount": documents_count,
-                    "details": storage_data["storage_details"],
-                    "lastUpdated": datetime.utcnow().isoformat() + "Z"
-                }
-            else:
-                logger.warning(f"ChromaDB storage analysis failed: {result.get('error')}")
-                return {
-                    "used": 0,
-                    "total": int(10 * 1024 * 1024 * 1024),
-                    "percentage": 0,
-                    "documentsCount": 0,
-                    "details": "No data available",
-                    "lastUpdated": datetime.utcnow().isoformat() + "Z"
-                }
+            used_bytes = chunks_count * self._AVG_CHUNK_BYTES
+            percentage = round((used_bytes / self._MAX_STORAGE_BYTES) * 100, 1) if self._MAX_STORAGE_BYTES > 0 else 0
+
+            return {
+                "used": used_bytes,
+                "total": self._MAX_STORAGE_BYTES,
+                "percentage": min(percentage, 100.0),
+                "documentsCount": files_count,
+                "chunksCount": chunks_count,
+                "details": f"{files_count} documents, {chunks_count} chunks indexed",
+                "lastUpdated": datetime.utcnow().isoformat() + "Z",
+            }
 
         except Exception as e:
             logger.error(f"_get_storage_info error: {e}")
-            return {
-                "used": 0,
-                "total": int(10 * 1024 * 1024 * 1024),
-                "percentage": 0,
-                "documentsCount": 0,
-                "details": f"Error: {str(e)}",
-                "lastUpdated": datetime.utcnow().isoformat() + "Z"
-            }
+            empty["details"] = f"Error: {str(e)}"
+            return empty
 
     async def _get_metrics(self, user_id: str, company_id: str, mandate_path: Optional[str] = None) -> Dict[str, Any]:
         """

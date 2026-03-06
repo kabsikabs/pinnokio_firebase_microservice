@@ -328,7 +328,10 @@ class NeonHRManager:
                 }
 
             pool = await self.get_pool()
-            deleted_counts = {"employees": 0, "contracts": 0, "payroll_results": 0}
+            deleted_counts = {
+                "employees": 0, "contracts": 0, "payroll_results": 0,
+                "company_payroll_items": 0,
+            }
 
             async with pool.acquire() as conn:
                 async with conn.transaction():
@@ -358,7 +361,14 @@ class NeonHRManager:
                         )
                         deleted_counts["employees"] = int(result.split()[-1]) if "DELETE" in result else 0
 
-                    # 4. Supprimer la société
+                        # 4. Supprimer company_payroll_items (overrides rubriques)
+                        result = await conn.execute(
+                            "DELETE FROM hr.company_payroll_items WHERE company_id = $1",
+                            company_id
+                        )
+                        deleted_counts["company_payroll_items"] = int(result.split()[-1]) if "DELETE" in result else 0
+
+                    # 5. Supprimer la societe (cascade auto: accounting.*, core.company_settings, etc.)
                     await conn.execute("DELETE FROM core.companies WHERE id = $1", company_id)
 
             # Nettoyer le cache
@@ -546,8 +556,8 @@ class NeonHRManager:
     # ═══════════════════════════════════════════════════════════════
     
     async def list_contracts(
-        self, 
-        company_id: UUID, 
+        self,
+        company_id: UUID,
         employee_id: UUID
     ) -> List[Dict[str, Any]]:
         """Liste les contrats d'un employé."""
@@ -557,7 +567,9 @@ class NeonHRManager:
                 """
                 SELECT c.id, c.employee_id, c.contract_type, c.start_date, c.end_date,
                        c.base_salary, c.currency, c.work_rate, c.weekly_hours,
-                       c.provisions, c.is_active
+                       c.remuneration_type, c.annual_leave_days,
+                       c.job_title, c.department, c.country_code,
+                       c.provisions, c.is_active, c.created_at, c.updated_at
                 FROM hr.contracts c
                 JOIN hr.employees e ON c.employee_id = e.id
                 WHERE c.employee_id = $1 AND e.company_id = $2
@@ -600,28 +612,42 @@ class NeonHRManager:
         base_salary: float,
         **kwargs
     ) -> UUID:
-        """Crée un nouveau contrat."""
+        """Crée un nouveau contrat avec tous les champs étendus."""
+        import json as _json
+
         # Convertir les dates strings en objets date
         start_date_obj = _to_date(start_date)
         end_date_obj = _to_date(kwargs.get("end_date"))
-        
+
+        # Pack provisions JSONB from individual kwargs
+        provisions = {}
+        for prov_key in ("thirteenth_month", "thirteenth_month_rate",
+                         "bonus_target", "bonus_type"):
+            val = kwargs.pop(prov_key, None)
+            if val is not None:
+                provisions[prov_key] = val
+
         pool = await self.get_pool()
         async with pool.acquire() as conn:
             # Vérifier que l'employé appartient à la company
             emp = await conn.fetchrow(
-                "SELECT id FROM hr.employees WHERE id = $1 AND company_id = $2",
+                "SELECT id, country_code FROM hr.employees WHERE id = $1 AND company_id = $2",
                 employee_id, company_id
             )
             if not emp:
                 raise ValueError("Employee not found in company")
-            
+
+            country_code = kwargs.get("country_code") or (dict(emp).get("country_code"))
+
             result = await conn.fetchrow(
                 """
                 INSERT INTO hr.contracts (
                     employee_id, contract_type, start_date, end_date,
-                    base_salary, currency, work_rate, weekly_hours
+                    base_salary, currency, work_rate, weekly_hours,
+                    remuneration_type, annual_leave_days,
+                    job_title, department, country_code, provisions
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
                 RETURNING id
                 """,
                 employee_id,
@@ -631,11 +657,80 @@ class NeonHRManager:
                 base_salary,
                 kwargs.get("currency", "CHF"),
                 kwargs.get("work_rate", 1.0),
-                kwargs.get("weekly_hours", 42.0)
+                kwargs.get("weekly_hours", 42.0),
+                kwargs.get("remuneration_type", "MONTHLY"),
+                kwargs.get("annual_leave_days", 25),
+                kwargs.get("job_title"),
+                kwargs.get("department"),
+                country_code,
+                _json.dumps(provisions) if provisions else None,
             )
             logger.info(f"✅ Contrat créé: {contract_type} pour employé {employee_id}")
             return result["id"]
     
+    async def update_contract(
+        self,
+        company_id: UUID,
+        contract_id: UUID,
+        **fields
+    ) -> bool:
+        """Met à jour un contrat existant (pattern identique à update_employee)."""
+        import json as _json
+
+        allowed = {
+            "contract_type", "start_date", "end_date", "base_salary",
+            "currency", "work_rate", "weekly_hours", "remuneration_type",
+            "annual_leave_days", "job_title", "department",
+            "provisions", "is_active", "country_code",
+        }
+        filtered = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not filtered:
+            return True  # Nothing to update
+
+        # Convert date strings
+        for date_key in ("start_date", "end_date"):
+            if date_key in filtered:
+                filtered[date_key] = _to_date(filtered[date_key])
+
+        # Serialize provisions if present
+        if "provisions" in filtered and isinstance(filtered["provisions"], dict):
+            filtered["provisions"] = _json.dumps(filtered["provisions"])
+
+        pool = await self.get_pool()
+        async with pool.acquire() as conn:
+            # Verify contract belongs to company via JOIN
+            check = await conn.fetchrow(
+                """
+                SELECT c.id FROM hr.contracts c
+                JOIN hr.employees e ON c.employee_id = e.id
+                WHERE c.id = $1 AND e.company_id = $2
+                """,
+                contract_id, company_id
+            )
+            if not check:
+                raise ValueError("Contract not found in company")
+
+            # Build dynamic SET clause
+            set_parts = []
+            params = []
+            idx = 1
+            for col, val in filtered.items():
+                set_parts.append(f"{col} = ${idx}")
+                params.append(val)
+                idx += 1
+
+            set_parts.append(f"updated_at = NOW()")
+            params.append(contract_id)
+
+            query = f"""
+                UPDATE hr.contracts
+                SET {', '.join(set_parts)}
+                WHERE id = ${idx}
+            """
+            await conn.execute(query, *params)
+            logger.info(f"✅ Contrat mis à jour: {contract_id} ({list(filtered.keys())})")
+            return True
+
     # ═══════════════════════════════════════════════════════════════
     # ENDPOINTS CLUSTERS
     # ═══════════════════════════════════════════════════════════════
@@ -864,6 +959,85 @@ class NeonHRManager:
                     country_code,
                 )
             return [_row_to_dict(row) for row in rows]
+
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # REFERENCE DATA (ref_* tables — direct Neon reads)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    # Allowed ref tables and their label column for lang selection
+    _REF_TABLES = {
+        "ref_contract_types":     {"label_cols": ["label_fr", "label_en", "label_de", "label_it"]},
+        "ref_remuneration_types": {"label_cols": ["label_fr", "label_en"]},
+        "ref_family_status":      {"label_cols": ["label_fr", "label_en"]},
+        "ref_tax_status":         {"label_cols": ["label_fr", "label_en"]},
+        "ref_permit_types":       {"label_cols": ["label_fr", "label_en"]},
+    }
+
+    async def get_ref_data(
+        self,
+        table_name: str,
+        country_code: Optional[str] = None,
+        lang: str = "fr",
+    ) -> List[Dict[str, Any]]:
+        """
+        Generic reader for hr.ref_* tables.
+
+        Args:
+            table_name: One of ref_contract_types, ref_remuneration_types, etc.
+            country_code: Optional country filter (e.g. 'CH')
+            lang: Language for label selection ('fr', 'en', 'de', 'it')
+
+        Returns:
+            List of dicts with code, label, and table-specific columns.
+        """
+        if table_name not in self._REF_TABLES:
+            raise ValueError(f"Unknown ref table: {table_name}")
+
+        pool = await self.get_pool()
+        async with pool.acquire() as conn:
+            if country_code:
+                rows = await conn.fetch(
+                    f"SELECT * FROM hr.{table_name} WHERE country_code = $1 ORDER BY sort_order, code",
+                    country_code,
+                )
+            else:
+                rows = await conn.fetch(
+                    f"SELECT * FROM hr.{table_name} ORDER BY sort_order, code"
+                )
+
+        results = []
+        for row in rows:
+            d = _row_to_dict(row)
+            # Add a computed 'label' field based on requested language
+            label_key = f"label_{lang}" if f"label_{lang}" in d else "label_fr"
+            d["label"] = d.get(label_key) or d.get("label_fr", d.get("code", ""))
+            results.append(d)
+        return results
+
+    async def get_all_references(
+        self,
+        country_code: str = "CH",
+        lang: str = "fr",
+    ) -> Dict[str, Any]:
+        """
+        Fetch all reference data in a single call (optimal for page init).
+
+        Returns:
+            {
+                "contract_types": [...],
+                "remuneration_types": [...],
+                "family_status": [...],
+                "tax_status": [...],
+                "permit_types": [...],
+            }
+        """
+        result = {}
+        for table_name in self._REF_TABLES:
+            # table_name like "ref_contract_types" → key "contract_types"
+            key = table_name.replace("ref_", "")
+            result[key] = await self.get_ref_data(table_name, country_code, lang)
+        return result
 
 
 def _row_to_dict(row) -> Dict[str, Any]:

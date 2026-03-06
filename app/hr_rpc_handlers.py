@@ -760,7 +760,51 @@ class HRRPCHandlers:
         except Exception as e:
             logger.error(f"HR.create_contract error={e}")
             return {"contract_id": None, "error": str(e)}
-    
+
+    async def update_contract(
+        self,
+        company_id: str,
+        contract_id: str,
+        employee_id: str = None,
+        firebase_user_id: str = None,
+        **fields
+    ) -> Dict[str, Any]:
+        """
+        Met à jour un contrat existant.
+
+        RPC: HR.update_contract
+        Args:
+            company_id (str UUID)
+            contract_id (str UUID)
+            employee_id (str UUID, optional): for cache invalidation
+            firebase_user_id (str, optional): Firebase UID for cache invalidation
+            **fields: fields to update (snake_case)
+        Returns: { "success": True } or { "success": False, "error": "..." }
+        """
+        try:
+            manager = get_neon_hr_manager()
+            await manager.update_contract(
+                company_id=UUID(company_id),
+                contract_id=UUID(contract_id),
+                **fields,
+            )
+            logger.info(f"HR.update_contract contract_id={contract_id}")
+
+            # Invalidate caches
+            if firebase_user_id and employee_id:
+                cache = get_hr_cache_manager()
+                await cache.invalidate_cache(
+                    firebase_user_id, company_id, "hr", f"contracts:{employee_id}"
+                )
+                await cache.invalidate_cache(
+                    firebase_user_id, company_id, "hr", f"active_contract:{employee_id}"
+                )
+
+            return {"success": True}
+        except Exception as e:
+            logger.error(f"HR.update_contract error={e}")
+            return {"success": False, "error": str(e)}
+
     # ═══════════════════════════════════════════════════════════════
     # CLUSTERS
     # ═══════════════════════════════════════════════════════════════
@@ -1130,11 +1174,11 @@ class HRRPCHandlers:
                         "source": "cache"
                     }
             
-            # 2. Fallback via Jobber client
-            from .tools.hr_jobber_client import get_hr_jobber_client
-            
-            client = get_hr_jobber_client()
-            result = await client.get_all_references(
+            # 2. Fallback via Neon direct queries (ref_* tables)
+            from .tools.neon_hr_manager import get_neon_hr_manager
+
+            manager = get_neon_hr_manager()
+            result = await manager.get_all_references(
                 country_code=country_code,
                 lang=lang,
             )
@@ -1172,19 +1216,16 @@ class HRRPCHandlers:
         lang: str = "fr",
     ) -> Dict[str, Any]:
         """
-        Récupère les types de contrat.
-        
+        Recupere les types de contrat depuis ref_contract_types (Neon direct).
+
         RPC: HR.get_contract_types
-        
-        Returns:
-            {"contract_types": [{"code": "CDI", "label": "..."}]}
         """
         try:
-            from .tools.hr_jobber_client import get_hr_jobber_client
-            
-            client = get_hr_jobber_client()
-            result = await client.get_contract_types(country_code, lang)
-            
+            from .tools.neon_hr_manager import get_neon_hr_manager
+
+            manager = get_neon_hr_manager()
+            result = await manager.get_ref_data("ref_contract_types", country_code, lang)
+
             logger.info(f"HR.get_contract_types count={len(result)}")
             return {"contract_types": result}
         except Exception as e:
@@ -1197,16 +1238,16 @@ class HRRPCHandlers:
         lang: str = "fr",
     ) -> Dict[str, Any]:
         """
-        Récupère les types de rémunération.
-        
+        Recupere les types de remuneration depuis ref_remuneration_types (Neon direct).
+
         RPC: HR.get_remuneration_types
         """
         try:
-            from .tools.hr_jobber_client import get_hr_jobber_client
-            
-            client = get_hr_jobber_client()
-            result = await client.get_remuneration_types(country_code, lang)
-            
+            from .tools.neon_hr_manager import get_neon_hr_manager
+
+            manager = get_neon_hr_manager()
+            result = await manager.get_ref_data("ref_remuneration_types", country_code, lang)
+
             logger.info(f"HR.get_remuneration_types count={len(result)}")
             return {"remuneration_types": result}
         except Exception as e:
@@ -1219,16 +1260,16 @@ class HRRPCHandlers:
         lang: str = "fr",
     ) -> Dict[str, Any]:
         """
-        Récupère les statuts familiaux.
-        
+        Recupere les statuts familiaux depuis ref_family_status (Neon direct).
+
         RPC: HR.get_family_status
         """
         try:
-            from .tools.hr_jobber_client import get_hr_jobber_client
-            
-            client = get_hr_jobber_client()
-            result = await client.get_family_status(country_code, lang)
-            
+            from .tools.neon_hr_manager import get_neon_hr_manager
+
+            manager = get_neon_hr_manager()
+            result = await manager.get_ref_data("ref_family_status", country_code, lang)
+
             logger.info(f"HR.get_family_status count={len(result)}")
             return {"family_status": result}
         except Exception as e:
@@ -1241,16 +1282,16 @@ class HRRPCHandlers:
         lang: str = "fr",
     ) -> Dict[str, Any]:
         """
-        Récupère les statuts fiscaux (spécifiques au pays).
-        
+        Recupere les statuts fiscaux depuis ref_tax_status (Neon direct).
+
         RPC: HR.get_tax_status
         """
         try:
-            from .tools.hr_jobber_client import get_hr_jobber_client
-            
-            client = get_hr_jobber_client()
-            result = await client.get_tax_status(country_code, lang)
-            
+            from .tools.neon_hr_manager import get_neon_hr_manager
+
+            manager = get_neon_hr_manager()
+            result = await manager.get_ref_data("ref_tax_status", country_code, lang)
+
             logger.info(f"HR.get_tax_status country={country_code} count={len(result)}")
             return {"tax_status": result}
         except Exception as e:
@@ -1263,16 +1304,16 @@ class HRRPCHandlers:
         lang: str = "fr",
     ) -> Dict[str, Any]:
         """
-        Récupère les types de permis (spécifiques au pays).
-        
+        Recupere les types de permis depuis ref_permit_types (Neon direct).
+
         RPC: HR.get_permit_types
         """
         try:
-            from .tools.hr_jobber_client import get_hr_jobber_client
-            
-            client = get_hr_jobber_client()
-            result = await client.get_permit_types(country_code, lang)
-            
+            from .tools.neon_hr_manager import get_neon_hr_manager
+
+            manager = get_neon_hr_manager()
+            result = await manager.get_ref_data("ref_permit_types", country_code, lang)
+
             logger.info(f"HR.get_permit_types country={country_code} count={len(result)}")
             return {"permit_types": result}
         except Exception as e:

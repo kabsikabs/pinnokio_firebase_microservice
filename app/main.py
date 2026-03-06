@@ -23,7 +23,6 @@ from . import runtime as runtime_state
 from google.cloud.firestore_v1 import SERVER_TIMESTAMP
 from .redis_client import get_redis
 from .firebase_providers import get_firebase_management, get_firebase_realtime
-from .chroma_vector_service import get_chroma_vector_service
 
 try:
     import redis  # type: ignore
@@ -919,44 +918,11 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
             if callable(target):
                 return target, "LISTENERS"
     
-    if method.startswith("CHROMA_VECTOR."):
-        name = method.split(".", 1)[1]
-        
-        # ⭐ OPTIMISATION: register_collection_user en mode fire-and-forget (gain 13s)
-        if name == "register_collection_user":
-            async def _async_wrapper(user_id, collection_name, session_id):
-                # Lancer le traitement réel dans un thread pour ne pas bloquer la boucle
-                import asyncio
-                import time
-                
-                loop = asyncio.get_event_loop()
-                # On utilise run_in_executor pour ne pas bloquer l'event loop avec des appels sync
-                loop.run_in_executor(
-                    None, 
-                    lambda: getattr(get_chroma_vector_service(), "register_collection_user")(user_id, collection_name, session_id)
-                )
-                
-                # Retourner immédiatement une réponse simulée pour débloquer le client
-                timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                return {
-                    "user_id": user_id,
-                    "collection_name": collection_name,
-                    "session_id": session_id,
-                    "registered_at": timestamp,
-                    "last_heartbeat": timestamp,
-                    "status": "initializing_background"
-                }
-            return _async_wrapper, "CHROMA_VECTOR"
-
-        target = getattr(get_chroma_vector_service(), name, None)
-        if callable(target):
-            return target, "CHROMA_VECTOR"
     if method.startswith("TASK."):
         name = method.split(".", 1)[1]
         if name == "start_document_analysis":
             return _start_document_analysis_task, "TASK"
-        if name == "start_vector_computation":
-            return _start_vector_computation_task, "TASK"
+        # start_vector_computation removed (ChromaDB migration → Firestore RAG)
         if name == "start_llm_conversation":
             return _start_llm_conversation_task, "TASK"
         if name == "get_task_status":
@@ -1020,6 +986,14 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
         target = getattr(drive_cache_handlers, name, None)
         if callable(target):
             return target, "DRIVE_CACHE"
+
+    # === ACCOUNTING (Neon PostgreSQL - GL/COA/Journals queries) ===
+    if method.startswith("ACCOUNTING."):
+        name = method.split(".", 1)[1]
+        from .accounting_rpc_handlers import get_accounting_handlers
+        target = getattr(get_accounting_handlers(), name, None)
+        if callable(target):
+            return target, "ACCOUNTING"
 
     # === ERP (Enterprise Resource Planning) ===
     if method.startswith("ERP."):
@@ -1225,6 +1199,11 @@ async def rpc_endpoint(req: RpcRequest, authorization: str | None = Header(defau
             # Les méthodes Drive cache utilisent user_id pour le cache Redis
             if "user_id" not in kwargs and req.user_id:
                 kwargs["user_id"] = req.user_id
+
+        elif _ns == "ACCOUNTING":
+            # ACCOUNTING: Pas d'injection - les methodes utilisent mandate_path
+            # fourni explicitement dans kwargs par le caller
+            pass
 
         elif _ns == "DASHBOARD":
             # DASHBOARD (Next.js): Injecter user_id automatiquement
@@ -3069,6 +3048,24 @@ async def websocket_endpoint(ws: WebSocket):
                         )
                         logger.info(f"[WS] COA delete_function handled - uid={uid}")
 
+                    elif msg_type == "coa.create_account":
+                        from .frontend.pages.coa import handle_create_account
+                        await handle_create_account(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] COA create_account handled - uid={uid}")
+
+                    elif msg_type == "coa.update_account":
+                        from .frontend.pages.coa import handle_update_account
+                        await handle_update_account(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] COA update_account handled - uid={uid}")
+
                     # ============================================
                     # EXPENSES EVENTS (Notes de Frais)
                     # ============================================
@@ -3960,26 +3957,6 @@ def _start_document_analysis_task(user_id: str, document_data: dict, job_id: str
             "job_id": job_id
         }
 
-def _start_vector_computation_task(user_id: str, documents: list, collection_name: str) -> dict:
-    """Démarre une tâche de calcul vectoriel."""
-    try:
-        from .computation_tasks import compute_vector_embeddings
-        
-        task = compute_vector_embeddings.delay(user_id, documents, collection_name)
-        return {
-            "success": True,
-            "task_id": f"embeddings_{collection_name}",
-            "celery_task_id": task.id,
-            "status": "queued",
-            "collection_name": collection_name
-        }
-    except Exception as e:
-        logger.error("start_vector_computation_error user_id=%s collection=%s error=%s", user_id, collection_name, repr(e))
-        return {
-            "success": False,
-            "error": str(e),
-            "collection_name": collection_name
-        }
 
 def _start_llm_conversation_task(
     user_id: str, 

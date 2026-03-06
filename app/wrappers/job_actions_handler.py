@@ -99,6 +99,14 @@ JOB_TYPE_CONFIG = {
         "domain": "onboarding",       # No business cache for onboarding
         "approval_prefix": "onboarding_",
     },
+    "hr": {
+        "process_endpoint": "/hr-event-trigger",
+        "stop_endpoint": "/stop-hr",
+        "local_port": 8083,
+        "department": "HR",
+        "domain": "hr",
+        "approval_prefix": "hr_",
+    },
 }
 
 # Mapping from job_type to active_jobs collection name
@@ -108,6 +116,7 @@ ACTIVE_JOB_TYPE_MAP = {
     "bankbookeeper": "banker",
     "exbookeeper": "exbookeeper",
     "onboarding": "onboarding",
+    "hr": "hr",
 }
 
 # Environment URLs
@@ -335,6 +344,10 @@ async def handle_job_process(
         or payload.get("company_id")
         or payload.get("collection_name")
     )
+    # Enrich company_data so downstream functions (_apply_optimistic_list_change, etc.)
+    # can resolve the cache key — inter-worker dispatches only set "collection_name".
+    if company_id and not company_data.get("company_id"):
+        company_data["company_id"] = company_id
     mandate_path = company_data.get("mandate_path", "")
     company_name = company_data.get("company_name", company_id)
 
@@ -474,9 +487,13 @@ async def handle_job_process(
             approval_states = payload.get("approval_states", {})
             workflow_states = payload.get("workflow_states", {})
 
-            # Get defaults from company settings (fallback to safe defaults)
-            default_approval = company_data.get("router_approval_required", False)
-            default_workflow = company_data.get("router_automated_workflow", True)
+            # Get defaults from company settings per job type
+            if job_type == "apbookeeper":
+                default_approval = company_data.get("apbookeeper_approval_required", False)
+                default_contact_creation = company_data.get("apbookeeper_approval_contact_creation", False)
+            else:
+                default_approval = company_data.get("router_approval_required", False)
+                default_workflow = company_data.get("router_automated_workflow", True)
 
             for doc_id in document_ids:
                 doc_info = documents_info.get(doc_id, {})
@@ -489,8 +506,13 @@ async def handle_job_process(
                     "instructions": str(document_instructions.get(doc_id, "")),
                     "status": "to_route" if job_type == "router" else "to_process",
                     "approval_required": approval_states.get(doc_id, default_approval),
-                    "automated_workflow": workflow_states.get(doc_id, default_workflow),
                 }
+
+                if job_type == "apbookeeper":
+                    job_item["approval_contact_creation"] = workflow_states.get(doc_id, default_contact_creation)
+                else:
+                    job_item["automated_workflow"] = workflow_states.get(doc_id, default_workflow)
+
                 jobs_data.append(job_item)
 
         # log_communication_mode must be a valid GMS mode (google_chat, pinnokio, telegram)
@@ -585,7 +607,7 @@ async def handle_job_process(
         logger.info(f"[JOB_ACTIONS] │ mandates_path: {jobbeur_payload.get('mandates_path')}")
         logger.info(f"[JOB_ACTIONS] │ batch_id: {jobbeur_payload.get('batch_id')}")
         logger.info(f"[JOB_ACTIONS] │ pub_sub_id: {jobbeur_payload.get('pub_sub_id')}")
-        logger.info(f"[JOB_ACTIONS] │ start_instructions: {jobbeur_payload.get('start_instructions', '')[:100]}...")
+        logger.info(f"[JOB_ACTIONS] │ start_instructions: {(jobbeur_payload.get('start_instructions') or '')[:100]}...")
         logger.info(f"[JOB_ACTIONS] │ settings: {jobbeur_payload.get('settings')}")
         logger.info(f"[JOB_ACTIONS] │ jobs_data count: {len(jobbeur_payload.get('jobs_data', []))}")
         for idx, job in enumerate(jobbeur_payload.get('jobs_data', [])[:5]):  # Limit to first 5
@@ -595,7 +617,7 @@ async def handle_job_process(
             logger.info(f"[JOB_ACTIONS] │       status={job.get('status')}")
             logger.info(f"[JOB_ACTIONS] │       approval_required={job.get('approval_required')}")
             logger.info(f"[JOB_ACTIONS] │       automated_workflow={job.get('automated_workflow')}")
-            logger.info(f"[JOB_ACTIONS] │       instructions={job.get('instructions', '')[:50]}...")
+            logger.info(f"[JOB_ACTIONS] │       instructions={(job.get('instructions') or '')[:50]}...")
         if len(jobbeur_payload.get('jobs_data', [])) > 5:
             logger.info(f"[JOB_ACTIONS] │   ... and {len(jobbeur_payload.get('jobs_data', [])) - 5} more jobs")
         logger.info(f"[JOB_ACTIONS] └─────────────────────────────────────────────────────────────")
@@ -938,7 +960,7 @@ async def handle_job_restart(
     Cleans up the failed/stuck job state and moves the item back to to_process.
 
     Complete restart workflow:
-    1. Delete Chroma embeddings for this job
+    1. Delete RAG vector embeddings (fire-and-forget via Worker LLM)
     2. Delete approval_pendinglist entry (before task_manager reset)
     3. Reset task_manager fields + delete events subcollection
     4. Update notification status to to_process
@@ -990,25 +1012,12 @@ async def handle_job_restart(
     try:
         firebase = get_firebase_management()
 
-        # 1. Delete Chroma embeddings for this job (if applicable)
-        logger.info(f"[JOB_ACTIONS] → Step 1: Deleting Chroma embeddings...")
-        try:
-            from ..chroma_vector_service import get_chroma_vector_service
-            chroma = get_chroma_vector_service()
-            if chroma:
-                result = await asyncio.to_thread(
-                    chroma.delete_documents,
-                    company_id,
-                    {"job_id": job_id},
-                )
-                if result.get("success"):
-                    logger.info(f"[JOB_ACTIONS] → Step 1: Chroma embeddings DELETED for job_id={job_id}")
-                else:
-                    logger.warning(f"[JOB_ACTIONS] → Step 1: Chroma deletion FAILED: {result.get('error', 'unknown error')}")
-            else:
-                logger.info(f"[JOB_ACTIONS] → Step 1: Chroma service not available, skipping")
-        except Exception as chroma_err:
-            logger.warning(f"[JOB_ACTIONS] → Step 1: Chroma deletion SKIPPED: {chroma_err}")
+        # 1. Delete RAG vector embeddings for this job (fire-and-forget via Worker LLM)
+        logger.info(f"[JOB_ACTIONS] → Step 1: Dispatching RAG vector cleanup...")
+        if mandate_path:
+            await _dispatch_rag_delete(mandate_path, job_id)
+        else:
+            logger.info(f"[JOB_ACTIONS] → Step 1: No mandate_path, RAG cleanup skipped")
 
         # 2. Delete approval_pendinglist entry (before task_manager reset)
         logger.info(f"[JOB_ACTIONS] → Step 2: Deleting approval_pendinglist entry...")
@@ -1194,6 +1203,10 @@ async def handle_job_delete(
                     firebase.delete_items_by_job_id,
                     uid, [job_id], mandate_path
                 )
+
+                # 3b. Dispatch RAG vector cleanup (fire-and-forget via Worker LLM)
+                if mandate_path:
+                    await _dispatch_rag_delete(mandate_path, job_id)
 
                 # 4. Delete approval_pendinglist entries
                 logger.debug(f"[JOB_ACTIONS] →   Step 4: Deleting approval_pendinglist...")
@@ -1940,6 +1953,52 @@ async def _delete_job_chat_threads(
         logger.debug(f"[JOB_ACTIONS] RTDB active_chats erased for job_id={job_id}")
     except Exception as e:
         logger.warning(f"[JOB_ACTIONS] Failed to delete chat threads: {e}")
+
+
+# ============================================
+# RAG VECTOR CLEANUP
+# ============================================
+
+_RAG_QUEUE = "queue:llm_jobs"
+
+
+async def _dispatch_rag_delete(mandate_path: str, job_id: str) -> None:
+    """
+    Dispatch RAG vector cleanup for a deleted job (fire-and-forget).
+
+    Sends delete operations to the Worker LLM via Redis queue for all
+    possible file_id patterns associated with a job:
+      - job_id itself (Router: job_id == drive_file_id)
+      - journal_{job_id} (AP/Accountant journal entries)
+      - chat_{job_id} (chat context chunks)
+
+    Non-blocking: failures are logged but never propagate.
+    """
+    file_ids = [job_id, f"journal_{job_id}", f"chat_{job_id}"]
+
+    try:
+        redis = get_redis()
+        for file_id in file_ids:
+            payload = json.dumps({
+                "job_id": f"rag_del_{uuid.uuid4().hex[:8]}",
+                "type": "rag_operation",
+                "params": {
+                    "rag_payload": {
+                        "action": "delete",
+                        "mandate_path": mandate_path,
+                        "file_id": file_id,
+                    }
+                },
+                "queued_at": datetime.now(timezone.utc).isoformat(),
+            })
+            redis.lpush(_RAG_QUEUE, payload)
+
+        logger.debug(
+            f"[JOB_ACTIONS] →   Step 3b: RAG delete dispatched for "
+            f"{len(file_ids)} file_ids (job_id={job_id})"
+        )
+    except Exception as e:
+        logger.warning(f"[JOB_ACTIONS] →   Step 3b: RAG delete dispatch failed (non-blocking): {e}")
 
 
 # ============================================
@@ -2713,6 +2772,31 @@ async def _persist_jobs_to_task_manager(
                     "mandate_path": mandate_path,
                     "collection_id": company_id,
                     "batch_id": batch_id,
+                }
+            )
+
+    elif job_type == "hr":
+        # HR: 1 doc par job item (calcul paie, validation, export, PDF)
+        for job_item in jobs_data or []:
+            job_id = job_item.get("job_id", f"payroll_{batch_id}")
+            await asyncio.to_thread(
+                firebase.add_or_update_job_by_job_id,
+                task_mgr_path,
+                {
+                    "job_id": job_id,
+                    "status": "in_queue",
+                    "department": "HR",
+                    "mandate_path": mandate_path,
+                    "collection_id": company_id,
+                    "batch_id": batch_id,
+                    "department_data": {
+                        "HR": {
+                            "employee_id": job_item.get("employee_id", ""),
+                            "action": job_item.get("action", "calculate"),
+                            "period_year": job_item.get("period_year"),
+                            "period_month": job_item.get("period_month"),
+                        }
+                    }
                 }
             )
 

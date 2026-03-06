@@ -1994,22 +1994,32 @@ class CompanySettingsHandlers:
                 logger.warning(f"delete_company: Drive archive failed: {e}")
                 _report("Document Management System", "failed", str(e))
 
-            # ── Step 7: Delete ChromaDB Collection ──────────
+            # ── Step 7: Delete Firestore RAG data (indexed_files + document_chunks) ──
             _notify("Cleaning vector database", 7)
             try:
-                if contact_space_id:
-                    from app.chroma_vector_service import get_chroma_vector_service
+                if mandate_path:
+                    from app.firebase_client import get_firestore
+                    import asyncio
 
-                    chroma = get_chroma_vector_service()
-                    result = chroma.delete_collection(contact_space_id)
-                    if result.get("success"):
-                        _report("Vector Database", "success", f"Collection '{contact_space_id}' deleted")
-                    else:
-                        _report("Vector Database", "failed", result.get("error", "Unknown error"))
+                    db = get_firestore()
+                    total_deleted = 0
+                    for col_name in ["document_chunks", "indexed_files"]:
+                        col_ref = db.collection(f"{mandate_path}/{col_name}")
+                        docs = list(col_ref.limit(500).stream())
+                        while docs:
+                            batch = db.batch()
+                            for doc in docs:
+                                batch.delete(doc.reference)
+                            batch.commit()
+                            total_deleted += len(docs)
+                            if len(docs) < 500:
+                                break
+                            docs = list(col_ref.limit(500).stream())
+                    _report("Vector Database", "success", f"Firestore RAG: {total_deleted} documents deleted")
                 else:
-                    _report("Vector Database", "skipped", "No contact_space_id")
+                    _report("Vector Database", "skipped", "No mandate_path")
             except Exception as e:
-                logger.warning(f"delete_company: ChromaDB cleanup failed: {e}")
+                logger.warning(f"delete_company: Firestore RAG cleanup failed: {e}")
                 _report("Vector Database", "failed", str(e))
 
             # ── Step 8: Delete Scheduler Documents ──────────

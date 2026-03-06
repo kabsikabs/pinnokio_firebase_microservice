@@ -539,9 +539,7 @@ class FirebaseManagement:
 
                 # Construire l'item standardisé
                 file_id = ap_data.get("file_id", "")
-                uri_link = data.get("uri_file_link", "") or data.get("drive_link", "")
-                if not uri_link and file_id:
-                    uri_link = f"https://drive.google.com/file/d/{file_id}/view"
+                uri_link = data.get("uri_drive_link", "") or data.get("uri_file_link", "")
 
                 item = {
                     "task_id": doc.id,
@@ -7296,8 +7294,8 @@ class FirebaseManagement:
                 print(f"Marking Document_information for deletion")
             
             if 'status' in current_data:
-                fields_to_delete['status'] = firestore.DELETE_FIELD
-                print(f"Marking status for deletion (was: {current_data.get('status')})")
+                fields_to_delete['status'] = 'to_process'
+                print(f"Resetting status to 'to_process' (was: {current_data.get('status')})")
             
             # Exécuter la suppression si des champs existent
             if fields_to_delete:

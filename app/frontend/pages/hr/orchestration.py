@@ -430,14 +430,19 @@ async def handle_orchestrate_init(
             firebase_user_id=uid,
         )
         settings_task = _get_hr_settings(uid, company_id, mandate_path)
+        references_task = handlers.get_all_references(
+            country_code="CH", lang="fr", firebase_user_id=uid,
+            company_id=company_id
+        )
+        clusters_task = handlers.list_clusters(
+            country_code="CH", firebase_user_id=uid, company_id=company_id
+        )
 
-        # TODO: Add when implemented in hr_rpc_handlers
-        # contracts_task = handlers.list_all_contracts(company_id=hr_company_id, firebase_user_id=uid)
-        # rubrics_task = handlers.get_payroll_items(country_code="CH")
-
-        employees_result, settings = await asyncio.gather(
+        employees_result, settings, references_result, clusters_result = await asyncio.gather(
             employees_task,
             settings_task,
+            references_task,
+            clusters_task,
             return_exceptions=True
         )
 
@@ -451,6 +456,23 @@ async def handle_orchestrate_init(
         if isinstance(settings, Exception):
             logger.error(f"[HR] Failed to fetch settings: {settings}")
             settings = {}
+
+        # Handle references
+        references = {}
+        if isinstance(references_result, Exception):
+            logger.error(f"[HR] Failed to fetch references: {references_result}")
+        else:
+            references = references_result if isinstance(references_result, dict) else {}
+
+        # Handle clusters
+        clusters = []
+        if isinstance(clusters_result, Exception):
+            logger.error(f"[HR] Failed to fetch clusters: {clusters_result}")
+        elif isinstance(clusters_result, dict):
+            clusters = clusters_result.get("clusters", [])
+
+        # Merge clusters into references
+        references["clusters"] = clusters
 
         # 3. Calculate metrics
         active_employees = len([e for e in employees if e.get("status") != "terminated"])
@@ -484,6 +506,7 @@ async def handle_orchestrate_init(
             "employees": employees,
             "contracts": contracts,
             "rubrics": rubrics,
+            "references": references,
             "metrics": metrics,
             "settings": settings,
             "payroll_summary": payroll_summary,
@@ -734,24 +757,32 @@ async def handle_employee_update(
     try:
         handlers = get_hr_rpc_handlers()
 
-        # Map frontend fields to backend fields
+        # Map frontend fields (camelCase) to backend fields (snake_case)
         update_fields = {}
-        if "firstName" in data:
-            update_fields["first_name"] = data["firstName"]
-        if "lastName" in data:
-            update_fields["last_name"] = data["lastName"]
-        if "email" in data:
-            update_fields["email"] = data["email"]
-        if "phone" in data:
-            update_fields["phone"] = data["phone"]
-        if "position" in data:
-            update_fields["position"] = data["position"]
-        if "department" in data:
-            update_fields["department"] = data["department"]
-        if "cluster_code" in data:
-            update_fields["cluster_code"] = data["cluster_code"]
-        if "status" in data:
-            update_fields["status"] = data["status"]
+        # Direct snake_case fields (already in backend format)
+        direct_fields = ["status", "phone", "email", "address", "gender", "nationality"]
+        for field in direct_fields:
+            if field in data:
+                update_fields[field] = data[field]
+
+        # camelCase → snake_case mapping
+        field_mapping = {
+            "firstName": "first_name",
+            "lastName": "last_name",
+            "startDate": "start_date",
+            "birthDate": "birth_date",
+            "taxStatus": "tax_status",
+            "familyStatus": "family_status",
+            "permitType": "permit_type",
+            "countryCode": "country_code",
+            "dependents": "dependents",
+            "city": "city",
+            "postalCode": "postal_code",
+            "clusterCode": "cluster_code",
+        }
+        for frontend_key, backend_key in field_mapping.items():
+            if frontend_key in data:
+                update_fields[backend_key] = data[frontend_key]
 
         result = await handlers.update_employee(
             company_id=hr_company_id,
@@ -1097,13 +1128,17 @@ async def _get_rubric_overrides(mandate_path: str) -> Dict[str, Dict[str, Any]]:
                     cpi.is_enabled AS is_active,
                     cpi.custom_label,
                     cpi.custom_rate_employee AS custom_rate,
-                    cpi.debit_account_employee::text,
-                    cpi.credit_account_employee::text,
-                    cpi.debit_account_employer::text,
-                    cpi.credit_account_employer::text,
+                    dae.account_number AS debit_account_employee,
+                    cae.account_number AS credit_account_employee,
+                    daer.account_number AS debit_account_employer,
+                    caer.account_number AS credit_account_employer,
                     cpi.updated_at
                 FROM hr.company_payroll_items cpi
                 JOIN hr.payroll_items_catalog cat ON cpi.catalog_item_id = cat.id
+                LEFT JOIN core.chart_of_accounts dae ON cpi.debit_account_employee = dae.id
+                LEFT JOIN core.chart_of_accounts cae ON cpi.credit_account_employee = cae.id
+                LEFT JOIN core.chart_of_accounts daer ON cpi.debit_account_employer = daer.id
+                LEFT JOIN core.chart_of_accounts caer ON cpi.credit_account_employer = caer.id
                 WHERE cpi.company_id = $1
             """, company_id)
 
@@ -1186,14 +1221,25 @@ async def _save_rubric_override(
                 "credit_account_employer": "credit_account_employer",
             }
 
+            # Account fields need account_number → UUID resolution
+            account_cols = {
+                "debit_account_employee",
+                "credit_account_employee",
+                "debit_account_employer",
+                "credit_account_employer",
+            }
+
             for field, col in field_mapping.items():
                 if field in override_data:
                     val = override_data[field]
-                    # Account fields are UUID references — store as UUID or NULL
-                    if col.endswith("_employee") and col.startswith(("debit_", "credit_")):
-                        if val and val.strip():
-                            from uuid import UUID as PyUUID
-                            val = PyUUID(val)
+                    # Resolve account_number → UUID for all 4 account columns
+                    if col in account_cols:
+                        if val and str(val).strip():
+                            row = await conn.fetchrow(
+                                "SELECT id FROM core.chart_of_accounts WHERE company_id = $1 AND account_number = $2",
+                                company_id, str(val).strip()
+                            )
+                            val = row["id"] if row else None
                         else:
                             val = None
                     set_parts.append(f"{col} = ${param_idx}")
@@ -1786,33 +1832,93 @@ async def handle_contract_update(
     try:
         handlers = get_hr_rpc_handlers()
 
-        # Check if update_contract is implemented
-        if not hasattr(handlers, 'update_contract'):
+        # Map camelCase → snake_case + pack provisions
+        update_fields = {}
+        field_mapping = {
+            "contractType": "contract_type",
+            "baseSalary": "base_salary",
+            "startDate": "start_date",
+            "endDate": "end_date",
+            "workRate": "work_rate",
+            "weeklyHours": "weekly_hours",
+            "annualLeaveDays": "annual_leave_days",
+            "remunerationType": "remuneration_type",
+            "jobTitle": "job_title",
+            "department": "department",
+            "isActive": "is_active",
+            "countryCode": "country_code",
+        }
+        # Direct snake_case fields
+        direct_fields = ["currency"]
+        for f in direct_fields:
+            if f in data:
+                update_fields[f] = data[f]
+
+        for frontend_key, backend_key in field_mapping.items():
+            if frontend_key in data:
+                update_fields[backend_key] = data[frontend_key]
+
+        # Pack provisions JSONB
+        provisions = {}
+        prov_mapping = {
+            "thirteenthMonth": "thirteenth_month",
+            "thirteenthMonthRate": "thirteenth_month_rate",
+            "bonusTarget": "bonus_target",
+            "bonusType": "bonus_type",
+        }
+        for frontend_key, backend_key in prov_mapping.items():
+            if frontend_key in data:
+                provisions[backend_key] = data[frontend_key]
+        if provisions:
+            update_fields["provisions"] = provisions
+
+        result = await handlers.update_contract(
+            company_id=hr_company_id,
+            contract_id=contract_id,
+            employee_id=employee_id,
+            firebase_user_id=uid,
+            **update_fields,
+        )
+
+        if result.get("success"):
+            # Invalidate page state cache
+            if company_id:
+                _invalidate_page_state(uid, company_id)
+
+            # Fetch updated contract to send back
+            updated_contract = None
+            if employee_id:
+                contracts_result = await handlers.list_contracts(
+                    company_id=hr_company_id,
+                    employee_id=employee_id,
+                    firebase_user_id=uid,
+                )
+                contracts = contracts_result.get("contracts", [])
+                updated_contract = next(
+                    (c for c in contracts if str(c.get("id")) == str(contract_id)),
+                    None
+                )
+
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.HR.CONTRACT_UPDATED,
+                "payload": {
+                    "success": True,
+                    "contract": updated_contract or {"id": contract_id},
+                    "employee_id": employee_id,
+                }
+            })
+
+            logger.info(
+                f"[HR] Contract updated: uid={uid} contract={contract_id}"
+            )
+        else:
             await hub.broadcast(uid, {
                 "type": WS_EVENTS.HR.ERROR,
                 "payload": {
-                    "error": "Contract update not yet implemented",
-                    "code": "NOT_IMPLEMENTED"
+                    "error": result.get("error", "Failed to update contract"),
+                    "code": "CONTRACT_UPDATE_ERROR"
                 }
             })
-            logger.warning("[HR] update_contract not implemented in hr_rpc_handlers")
-            return
-
-        # TODO: Call handlers.update_contract when implemented
-        # result = await handlers.update_contract(
-        #     company_id=hr_company_id,
-        #     contract_id=contract_id,
-        #     firebase_user_id=uid,
-        #     **data,
-        # )
-
-        await hub.broadcast(uid, {
-            "type": WS_EVENTS.HR.ERROR,
-            "payload": {
-                "error": "Contract update not yet implemented",
-                "code": "NOT_IMPLEMENTED"
-            }
-        })
 
     except Exception as e:
         logger.error(f"[HR] Update contract failed: {e}", exc_info=True)
@@ -1883,6 +1989,66 @@ async def handle_active_contract_get(
         })
 
 
+async def handle_payroll_history_list(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """
+    Handle hr.payroll_history_list - List payroll results.
+
+    Event: hr.payroll_history_list
+    Payload: {
+        company_id: str,
+        year?: int,
+        employee_id?: str,
+    }
+    Response: hr.payroll_history_loaded { success: bool, payroll_results: [...] }
+    """
+    company_id = payload.get("company_id")
+    year = payload.get("year")
+    employee_id = payload.get("employee_id")
+    hr_company_id = await _resolve_hr_company_id(uid, company_id, payload)
+
+    if not hr_company_id:
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.HR.ERROR,
+            "payload": {"error": "Missing hr_company_id", "code": "MISSING_HR_COMPANY_ID"}
+        })
+        return
+
+    try:
+        handlers = get_hr_rpc_handlers()
+        result = await handlers.list_payroll_results(
+            company_id=hr_company_id,
+            employee_id=employee_id,
+            year=year,
+            firebase_user_id=uid,
+        )
+
+        payroll_results = result.get("payroll_results", [])
+
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.HR.PAYROLL_HISTORY_LOADED,
+            "payload": {
+                "success": True,
+                "payroll_results": payroll_results,
+            }
+        })
+
+        logger.info(
+            f"[HR] Payroll history loaded: uid={uid} count={len(payroll_results)} "
+            f"year={year} employee={employee_id}"
+        )
+
+    except Exception as e:
+        logger.error(f"[HR] Payroll history list failed: {e}", exc_info=True)
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.HR.ERROR,
+            "payload": {"error": str(e), "code": "PAYROLL_HISTORY_ERROR"}
+        })
+
+
 # ============================================
 # Event Router
 # ============================================
@@ -1909,6 +2075,8 @@ HR_EVENT_HANDLERS: Dict[str, Callable[[str, str, Dict[str, Any]], Awaitable[None
     WS_EVENTS.HR.CONTRACT_CREATE: handle_contract_create,
     WS_EVENTS.HR.CONTRACT_UPDATE: handle_contract_update,
     WS_EVENTS.HR.ACTIVE_CONTRACT_GET: handle_active_contract_get,
+    # Payroll History
+    WS_EVENTS.HR.PAYROLL_HISTORY_LIST: handle_payroll_history_list,
 }
 
 

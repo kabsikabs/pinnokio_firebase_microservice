@@ -80,6 +80,7 @@ CARD_ID_TO_DEPARTMENT = {
     "bank_list_file_card": "Bankbookeeper",
     "bank_file_list_card": "Bankbookeeper",
     "email_draft_approval_card": "Router",
+    "journal_entry_approval_card": "Accounting",
 }
 
 # ============================================
@@ -125,6 +126,7 @@ def _extract_active_job_type(department: str) -> Optional[str]:
         "banking": "banker",
         "exbookeeper": "exbookeeper",
         "onboarding": "onboarding",
+        "hr": "hr",
     }
     return mapping.get(department.lower()) if department else None
 
@@ -415,6 +417,18 @@ class RedisSubscriber:
             elif channel.endswith("/pending_approval"):
                 logger.debug("[REDIS_SUBSCRIBER] → routing to: pending_approval handler")
                 await self._handle_pending_approval_message(uid, channel, message_data)
+
+            elif "/chats/" in channel and "/messages" in channel:
+                # CARD/FOLLOW_CARD envoyees depuis agents L3 dans un chat regulier
+                # (ex: JournalEntryAgent → SUBMIT_FOR_APPROVAL en mode general_chat)
+                msg_type = message_data.get("message", {}).get("message_type", "") \
+                    if isinstance(message_data.get("message"), dict) \
+                    else message_data.get("message_type", "")
+                if msg_type in ("CARD", "FOLLOW_CARD"):
+                    logger.debug("[REDIS_SUBSCRIBER] → routing to: job_chat handler (CARD from chats/)")
+                    await self._handle_job_chat_message(uid, channel, message_data)
+                else:
+                    logger.debug("[REDIS_SUBSCRIBER] → routing to: IGNORE (chat handled by llm_manager)")
 
             elif "/messages" in channel:
                 logger.debug("[REDIS_SUBSCRIBER] → routing to: IGNORE (chat handled by llm_manager)")
@@ -1291,8 +1305,8 @@ class RedisSubscriber:
                 if "billed" in billing:
                     existing_item["billed"] = bool(billing["billed"])
 
-            # Department-specific data
-            dept_data = message_data.get("department_data")
+            # Department-specific data (peut être au top-level OU dans data)
+            dept_data = message_data.get("department_data") or item_data.get("department_data")
             if isinstance(dept_data, dict):
                 # APBookkeeper
                 ap_data = dept_data.get("APbookeeper") or dept_data.get("Apbookeeper") or {}
@@ -1316,6 +1330,25 @@ class RedisSubscriber:
                             existing_item[dst] = float(ap_data[src] or 0)
                     if "currency" in ap_data:
                         existing_item["currency"] = ap_data["currency"]
+                    if "currency_rate" in ap_data:
+                        existing_item["currencyRate"] = ap_data["currency_rate"]
+                    if "accounting_lines" in ap_data and isinstance(ap_data["accounting_lines"], list):
+                        existing_item["accountingLines"] = [
+                            {
+                                "name": ln.get("name", ""),
+                                "accountNumber": ln.get("account_number", ""),
+                                "accountName": ln.get("account_name", ""),
+                                "priceUnit": float(ln.get("price_unit") or 0),
+                                "quantity": ln.get("quantity", 1),
+                                "taxPercent": (
+                                    ln["tax_percent"][0] if isinstance(ln.get("tax_percent"), list) and ln["tax_percent"]
+                                    else ln.get("tax_percent", 0)
+                                ),
+                                "discount": ln.get("discount", 0),
+                            }
+                            for ln in ap_data["accounting_lines"]
+                            if isinstance(ln, dict)
+                        ]
 
                 # Router
                 router_data = dept_data.get("Router") or dept_data.get("router") or {}
@@ -1502,6 +1535,16 @@ class RedisSubscriber:
                 logger.warning("[REDIS_SUBSCRIBER] → missing company_id or domain, skipping")
                 return
 
+            # ── COA_HARMONIZED: persistence Neon (intercept before cache) ──
+            if domain == "coa" and task_type == "coa_harmonized":
+                await self._handle_coa_harmonized(uid, message_data)
+                return
+
+            # ── GL_SYNC_REQUESTED: sync GL from ERP → Neon (fire-and-forget) ──
+            if domain == "coa" and task_type == "gl_sync_requested":
+                asyncio.ensure_future(self._handle_gl_sync_requested(uid, message_data))
+                return
+
             # Normalisation du status (si présent)
             raw_status = message_data.get("status")
             if raw_status:
@@ -1512,6 +1555,23 @@ class RedisSubscriber:
                 message_data["status"] = normalized_status
                 message_data["status_category"] = category
                 logger.debug("[REDIS_SUBSCRIBER] → status normalized: %s → %s (category=%s)", raw_status, normalized_status, category)
+
+            # ── HR: domain-specific handler (Neon-backed, no business cache) ──
+            # HR data lives in PostgreSQL, not in a 4-category business cache.
+            # We handle active_jobs, page_state invalidation, and WSS broadcast separately.
+            if domain == "hr":
+                await self._handle_hr_task_manager(
+                    uid=uid,
+                    company_id=company_id,
+                    job_id=job_id,
+                    department=department,
+                    raw_status=raw_status,
+                    message_data=message_data,
+                )
+                duration_ms = (time.time() - start_time) * 1000
+                logger.debug("[REDIS_SUBSCRIBER] → HR handler duration_ms=%.2f", duration_ms)
+                logger.info("[REDIS_SUBSCRIBER] ═══════════════════════════════════════════════════════")
+                return
 
             # Vérification connexion
             is_connected = hub.is_user_connected(uid)
@@ -1566,12 +1626,35 @@ class RedisSubscriber:
                     )
                     if isinstance(ap_sub, dict) and ap_sub:
                         _AP_FLAT_KEYS = (
-                            "supplier", "amount", "date", "currency",
-                            "current_step", "current_step_technical",
+                            "supplier_name", "invoice_ref", "invoice_description",
+                            "invoice_date", "due_date", "accounting_date",
+                            "amount_vat_excluded", "amount_vat_included", "amount_vat",
+                            "currency", "currency_rate", "accounting_lines",
                         )
                         for k in _AP_FLAT_KEYS:
                             if k in ap_sub and k not in item_data:
                                 item_data[k] = ap_sub[k]
+
+            # ── Generic lift: promote current_step to top-level ──
+            # Le billing_history (dashboard) gère déjà current_step via
+            # _update_billing_history_cache (ligne ~1268).  On utilise le
+            # même canal pour TOUTES les pages: on remonte current_step
+            # depuis item_data (data imbriqué) vers message_data (top-level)
+            # pour que le WS broadcast {domain}.task_manager_update l'inclue
+            # au niveau attendu par le frontend (payload.data.current_step).
+            for _lift_key in ("current_step", "current_step_technical"):
+                # Source 1: déjà dans item_data (step-only updates)
+                _lift_val = item_data.get(_lift_key)
+                # Source 2: imbriqué dans department_data.APbookeeper (full updates)
+                if not _lift_val and domain == "invoices" and isinstance(dept_data, dict):
+                    for _dept_variant in ("APbookeeper", "Apbookeeper", "apbookeeper"):
+                        _ap = dept_data.get(_dept_variant) or {}
+                        if isinstance(_ap, dict) and _lift_key in _ap:
+                            _lift_val = _ap[_lift_key]
+                            break
+                if _lift_val:
+                    item_data.setdefault(_lift_key, _lift_val)
+                    message_data.setdefault(_lift_key, _lift_val)
 
             self._update_business_cache_item(
                 uid=uid,
@@ -1785,6 +1868,354 @@ class RedisSubscriber:
         except Exception as e:
             logger.error("[REDIS_SUBSCRIBER] unexpected_error channel=%s uid=%s error=%s", channel, uid, str(e), exc_info=True)
 
+    async def _handle_hr_task_manager(
+        self,
+        uid: str,
+        company_id: str,
+        job_id: str,
+        department: str,
+        raw_status: Optional[str],
+        message_data: Dict[str, Any],
+    ) -> None:
+        """
+        Handle HR worker task_manager events (Neon-backed, no business cache).
+
+        HR is fundamentally different from document-processing domains
+        (invoices/bank/routing/expenses):
+        - No 4-category business cache (no to_process/in_process/pending/processed lists)
+        - Data lives in PostgreSQL Neon, not Firebase task_manager
+        - Events represent job progress (calculating/calculated/error)
+
+        Flow:
+        1. Update active_jobs tracking (Firebase active_jobs/hr/)
+        2. Invalidate HR page_state cache on completion/error (force fresh Neon read)
+        3. Broadcast HR-specific WebSocket events
+        """
+        normalized = message_data.get("status", raw_status or "")
+
+        # ── Step 1: Update active_jobs tracking ──
+        try:
+            batch_id = (
+                message_data.get("batch_id")
+                or message_data.get("data", {}).get("batch_id")
+            )
+            ActiveJobManager.update_job_status_in_active(
+                job_type="hr",
+                mandate_path=message_data.get("mandate_path", ""),
+                job_id=job_id,
+                new_status=raw_status or "unknown",
+                batch_id=batch_id,
+            )
+        except Exception as e:
+            logger.warning("[REDIS_SUBSCRIBER] HR active_jobs update failed: %s", e)
+
+        # ── Step 2: Invalidate page_state:hr on terminal statuses ──
+        # Forces a fresh Neon read on next page load
+        if normalized in ("completed", "error", "stopped"):
+            try:
+                from app.wrappers.page_state_manager import get_page_state_manager
+
+                page_manager = get_page_state_manager()
+                page_manager.invalidate_page_state(
+                    uid=uid,
+                    company_id=company_id,
+                    page="hr",
+                )
+                logger.info(
+                    "[REDIS_SUBSCRIBER] HR page_state invalidated (status=%s)", normalized,
+                )
+            except Exception as e:
+                logger.warning("[REDIS_SUBSCRIBER] HR page_state invalidation failed: %s", e)
+
+        # ── Step 3: Broadcast HR-specific WebSocket events ──
+        if not hub.is_user_connected(uid):
+            logger.info("[REDIS_SUBSCRIBER] HR event processed (user offline, job=%s)", job_id)
+            return
+
+        context = _get_user_context(uid)
+        current_company = context.get("company_id")
+
+        if current_company != company_id:
+            logger.info(
+                "[REDIS_SUBSCRIBER] HR event skipped (company mismatch current=%s target=%s)",
+                current_company, company_id,
+            )
+            return
+
+        # Flatten department_data.HR for the WS payload
+        dept_data = message_data.get("department_data", {})
+        hr_data = {}
+        if isinstance(dept_data, dict):
+            hr_data = dept_data.get("HR", {}) or dept_data.get("hr", {}) or {}
+
+        period = hr_data.get("period", "")
+
+        if normalized == "on_process":
+            # Worker started processing this job item
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.HR.JOB_PROGRESS,
+                "payload": {
+                    "job_id": job_id,
+                    "batch_id": batch_id,
+                    "status": "processing",
+                    "employee_id": hr_data.get("employee_id"),
+                    "employee_name": hr_data.get("employee_name"),
+                    "period": period,
+                },
+            })
+            logger.info("[REDIS_SUBSCRIBER] HR job_progress: job=%s employee=%s", job_id, hr_data.get("employee_name"))
+
+        elif normalized == "completed":
+            # Individual payroll calculation completed
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.HR.PAYROLL_CALCULATED,
+                "payload": {
+                    "job_id": job_id,
+                    "batch_id": batch_id,
+                    "success": True,
+                    "employee_id": hr_data.get("employee_id"),
+                    "employee_name": hr_data.get("employee_name"),
+                    "gross_salary": hr_data.get("gross_salary"),
+                    "net_salary": hr_data.get("net_salary"),
+                    "total_deductions": hr_data.get("total_deductions"),
+                    "employer_contributions": hr_data.get("employer_contributions"),
+                    "items_count": hr_data.get("items_count"),
+                    "period": period,
+                    "payroll_result_id": hr_data.get("payroll_result_id"),
+                    "currency": hr_data.get("currency"),
+                },
+            })
+            logger.info("[REDIS_SUBSCRIBER] HR payroll_calculated: job=%s employee=%s", job_id, hr_data.get("employee_name"))
+
+        elif normalized in ("error", "stopped"):
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.HR.ERROR,
+                "payload": {
+                    "job_id": job_id,
+                    "batch_id": batch_id,
+                    "error": (
+                        message_data.get("message")
+                        or message_data.get("error")
+                        or f"Job {job_id} failed"
+                    ),
+                    "employee_id": hr_data.get("employee_id"),
+                    "employee_name": hr_data.get("employee_name"),
+                    "period": period,
+                },
+            })
+            logger.info("[REDIS_SUBSCRIBER] HR error: job=%s status=%s", job_id, normalized)
+
+        elif normalized == "in_queue":
+            # Job enqueued — minor progress update
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.HR.JOB_PROGRESS,
+                "payload": {
+                    "job_id": job_id,
+                    "batch_id": batch_id,
+                    "status": "queued",
+                    "period": period,
+                },
+            })
+
+        logger.info("[REDIS_SUBSCRIBER] HR task_manager handled: job=%s status=%s", job_id, normalized)
+
+    async def _handle_coa_harmonized(self, uid: str, message_data: Dict[str, Any]) -> None:
+        """
+        Persiste le plan comptable harmonise (COA) dans Neon PostgreSQL.
+
+        Flux:
+        1. Lire {mandate_path}/setup/coa depuis Firebase
+        2. Resoudre company_id via mandate_path
+        3. Upsert COA dans core.chart_of_accounts
+        4. Upsert journals si disponibles
+        5. Initialiser sync_metadata (type='coa')
+        """
+        try:
+            mandate_path = message_data.get("mandate_path", "")
+            collection_id = message_data.get("collection_id", "")
+            data = message_data.get("data", {})
+
+            logger.info(
+                "[REDIS_SUBSCRIBER] _handle_coa_harmonized START mandate=%s collection=%s",
+                mandate_path, collection_id,
+            )
+
+            if not mandate_path:
+                logger.warning("[REDIS_SUBSCRIBER] coa_harmonized: missing mandate_path")
+                return
+
+            # 1. Lire COA depuis Firebase
+            from ..firebase_providers import get_firebase_management
+            fbm = get_firebase_management()
+
+            coa_doc = fbm.get_document(f"{mandate_path}/setup/coa")
+            if not coa_doc:
+                logger.warning("[REDIS_SUBSCRIBER] coa_harmonized: no COA document at %s/setup/coa", mandate_path)
+                return
+
+            # Convertir le document Firebase en liste (peut etre un dict avec des keys numeriques)
+            if isinstance(coa_doc, dict):
+                coa_list = list(coa_doc.values()) if not isinstance(list(coa_doc.values())[0] if coa_doc else None, (str, int, float, bool)) else [coa_doc]
+            elif isinstance(coa_doc, list):
+                coa_list = coa_doc
+            else:
+                logger.warning("[REDIS_SUBSCRIBER] coa_harmonized: unexpected COA format: %s", type(coa_doc))
+                return
+
+            # Filter out non-dict items (Firebase may include metadata strings)
+            coa_list = [item for item in coa_list if isinstance(item, dict)]
+            logger.info("[REDIS_SUBSCRIBER] coa_harmonized: %d accounts found in Firebase", len(coa_list))
+
+            if not coa_list:
+                logger.warning("[REDIS_SUBSCRIBER] coa_harmonized: no valid account dicts after filtering")
+                return
+
+            # 2. Resoudre company_id
+            from ..tools.neon_accounting_manager import get_neon_accounting_manager
+            manager = get_neon_accounting_manager()
+
+            company_id = await manager.get_company_id_from_mandate_path(mandate_path)
+            if not company_id:
+                logger.warning(
+                    "[REDIS_SUBSCRIBER] coa_harmonized: company not found for mandate=%s",
+                    mandate_path,
+                )
+                return
+
+            # 3. Upsert COA
+            coa_stats = await manager.upsert_chart_of_accounts(company_id, coa_list)
+            logger.info(
+                "[REDIS_SUBSCRIBER] coa_harmonized: COA upserted - added=%d modified=%d unchanged=%d",
+                coa_stats.get("added", 0), coa_stats.get("modified", 0), coa_stats.get("unchanged", 0),
+            )
+
+            # 4. Upsert journals si disponibles dans le meme document ou un doc separe
+            journals_doc = fbm.get_document(f"{mandate_path}/setup/journals")
+            if journals_doc:
+                journals_list = list(journals_doc.values()) if isinstance(journals_doc, dict) else journals_doc
+                if isinstance(journals_list, list) and journals_list:
+                    journals_stats = await manager.upsert_journals(company_id, journals_list)
+                    logger.info(
+                        "[REDIS_SUBSCRIBER] coa_harmonized: journals upserted - added=%d modified=%d",
+                        journals_stats.get("added", 0), journals_stats.get("modified", 0),
+                    )
+
+            # 5. Initialiser/mettre a jour sync_metadata
+            from datetime import datetime, timezone
+            await manager.update_sync_metadata(
+                company_id, "coa",
+                dataset_version=1,
+                last_sync_time=datetime.now(timezone.utc),
+                total_entries=len(coa_list),
+                active_entries=coa_stats.get("added", 0) + coa_stats.get("modified", 0) + coa_stats.get("unchanged", 0),
+                sync_status="idle",
+                last_changes=coa_stats,
+            )
+
+            logger.info("[REDIS_SUBSCRIBER] _handle_coa_harmonized DONE company=%s", company_id)
+
+            # Reply to caller if reply_channel provided (synchronous request-reply)
+            reply_channel = data.get("reply_channel")
+            if reply_channel:
+                import json as _json
+                self.redis.lpush(reply_channel, _json.dumps({
+                    "success": True,
+                    "coa": coa_stats,
+                }))
+                self.redis.expire(reply_channel, 300)
+                logger.info("[REDIS_SUBSCRIBER] coa_harmonized reply sent to %s", reply_channel)
+
+        except Exception as e:
+            logger.error("[REDIS_SUBSCRIBER] coa_harmonized error: %s", e, exc_info=True)
+            # Reply with error if reply_channel provided
+            reply_channel = message_data.get("data", {}).get("reply_channel")
+            if reply_channel:
+                import json as _json
+                try:
+                    self.redis.lpush(reply_channel, _json.dumps({
+                        "success": False,
+                        "error": str(e),
+                    }))
+                    self.redis.expire(reply_channel, 300)
+                except Exception:
+                    pass
+
+    async def _handle_gl_sync_requested(self, uid: str, message_data: Dict[str, Any]) -> None:
+        """
+        Declenche la synchronisation GL depuis l'ERP vers Neon.
+        Fire-and-forget depuis le Redis subscriber.
+        """
+        try:
+            mandate_path = message_data.get("mandate_path", "")
+            collection_id = message_data.get("collection_id", "")
+            data = message_data.get("data", {})
+            force_full = data.get("force_full", False)
+            sync_coa = data.get("sync_coa", False)
+
+            logger.info(
+                "[REDIS_SUBSCRIBER] _handle_gl_sync_requested START mandate=%s force=%s sync_coa=%s",
+                mandate_path, force_full, sync_coa,
+            )
+
+            if not mandate_path:
+                logger.warning("[REDIS_SUBSCRIBER] gl_sync_requested: missing mandate_path")
+                return
+
+            # If sync_coa requested, dispatch to klk_router via Redis (sync_only mode)
+            if sync_coa:
+                try:
+                    import json as json_mod
+                    from ..tools.redis_service import get_redis_client
+                    redis_client = get_redis_client()
+                    sync_payload = json_mod.dumps({
+                        "job_id": f"sync_coa_{mandate_path.split('/')[-1]}",
+                        "firebase_user_id": uid,
+                        "mandate_path": mandate_path,
+                        "collection_name": collection_id,
+                        "mode": "sync_only",
+                        "erp_system": data.get("erp_type", "odoo"),
+                    })
+                    redis_client.lpush("queue:agentic_dispatch", sync_payload)
+                    logger.info("[REDIS_SUBSCRIBER] Dispatched sync_only job for COA to klk_router")
+                except Exception as coa_err:
+                    logger.error("[REDIS_SUBSCRIBER] sync_coa dispatch error: %s", coa_err)
+
+            from ..tools.accounting_sync_service import sync_gl_from_erp
+
+            result = await sync_gl_from_erp(
+                uid=uid,
+                mandate_path=mandate_path,
+                collection_id=collection_id,
+                force_full=force_full,
+            )
+
+            logger.info(
+                "[REDIS_SUBSCRIBER] _handle_gl_sync_requested DONE success=%s result=%s",
+                result.get("success"), result,
+            )
+
+            # Reply to caller if reply_channel provided (synchronous request-reply)
+            reply_channel = data.get("reply_channel")
+            if reply_channel:
+                import json as _json
+                self.redis.lpush(reply_channel, _json.dumps(result))
+                self.redis.expire(reply_channel, 300)
+                logger.info("[REDIS_SUBSCRIBER] gl_sync reply sent to %s", reply_channel)
+
+        except Exception as e:
+            logger.error("[REDIS_SUBSCRIBER] gl_sync_requested error: %s", e, exc_info=True)
+            # Reply with error if reply_channel provided
+            reply_channel = message_data.get("data", {}).get("reply_channel")
+            if reply_channel:
+                import json as _json
+                try:
+                    self.redis.lpush(reply_channel, _json.dumps({
+                        "success": False,
+                        "error": str(e),
+                    }))
+                    self.redis.expire(reply_channel, 300)
+                except Exception:
+                    pass
 
     def _resolve_llm_thread_key(
         self,
@@ -2028,6 +2459,22 @@ class RedisSubscriber:
                 logger.info("[REDIS_SUBSCRIBER] ═══════════════════════════════════════════════════════")
                 return
 
+            # ── FOLLOW_MESSAGE : text message from worker waiting for user response ──
+            # Create messenger notification (same as CARD), then fall through to LLM enqueue.
+            # FOLLOW_MESSAGE is set by send_message(follow_up_message=True) in send_message_and_listen().
+            if message_type == "FOLLOW_MESSAGE":
+                comm_chat_type = message_data.get("communication_chat_type", "pinnokio")
+                if comm_chat_type == "pinnokio":
+                    asyncio.create_task(
+                        self._create_messenger_notif(
+                            uid, collection_name, thread_key, None, message
+                        )
+                    )
+                    logger.info(
+                        "[JOB_CHAT] FOLLOW_MESSAGE messenger notif created uid=%s thread=%s",
+                        uid, thread_key
+                    )
+
             # ── MESSAGE ou autre : déléguer au Worker LLM via LLMGateway ──
             # Resolve thread_key for multi-canal (Telegram uses tg_ prefix)
             msg_dept = (message.get("department") or message_data.get("department", "Router"))
@@ -2066,23 +2513,28 @@ class RedisSubscriber:
         uid: str,
         collection_name: str,
         thread_key: str,
-        card_data: Dict[str, Any],
+        card_data: Optional[Dict[str, Any]],
         message: Dict[str, Any],
     ) -> None:
         """
         Create a messenger notification (direct_message_notif) when a CARD/FOLLOW_CARD
-        is received from an external worker. Writes to RTDB and publishes via Redis PubSub.
+        or FOLLOW_MESSAGE is received from an external worker.
+        Writes to RTDB and publishes via Redis PubSub.
 
         Args:
             uid: Firebase user ID
             collection_name: Company/collection ID
             thread_key: Job chat thread key
-            card_data: Extracted interactive card data (from CardTransformer)
+            card_data: Extracted interactive card data (from CardTransformer), or None for text messages
             message: Original message dict from the worker
         """
         try:
-            card_id = card_data.get("cardId", "")
-            function_name = CARD_ID_TO_DEPARTMENT.get(card_id, "Chat")
+            if card_data:
+                card_id = card_data.get("cardId", "")
+                function_name = CARD_ID_TO_DEPARTMENT.get(card_id, "Chat")
+            else:
+                card_id = ""
+                function_name = "Chat"
 
             # Build human-readable message (never raw card JSON)
             DEPARTMENT_MESSAGES = {
@@ -2090,7 +2542,7 @@ class RedisSubscriber:
                 "APbookeeper": "Approval required for invoice processing",
                 "Bankbookeeper": "Action required on bank transaction",
             }
-            human_message = DEPARTMENT_MESSAGES.get(function_name, "Action required")
+            human_message = DEPARTMENT_MESSAGES.get(function_name, "Response required")
 
             notif_data = {
                 "job_id": thread_key,
@@ -2117,6 +2569,14 @@ class RedisSubscriber:
                                 notif_data["file_name"] = item.get("file_name", "")
                                 notif_data["file_id"] = item.get("file_id", "")
                                 notif_data["mandate_path"] = item.get("mandate_path", "")
+                                # Enrich department from cache if generic
+                                if function_name == "Chat":
+                                    cached_dept = item.get("department", "")
+                                    if cached_dept:
+                                        function_name = cached_dept
+                                        notif_data["function_name"] = function_name
+                                        human_message = DEPARTMENT_MESSAGES.get(function_name, "Response required")
+                                        notif_data["message"] = human_message
                                 # Enrich message with file name if available
                                 file_name = item.get("file_name", "")
                                 if file_name:

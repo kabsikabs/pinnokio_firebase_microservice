@@ -1194,14 +1194,20 @@ async def _sync_neon_hr_company(
 
     try:
         manager = get_neon_hr_manager()
-        hr_company_id = await manager.get_or_create_company(
-            account_firebase_uid=uid,
-            mandate_path=mandate_path,
-            company_name=company_name,
-            country=country,
+        hr_company_id = await asyncio.wait_for(
+            manager.get_or_create_company(
+                account_firebase_uid=uid,
+                mandate_path=mandate_path,
+                company_name=company_name,
+                country=country,
+            ),
+            timeout=8,  # Ne pas bloquer le dashboard si Neon est lent/down
         )
         logger.info(f"[ORCHESTRATION] Neon HR sync: hr_company_id={hr_company_id}")
         return str(hr_company_id) if hr_company_id else None
+    except asyncio.TimeoutError:
+        logger.warning("[ORCHESTRATION] Neon HR sync timeout (8s) — skipping")
+        return None
     except Exception as e:
         logger.warning(f"[ORCHESTRATION] Neon HR sync failed (non-blocking): {e}")
         return None

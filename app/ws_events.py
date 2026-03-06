@@ -876,6 +876,7 @@ class HREvents:
     PAYROLL_CALCULATE = "hr.payroll_calculate"
     PAYROLL_CALCULATING = "hr.payroll_calculating"
     PAYROLL_CALCULATED = "hr.payroll_calculated"
+    JOB_PROGRESS = "hr.job_progress"
 
     # Settings
     SETTINGS_GET = "hr.settings_get"
@@ -904,6 +905,10 @@ class HREvents:
     CONTRACT_UPDATED = "hr.contract_updated"
     ACTIVE_CONTRACT_GET = "hr.active_contract_get"
     ACTIVE_CONTRACT_LOADED = "hr.active_contract_loaded"
+
+    # Payroll History
+    PAYROLL_HISTORY_LIST = "hr.payroll_history_list"
+    PAYROLL_HISTORY_LOADED = "hr.payroll_history_loaded"
 
     # Refresh
     REFRESH = "hr.refresh"

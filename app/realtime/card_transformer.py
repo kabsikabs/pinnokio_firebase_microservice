@@ -30,6 +30,7 @@ EXTERNAL_WORKER_CARD_IDS = {
     "bank_list_file_card",
     "bank_file_list_card",
     "email_draft_approval_card",
+    "journal_entry_approval_card",
 }
 
 # Mapping cardId -> invokedFunction par defaut (bouton principal)
@@ -42,6 +43,7 @@ DEFAULT_INVOKED_FUNCTION = {
     "bank_list_file_card": "start_router_job",
     "bank_file_list_card": "start_router_job",
     "email_draft_approval_card": "email_draft_decision",
+    "journal_entry_approval_card": "journal_entry_decision",
 }
 
 # Mapping cardId -> champs formInputs attendus par les workers
@@ -54,6 +56,7 @@ FORM_FIELDS_BY_CARD = {
     "bank_list_file_card": ["selected_files", "methode"],
     "bank_file_list_card": ["selected_files", "methode"],
     "email_draft_approval_card": ["decision", "modified_body"],
+    "journal_entry_approval_card": ["decision", "rejection_reason"],
 }
 
 
@@ -135,13 +138,25 @@ class CardTransformer:
                 or uuid.uuid4().hex[:12]
             )
 
+            # Extract params from button actions (e.g. approval_id)
+            card_params = {}
+            for w in widgets:
+                if w.get("type") == "button_list":
+                    for btn in w.get("buttons", []):
+                        if btn.get("params"):
+                            card_params.update(btn["params"])
+
+            # Extraire entry_data si present (journal_entry_approval_card)
+            entry_data = content.get("entry_data")
+
             return {
                 "cardId": card_id,
                 "cardType": card_id,
                 "title": header.get("title", "Carte Interactive"),
                 "subtitle": header.get("subtitle"),
                 "text": "\n".join(text_paragraphs) if text_paragraphs else None,
-                "params": {},
+                "params": card_params,
+                "entryData": entry_data,
                 "isVisible": True,
                 "threadKey": thread_key,
                 "messageId": message_id,

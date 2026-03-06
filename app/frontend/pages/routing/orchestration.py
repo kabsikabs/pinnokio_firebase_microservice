@@ -420,9 +420,9 @@ async def handle_routing_process(
                 "dms_type": context.get("dms_type", "odoo"),
                 "communication_mode": context.get("communication_chat_type", context.get("chat_type", "pinnokio")),
                 "log_communication_mode": context.get("communication_log_type", "pinnokio"),
-                # Workflow defaults (from company settings)
-                "router_approval_required": context.get("router_approval_required", False),
-                "router_automated_workflow": context.get("router_automated_workflow", True),
+                # Workflow defaults (source: workflow_params from L2 cache)
+                "router_approval_required": context.get("workflow_params", {}).get("router_approval_required", False),
+                "router_automated_workflow": context.get("workflow_params", {}).get("router_automated_workflow", True),
             }
         )
 

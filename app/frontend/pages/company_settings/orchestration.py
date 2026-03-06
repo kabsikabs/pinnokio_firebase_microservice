@@ -157,33 +157,49 @@ def _refresh_company_context_cache(
         # 2. Merge workflow_params (complete dict from _build_workflow_params)
         existing["workflow_params"] = workflow_params
 
-        # 3. Merge flat fields from re-fetched mandate (source of truth)
-        flat_fields = [
-            "router_automated_workflow", "router_approval_required",
-            "router_communication_method",
-            "apbookeeper_approval_required", "apbookeeper_approval_contact_creation",
-            "apbookeeper_communication_method",
-            "banker_approval_required", "banker_approval_threshold_workflow",
-            "banker_communication_method",
+        # 3. Merge flat fields from re-fetched mandate (source of truth = root document).
+        #    NOTE: workflow-specific fields (router_*, apbookeeper_*, banker_*) are intentionally
+        #    excluded here — they live in the setup/workflow_params subcollection and will be
+        #    overridden correctly in step 4 from workflow_params.
+        mandate_flat_fields = [
             "dms_type", "chat_type", "communication_chat_type", "communication_log_type",
             "legal_name", "legal_status", "country", "address",
             "phone_number", "email", "website", "language",
             "has_vat", "vat_number", "ownership_type", "base_currency",
         ]
-        for field in flat_fields:
+        for field in mandate_flat_fields:
             if field in selected_mandate:
                 existing[field] = selected_mandate[field]
 
-        # 4. Promote critical workflow fields to flat keys
-        #    (routing/orchestration.py reads context.get("router_automated_workflow"))
-        existing["router_automated_workflow"] = workflow_params.get(
-            "router_automated_workflow",
-            existing.get("router_automated_workflow", True),
-        )
-        existing["router_approval_required"] = workflow_params.get(
-            "router_approval_required",
-            existing.get("router_approval_required", False),
-        )
+        # 4. Promote ALL workflow flat fields from workflow_params (source of truth = subcollection).
+        #    IMPORTANT: save_workflow() writes ONLY to setup/workflow_params subcollection, NOT
+        #    to the root mandate document. fetch_single_mandate() reads these flat fields from
+        #    the root doc → they are always stale after a workflow save. We must override them
+        #    here from the correctly-built workflow_params dict.
+        workflow_flat_map = {
+            # Router
+            "router_automated_workflow": True,
+            "router_approval_required": False,
+            "router_communication_method": "",
+            "router_approval_pendinglist_enabled": False,
+            "router_trust_threshold_required": False,
+            "router_trust_threshold_percent": 80,
+            # APbookeeper
+            "apbookeeper_approval_required": False,
+            "apbookeeper_approval_contact_creation": False,
+            "apbookeeper_communication_method": "",
+            "apbookeeper_automated_workflow": False,
+            "apbookeeper_approval_pendinglist_enabled": False,
+            # Banker
+            "banker_approval_required": False,
+            "banker_approval_threshold_workflow": 0,
+            "banker_communication_method": "",
+            "banker_approval_pendinglist_enabled": False,
+            "banker_gl_approval": False,
+            "banker_voucher_approval": False,
+        }
+        for flat_key, default in workflow_flat_map.items():
+            existing[flat_key] = workflow_params.get(flat_key, existing.get(flat_key, default))
 
         # 4b. Sync communication_chat_type ← chat_type (save_settings writes both)
         #     fetch_single_mandate may NOT return communication_chat_type,
@@ -1136,7 +1152,8 @@ async def handle_delete_company(
                         "detail": (
                             f"Deleted: {counts.get('employees', 0)} employees, "
                             f"{counts.get('contracts', 0)} contracts, "
-                            f"{counts.get('payroll_results', 0)} payroll records"
+                            f"{counts.get('payroll_results', 0)} payroll records, "
+                            f"{counts.get('company_payroll_items', 0)} payroll items"
                         )
                     }
                     logger.info(

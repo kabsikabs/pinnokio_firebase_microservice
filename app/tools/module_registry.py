@@ -368,45 +368,28 @@ class HRModuleInitializer(ModuleInitializer):
 
         results["settings_created"] = settings_created
 
-        # 2. Copier les rubriques de paie (si table existe)
+        # 2. Copier les rubriques de paie depuis le catalogue
         try:
             if context.cluster_code:
                 items = await conn.fetch("""
-                    INSERT INTO hr.company_payroll_items (
-                        company_id, item_code, label, nature,
-                        charge_bearer, sort_order, is_active
-                    )
-                    SELECT
-                        $1, code, label, nature,
-                        charge_bearer, sort_order, TRUE
-                    FROM hr.payroll_items
-                    WHERE $2 = ANY(cluster_codes::text[])
-                       OR cluster_codes = '[]'::jsonb
-                    ON CONFLICT (company_id, item_code) DO NOTHING
-                    RETURNING item_code
-                """, context.company_id, context.cluster_code)
+                    INSERT INTO hr.company_payroll_items (company_id, catalog_item_id, is_enabled)
+                    SELECT $1, id, is_mandatory
+                    FROM hr.payroll_items_catalog
+                    WHERE country_code = $2 AND is_active = TRUE
+                      AND (cluster_code IS NULL OR cluster_code = $3)
+                      AND effective_from <= CURRENT_DATE
+                      AND (effective_to IS NULL OR effective_to >= CURRENT_DATE)
+                    ON CONFLICT (company_id, catalog_item_id) DO NOTHING
+                    RETURNING catalog_item_id
+                """, context.company_id, country_code, context.cluster_code)
                 results["payroll_items_created"] = len(items)
         except Exception as e:
             logger.warning(f"[HR] Could not copy payroll items: {e}")
             results["payroll_items_created"] = 0
 
-        # 3. Copier les types de contrat (si table existe)
-        try:
-            contracts = await conn.fetch("""
-                INSERT INTO hr.company_contract_types (
-                    company_id, code, label_fr, label_en, description
-                )
-                SELECT
-                    $1, code, label_fr, label_en, description
-                FROM hr.ref_contract_types
-                WHERE country_code = $2 OR country_code = ''
-                ON CONFLICT (company_id, code) DO NOTHING
-                RETURNING code
-            """, context.company_id, country_code)
-            results["contract_types_created"] = len(contracts)
-        except Exception as e:
-            logger.warning(f"[HR] Could not copy contract types: {e}")
-            results["contract_types_created"] = 0
+        # 3. Contract types: no company-level copy needed.
+        # ref_contract_types is read directly (scoped by country_code).
+        # company_contract_types table has been dropped (migration 017).
 
         return results
 

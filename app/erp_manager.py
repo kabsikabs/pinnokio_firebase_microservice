@@ -1232,8 +1232,9 @@ class ODOO_KLK_VISION:
         move_line_model = 'account.move.line'
         account_model = 'account.account'
         
-        move_line_fields = ['date', 'account_type', 'currency_id', 'parent_state', 'amount_currency', 
-                            'name', 'debit', 'credit', 'balance', 'account_id', 'journal_id', 'move_id', 'company_id','write_date']
+        move_line_fields = ['date', 'account_type', 'currency_id', 'parent_state', 'amount_currency',
+                            'currency_rate', 'name', 'debit', 'credit', 'balance', 'account_id', 'journal_id', 'move_id',
+                            'company_id', 'write_date', 'full_reconcile_id', 'partner_id']
         # Définition des champs account en fonction de la version
         if version_num < 18:
             account_fields = ['code', 'name', 'account_type', 'reconcile', 'company_id']
@@ -1251,7 +1252,9 @@ class ODOO_KLK_VISION:
             print(f"impressino de df dans fetch_financial_records:{df}")
             
             if 'move_id' in df.columns and not df.empty:
-                df['move_id'] = df['move_id'].apply(lambda x: x[0] if x else None)
+                # Preserve move reference label before extracting the int id
+                df['move_ref'] = df['move_id'].apply(lambda x: x[1] if isinstance(x, (list, tuple)) and len(x) > 1 else None)
+                df['move_id'] = df['move_id'].apply(lambda x: x[0] if isinstance(x, (list, tuple)) and x else x)
                 
                 # Appliquer les filtres supplémentaires basés sur kwargs, si nécessaire
                 for column, value in kwargs.items():

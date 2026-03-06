@@ -449,12 +449,12 @@ class COAHandlers:
             )
 
             if result.get("success"):
-                # Invalider cache niveau 3 (legacy)
-                cache_key = f"{uid}:{company_id}:coa:accounts"
-                await self._cache.delete(cache_key)
-
-                # Invalider cache niveau 2 (nouveau pattern)
+                # Invalider cache niveau 2+3
+                await self._cache.invalidate_cache(uid, company_id, "coa")
                 self._invalidate_level2_cache(uid, company_id)
+
+                # Propager vers Neon via coa_harmonized (fire-and-forget)
+                self._publish_coa_harmonized(uid, company_id, mandate_path, "frontend_save_changes")
 
                 return {
                     "success": True,
@@ -517,12 +517,15 @@ class COAHandlers:
             )
 
             if result.get("success"):
-                # Invalider cache niveau 3 (legacy)
-                cache_key = f"{uid}:{company_id}:coa:accounts"
-                await self._cache.delete(cache_key)
-
-                # Invalider cache niveau 2 (nouveau pattern)
+                # Invalider cache niveau 2+3
+                await self._cache.invalidate_cache(uid, company_id, "coa")
                 self._invalidate_level2_cache(uid, company_id)
+
+                # Propager vers Neon via coa_harmonized (fire-and-forget)
+                doc_path = result.get("doc_path", "")
+                mandate_path = doc_path.replace("/setup/coa", "") if doc_path else ""
+                if mandate_path:
+                    self._publish_coa_harmonized(uid, company_id, mandate_path, "frontend_sync_erp")
 
                 return {
                     "success": True,
@@ -610,9 +613,8 @@ class COAHandlers:
                 False  # merge=False
             )
 
-            # Invalidate cache niveau 3 (legacy)
-            cache_key = f"{uid}:{company_id}:coa:functions"
-            await self._cache.delete(cache_key)
+            # Invalidate cache
+            await self._cache.invalidate_cache(uid, company_id, "coa")
 
             # Invalider cache niveau 2 (nouveau pattern)
             self._invalidate_level2_cache(uid, company_id)
@@ -716,9 +718,8 @@ class COAHandlers:
                 False
             )
 
-            # Invalidate cache niveau 3 (legacy)
-            cache_key = f"{uid}:{company_id}:coa:functions"
-            await self._cache.delete(cache_key)
+            # Invalidate cache
+            await self._cache.invalidate_cache(uid, company_id, "coa")
 
             # Invalider cache niveau 2 (nouveau pattern)
             self._invalidate_level2_cache(uid, company_id)
@@ -837,9 +838,8 @@ class COAHandlers:
                 False
             )
 
-            # Invalidate cache niveau 3 (legacy)
-            cache_key = f"{uid}:{company_id}:coa:functions"
-            await self._cache.delete(cache_key)
+            # Invalidate cache
+            await self._cache.invalidate_cache(uid, company_id, "coa")
 
             # Invalider cache niveau 2 (nouveau pattern)
             self._invalidate_level2_cache(uid, company_id)
@@ -926,9 +926,8 @@ class COAHandlers:
                 False
             )
 
-            # Invalidate cache niveau 3 (legacy)
-            cache_key = f"{uid}:{company_id}:coa:functions"
-            await self._cache.delete(cache_key)
+            # Invalidate cache
+            await self._cache.invalidate_cache(uid, company_id, "coa")
 
             # Invalider cache niveau 2 (nouveau pattern)
             self._invalidate_level2_cache(uid, company_id)
@@ -950,6 +949,193 @@ class COAHandlers:
     # ===================================================================
     # HELPERS
     # ===================================================================
+
+    # ===================================================================
+    # ACCOUNT CRUD (Create / Update)
+    # ===================================================================
+
+    async def create_account(
+        self,
+        uid: str,
+        company_id: str,
+        mandate_path: str,
+        account_number: str,
+        account_name: str,
+        account_nature: str,
+        account_function: str,
+        isactive: bool = True,
+        client_uuid: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Cree un nouveau compte dans le plan comptable.
+
+        Persiste dans: Firebase + Neon (via coa_harmonized).
+        Note: pas de creation dans Odoo (les comptes ERP sont geres dans l'ERP).
+
+        Args:
+            uid: Firebase user ID
+            company_id: Company ID
+            mandate_path: Chemin mandat Firebase
+            account_number: Numero de compte (ex: "10000000")
+            account_name: Nom du compte
+            account_nature: Nature KLK (ASSET, LIABILITY, PROFIT_AND_LOSS)
+            account_function: Fonction KLK
+            isactive: Statut actif
+            client_uuid: Client UUID (optionnel)
+
+        Returns:
+            {"success": True, "account": {...}}
+        """
+        try:
+            account_number = (account_number or "").strip()
+            account_name = (account_name or "").strip()
+            account_nature = (account_nature or "").strip()
+            account_function = (account_function or "").strip()
+
+            if not account_number:
+                return {"success": False, "error": {"code": "INVALID_NUMBER", "message": "Account number required"}}
+            if not account_name:
+                return {"success": False, "error": {"code": "INVALID_NAME", "message": "Account name required"}}
+            if account_nature not in VALID_NATURES:
+                return {"success": False, "error": {"code": "INVALID_NATURE", "message": f"Invalid nature: {account_nature}"}}
+            if not account_function:
+                return {"success": False, "error": {"code": "INVALID_FUNCTION", "message": "Account function required"}}
+
+            # Load existing COA to check duplicates
+            doc_path = f"{mandate_path}/setup/coa"
+            existing = await asyncio.to_thread(self._firebase.get_document, doc_path)
+            if not isinstance(existing, dict):
+                existing = {}
+
+            # Check duplicate by account_number
+            for acc_id, acc_data in existing.items():
+                if isinstance(acc_data, dict) and str(acc_data.get("account_number", "")) == account_number:
+                    return {"success": False, "error": {"code": "DUPLICATE", "message": f"Account {account_number} already exists"}}
+
+            # Generate a unique account_id (use account_number as key)
+            account_id = account_number
+
+            new_account = {
+                "account_id": account_id,
+                "account_number": account_number,
+                "account_name": account_name,
+                "klk_account_nature": account_nature,
+                "klk_account_function": account_function,
+                "isactive": bool(isactive),
+                "account_type": "",
+                "source": "manual",
+            }
+
+            # Save to Firebase (merge)
+            from google.cloud import firestore as fs
+            db_ref = fs.Client().document(doc_path) if not hasattr(self, '_db') else None
+            await asyncio.to_thread(
+                self._firebase.set_document,
+                doc_path,
+                {account_id: new_account},
+                True  # merge=True
+            )
+
+            # Invalidate caches
+            await self._cache.invalidate_cache(uid, company_id, "coa")
+            self._invalidate_level2_cache(uid, company_id)
+
+            # Propagate to Neon
+            self._publish_coa_harmonized(uid, company_id, mandate_path, "create_account")
+
+            logger.info(f"COA.create_account {account_number} created")
+
+            return {
+                "success": True,
+                "account": new_account,
+            }
+
+        except Exception as e:
+            logger.error(f"COA.create_account error: {e}")
+            return {"success": False, "error": {"code": "CREATE_ERROR", "message": str(e)}}
+
+    async def update_account(
+        self,
+        uid: str,
+        company_id: str,
+        mandate_path: str,
+        account_id: str,
+        account_name: Optional[str] = None,
+        account_nature: Optional[str] = None,
+        account_function: Optional[str] = None,
+        isactive: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """
+        Met a jour un compte existant dans le plan comptable.
+
+        Persiste dans: Firebase + Neon (via coa_harmonized).
+
+        Args:
+            uid: Firebase user ID
+            company_id: Company ID
+            mandate_path: Chemin mandat Firebase
+            account_id: ID du compte (cle Firebase)
+            account_name: Nouveau nom (optionnel)
+            account_nature: Nouvelle nature (optionnel)
+            account_function: Nouvelle fonction (optionnel)
+            isactive: Nouveau statut (optionnel)
+
+        Returns:
+            {"success": True, "account": {...}}
+        """
+        try:
+            account_id = (account_id or "").strip()
+            if not account_id:
+                return {"success": False, "error": {"code": "INVALID_ID", "message": "Account ID required"}}
+
+            if account_nature and account_nature not in VALID_NATURES:
+                return {"success": False, "error": {"code": "INVALID_NATURE", "message": f"Invalid nature: {account_nature}"}}
+
+            # Load existing COA
+            doc_path = f"{mandate_path}/setup/coa"
+            existing = await asyncio.to_thread(self._firebase.get_document, doc_path)
+            if not isinstance(existing, dict):
+                return {"success": False, "error": {"code": "NOT_FOUND", "message": "COA document not found"}}
+
+            account_data = existing.get(account_id)
+            if not isinstance(account_data, dict):
+                return {"success": False, "error": {"code": "NOT_FOUND", "message": f"Account {account_id} not found"}}
+
+            # Apply updates
+            if account_name is not None:
+                account_data["account_name"] = account_name.strip()
+            if account_nature is not None:
+                account_data["klk_account_nature"] = account_nature
+            if account_function is not None:
+                account_data["klk_account_function"] = account_function
+            if isactive is not None:
+                account_data["isactive"] = bool(isactive)
+
+            # Save to Firebase (merge)
+            await asyncio.to_thread(
+                self._firebase.set_document,
+                doc_path,
+                {account_id: account_data},
+                True  # merge=True
+            )
+
+            # Invalidate caches
+            await self._cache.invalidate_cache(uid, company_id, "coa")
+            self._invalidate_level2_cache(uid, company_id)
+
+            # Propagate to Neon
+            self._publish_coa_harmonized(uid, company_id, mandate_path, "update_account")
+
+            logger.info(f"COA.update_account {account_id} updated")
+
+            return {
+                "success": True,
+                "account": account_data,
+            }
+
+        except Exception as e:
+            logger.error(f"COA.update_account error: {e}")
+            return {"success": False, "error": {"code": "UPDATE_ERROR", "message": str(e)}}
 
     def _slugify_to_custom_name(self, display_name: str, existing_names: set) -> str:
         """Convertit un display_name en nom technique custom_*."""
@@ -993,6 +1179,36 @@ class COAHandlers:
             logger.info(f"COA cache niveau 2 invalidated: {cache_key}")
         except Exception as e:
             logger.warning(f"COA cache niveau 2 invalidation failed: {e}")
+
+    def _publish_coa_harmonized(
+        self,
+        uid: str,
+        company_id: str,
+        mandate_path: str,
+        requested_by: str,
+    ) -> None:
+        """
+        Publie un event coa_harmonized sur Redis pour que le backend
+        propage les changements COA Firebase vers Neon PostgreSQL.
+        Fire-and-forget: ne bloque pas le handler frontend.
+        """
+        try:
+            import json
+            redis_client = get_redis()
+            channel = f"user:{uid}/task_manager"
+            redis_client.publish(channel, json.dumps({
+                "type": "coa_harmonized",
+                "department": "coa",
+                "collection_id": company_id,
+                "mandate_path": mandate_path,
+                "data": {"requested_by": requested_by},
+            }))
+            logger.info(
+                "COA coa_harmonized published: uid=%s mandate=%s requested_by=%s",
+                uid, mandate_path, requested_by,
+            )
+        except Exception as e:
+            logger.warning("COA coa_harmonized publish failed: %s", e)
 
     # ===================================================================
     # FULL DATA (Pour orchestration)

@@ -490,6 +490,106 @@ async def handle_delete_function(
         })
 
 
+async def handle_create_account(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """Handle coa.create_account WebSocket event."""
+    company_id = payload.get("company_id")
+    mandate_path = payload.get("mandate_path")
+
+    if not company_id or not mandate_path:
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COA.ERROR,
+            "payload": {"error": "Missing required parameters"}
+        })
+        return
+
+    try:
+        handlers = get_coa_handlers()
+        result = await handlers.create_account(
+            uid=uid,
+            company_id=company_id,
+            mandate_path=mandate_path,
+            account_number=payload.get("account_number", ""),
+            account_name=payload.get("account_name", ""),
+            account_nature=payload.get("account_nature", ""),
+            account_function=payload.get("account_function", ""),
+            isactive=payload.get("isactive", True),
+            client_uuid=payload.get("client_uuid"),
+        )
+
+        await hub.broadcast(uid, {
+            "type": "coa.account_saved",
+            "payload": result
+        })
+
+        # Refresh accounts after create
+        if result.get("success"):
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.COA.ACCOUNTS_LOADED,
+                "payload": {"success": True, "data": None, "refresh": True}
+            })
+
+    except Exception as e:
+        logger.error(f"[COA] create_account failed: {e}")
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COA.ERROR,
+            "payload": {"error": str(e)}
+        })
+
+
+async def handle_update_account(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """Handle coa.update_account WebSocket event."""
+    company_id = payload.get("company_id")
+    mandate_path = payload.get("mandate_path")
+    account_id = payload.get("account_id")
+
+    if not company_id or not mandate_path or not account_id:
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COA.ERROR,
+            "payload": {"error": "Missing required parameters"}
+        })
+        return
+
+    try:
+        handlers = get_coa_handlers()
+        result = await handlers.update_account(
+            uid=uid,
+            company_id=company_id,
+            mandate_path=mandate_path,
+            account_id=account_id,
+            account_name=payload.get("account_name"),
+            account_nature=payload.get("account_nature"),
+            account_function=payload.get("account_function"),
+            isactive=payload.get("isactive"),
+        )
+
+        await hub.broadcast(uid, {
+            "type": "coa.account_saved",
+            "payload": result
+        })
+
+        # Refresh accounts after update
+        if result.get("success"):
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.COA.ACCOUNTS_LOADED,
+                "payload": {"success": True, "data": None, "refresh": True}
+            })
+
+    except Exception as e:
+        logger.error(f"[COA] update_account failed: {e}")
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COA.ERROR,
+            "payload": {"error": str(e)}
+        })
+
+
 # ===================================================================
 # EVENT ROUTING MAP
 # ===================================================================
@@ -504,4 +604,6 @@ COA_EVENT_HANDLERS = {
     "coa.create_function": handle_create_function,
     "coa.update_function": handle_update_function,
     "coa.delete_function": handle_delete_function,
+    "coa.create_account": handle_create_account,
+    "coa.update_account": handle_update_account,
 }

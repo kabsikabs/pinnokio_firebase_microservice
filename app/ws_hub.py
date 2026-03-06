@@ -189,13 +189,51 @@ class WebSocketHub:
             return
         
         sent_count = 0
+        dead_conns = []
         for ws in conns:
             try:
                 await ws.send_text(data)
                 sent_count += 1
             except Exception as e:
                 self._logger.error("ws_send_error uid=%s error=%s", uid, repr(e))
-        
+                dead_conns.append(ws)
+
+        # Nettoyer les connexions mortes et bufferiser si plus aucune connexion active
+        if dead_conns:
+            async with self._lock:
+                uid_conns = self._uid_to_conns.get(uid)
+                if uid_conns:
+                    for dead_ws in dead_conns:
+                        uid_conns.discard(dead_ws)
+                    if not uid_conns:
+                        self._uid_to_conns.pop(uid, None)
+            self._logger.warning(
+                "ws_dead_connections_cleaned uid=%s removed=%s remaining=%s",
+                uid, len(dead_conns), sent_count
+            )
+            # Si aucun envoi n'a réussi, bufferiser les messages critiques
+            if sent_count == 0:
+                thread_key = None
+                if channel and ":" in channel:
+                    try:
+                        thread_key = channel.split(":", 1)[1]
+                    except Exception:
+                        pass
+                if thread_key:
+                    try:
+                        from .ws_message_buffer import get_message_buffer
+                        buffer = get_message_buffer()
+                        buffer.store_pending_message(uid, thread_key, message)
+                        self._logger.info(
+                            "ws_broadcast_buffered_after_failure uid=%s thread=%s type=%s",
+                            uid, thread_key, msg_type
+                        )
+                    except Exception as buffer_error:
+                        self._logger.error(
+                            "ws_broadcast_buffer_failed uid=%s error=%s",
+                            uid, repr(buffer_error)
+                        )
+
         # Logs de broadcast (sauf chunks streaming pour éviter verbosité)
         # ⭐ MIGRATION 2026-02-04: Ajout thinking_delta au filtre
         streaming_types = ("llm.stream_delta", "llm.thinking_delta", "llm_stream_chunk")

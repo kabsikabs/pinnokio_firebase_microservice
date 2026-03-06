@@ -943,10 +943,12 @@ class ERPService:
         async def send_progress(stage: str, progress: int, message: str):
             try:
                 await hub.broadcast(user_id, {
-                    "type": "coa_sync_progress",
-                    "stage": stage,
-                    "progress": progress,
-                    "message": message
+                    "type": "coa.sync_progress",
+                    "payload": {
+                        "stage": stage,
+                        "progress": progress,
+                        "message": message,
+                    }
                 })
             except Exception as e:
                 logger.warning(f"[ERP] WSS broadcast failed: {e}")
@@ -1619,19 +1621,6 @@ class ERPService:
             # ═══════════════════════════════════════════════════════════════
             await send_progress("complete", 100, "Synchronisation terminée avec succès!")
 
-            try:
-                await hub.broadcast(user_id, {
-                    "type": "coa_sync_complete",
-                    "success": True,
-                    "accounts_synced": len(erp_account_ids),
-                    "accounts_added": accounts_added,
-                    "accounts_updated": accounts_updated,
-                    "accounts_deleted": len(deleted_ids),
-                    "accounts_deactivated": accounts_deactivated,
-                })
-            except Exception:
-                pass
-
             return {
                 "success": True,
                 "message": "Plan comptable synchronisé avec succès",
@@ -1646,16 +1635,6 @@ class ERPService:
 
         except Exception as e:
             logger.error(f"❌ [ERP] sync_coa_from_erp error: {e}", exc_info=True)
-            
-            # Signal d'erreur
-            try:
-                await hub.broadcast(user_id, {
-                    "type": "coa_sync_complete",
-                    "success": False,
-                    "error": str(e)
-                })
-            except Exception:
-                pass
             
             return {
                 "success": False,

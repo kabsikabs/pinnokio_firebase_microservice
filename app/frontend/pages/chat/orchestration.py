@@ -1162,6 +1162,23 @@ async def handle_card_clicked(
     )
 
     try:
+        # ── Carte approbation ecriture comptable : traitement backend direct ──
+        # Pas de Worker LLM ni d'ecriture RTDB vers worker externe.
+        # Le handler charge le payload Redis, poste vers ERP, notifie.
+        if card_id == "journal_entry_approval_card":
+            from app.realtime.journal_entry_handler import JournalEntryHandler
+
+            handler = JournalEntryHandler()
+            result = await handler.handle_card_response(
+                uid=uid,
+                company_id=company_id,
+                thread_key=thread_key,
+                action=action,
+                params=params,
+                message_id=message_id,
+            )
+            return result
+
         # ── Raccourci cartes workers externes : écriture RTDB directe ──
         # Même pattern que CMMD/FOLLOW_CARD : pas besoin du Worker LLM.
         # On reconstruit le CARD_CLICKED_PINNOKIO et on l'écrit dans job_chats.

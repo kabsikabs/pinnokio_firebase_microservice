@@ -27,6 +27,8 @@ from .orchestration import (
     handle_create_function,
     handle_update_function,
     handle_delete_function,
+    handle_create_account,
+    handle_update_account,
     COA_EVENT_HANDLERS,
 )
 
@@ -44,6 +46,8 @@ __all__ = [
     "handle_create_function",
     "handle_update_function",
     "handle_delete_function",
+    "handle_create_account",
+    "handle_update_account",
     # Event map
     "COA_EVENT_HANDLERS",
 ]
