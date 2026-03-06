@@ -629,7 +629,7 @@ class CommunicationResponseCollector:
         try:
             from app.redis_client import get_redis
             redis = get_redis()
-            channel = f"user:{uid}/{space_code}/{message_mode}/{thread_key}/messages"
+            channel = f"user:{uid}/job_chats"
             payload = {
                 "type": "job_chat_message",
                 "job_id": thread_key,

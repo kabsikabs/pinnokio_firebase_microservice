@@ -376,7 +376,7 @@ async def publish_job_chat_message(
         from app.redis_client import get_redis
         
         redis = get_redis()
-        channel = f"user:{uid}/{collection_name}/job_chats/{job_id}/messages"
+        channel = f"user:{uid}/job_chats"
         
         payload = {
             "type": "job_chat_message",

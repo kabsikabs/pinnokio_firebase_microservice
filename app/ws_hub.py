@@ -90,18 +90,37 @@ class WebSocketHub:
         self._uid_to_conns: Dict[str, Set[WebSocket]] = {}
         self._lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._on_first_connect_callbacks: list = []
+        self._on_last_disconnect_callbacks: list = []
+
+    def on_first_connect(self, callback) -> None:
+        """Register a callback(uid) called when a user's first WS connects."""
+        self._on_first_connect_callbacks.append(callback)
+
+    def on_last_disconnect(self, callback) -> None:
+        """Register a callback(uid) called when a user's last WS disconnects."""
+        self._on_last_disconnect_callbacks.append(callback)
 
     async def register(self, uid: str, ws: WebSocket) -> None:
+        is_first = False
         async with self._lock:
             # Mémoriser la loop courante pour exécutions thread-safe
             try:
                 self._loop = asyncio.get_running_loop()
             except Exception:
                 pass
+            is_first = uid not in self._uid_to_conns or len(self._uid_to_conns.get(uid, set())) == 0
             self._uid_to_conns.setdefault(uid, set()).add(ws)
             self._logger.info("ws_connect uid=%s total=%s", uid, len(self._uid_to_conns[uid]))
+        if is_first:
+            for cb in self._on_first_connect_callbacks:
+                try:
+                    await cb(uid)
+                except Exception as e:
+                    self._logger.error("on_first_connect callback error uid=%s error=%s", uid, repr(e))
 
     async def unregister(self, uid: str, ws: WebSocket) -> None:
+        is_last = False
         async with self._lock:
             conns = self._uid_to_conns.get(uid)
             if conns and ws in conns:
@@ -109,6 +128,13 @@ class WebSocketHub:
                 self._logger.info("ws_disconnect uid=%s total=%s", uid, len(conns))
                 if not conns:
                     self._uid_to_conns.pop(uid, None)
+                    is_last = True
+        if is_last:
+            for cb in self._on_last_disconnect_callbacks:
+                try:
+                    await cb(uid)
+                except Exception as e:
+                    self._logger.error("on_last_disconnect callback error uid=%s error=%s", uid, repr(e))
 
     def is_user_connected(self, uid: str) -> bool:
         """

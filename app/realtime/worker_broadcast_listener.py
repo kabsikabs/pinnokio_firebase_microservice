@@ -7,16 +7,18 @@ Ce listener les recoit et les transmet aux clients WebSocket.
 Architecture:
 - Worker -> Redis PubSub (ws:broadcast:{user_id}) -> Listener -> WebSocketHub -> Frontend
 
-Channels ecoutes:
-- ws:broadcast:* - Evenements generaux (llm_response, tool_execution, etc.)
-- ws:stream:*    - Streaming LLM chunks
-- ws:notification:* - Notifications utilisateur
+Channels ecoutes (per-user dynamic subscribe):
+- ws:broadcast:{uid} - Evenements generaux (llm_response, tool_execution, etc.)
+- ws:stream:{uid}    - Streaming LLM chunks
+- ws:notification:{uid} - Notifications utilisateur
+
+Compatible ElastiCache Serverless (no psubscribe).
 """
 
 import asyncio
 import json
 import logging
-from typing import Any, Callable, Optional
+from typing import Any, Optional, Set
 
 from ..redis_client import get_redis
 
@@ -30,21 +32,17 @@ DISPATCHABLE_TYPES = {
     "llm_stream_error",                        # Erreurs
 }
 
+# Channel prefixes per user
+CHANNEL_PREFIXES = ["ws:broadcast", "ws:stream", "ws:notification"]
+
 
 class WorkerBroadcastListener:
     """
     Listener pour les broadcasts du worker agentique.
 
-    Souscrit aux channels Redis PubSub et forward les messages
-    vers le WebSocketHub.
+    Souscrit aux channels Redis PubSub par utilisateur connecte
+    et forward les messages vers le WebSocketHub.
     """
-
-    # Patterns de channels a ecouter
-    CHANNEL_PATTERNS = [
-        "ws:broadcast:*",
-        "ws:stream:*",
-        "ws:notification:*",
-    ]
 
     def __init__(self):
         self._redis = None
@@ -52,6 +50,8 @@ class WorkerBroadcastListener:
         self._running = False
         self._listener_task: Optional[asyncio.Task] = None
         self._hub = None
+        self._subscribed_uids: Set[str] = set()
+        self._sub_lock = asyncio.Lock()
 
     @property
     def redis(self):
@@ -68,6 +68,40 @@ class WorkerBroadcastListener:
             self._hub = hub
         return self._hub
 
+    def _channels_for_uid(self, uid: str) -> list[str]:
+        """Return the 3 channels for a given user."""
+        return [f"{prefix}:{uid}" for prefix in CHANNEL_PREFIXES]
+
+    async def subscribe_user(self, uid: str) -> None:
+        """Subscribe to all broadcast channels for a user."""
+        async with self._sub_lock:
+            if uid in self._subscribed_uids:
+                return
+            if not self._pubsub:
+                return
+            channels = self._channels_for_uid(uid)
+            try:
+                await asyncio.to_thread(self._pubsub.subscribe, *channels)
+                self._subscribed_uids.add(uid)
+                logger.info("worker_broadcast_subscribe uid=%s channels=%s", uid, channels)
+            except Exception as e:
+                logger.error("worker_broadcast_subscribe_error uid=%s error=%s", uid, repr(e))
+
+    async def unsubscribe_user(self, uid: str) -> None:
+        """Unsubscribe from all broadcast channels for a user."""
+        async with self._sub_lock:
+            if uid not in self._subscribed_uids:
+                return
+            if not self._pubsub:
+                return
+            channels = self._channels_for_uid(uid)
+            try:
+                await asyncio.to_thread(self._pubsub.unsubscribe, *channels)
+                self._subscribed_uids.discard(uid)
+                logger.info("worker_broadcast_unsubscribe uid=%s", uid)
+            except Exception as e:
+                logger.error("worker_broadcast_unsubscribe_error uid=%s error=%s", uid, repr(e))
+
     async def start(self):
         """
         Demarre l'ecoute des broadcasts du worker.
@@ -78,14 +112,17 @@ class WorkerBroadcastListener:
             logger.warning("WorkerBroadcastListener already running")
             return
 
-        logger.info("Starting WorkerBroadcastListener...")
+        logger.info("Starting WorkerBroadcastListener (dynamic subscribe mode)...")
 
         self._pubsub = self.redis.pubsub()
 
-        # Souscrire aux patterns
-        for pattern in self.CHANNEL_PATTERNS:
-            self._pubsub.psubscribe(pattern)
-            logger.info(f"Subscribed to pattern: {pattern}")
+        # Register hub callbacks for dynamic subscribe/unsubscribe
+        self.hub.on_first_connect(self.subscribe_user)
+        self.hub.on_last_disconnect(self.unsubscribe_user)
+
+        # Subscribe for already-connected users (in case of restart)
+        for uid in self.hub.get_connected_users():
+            await self.subscribe_user(uid)
 
         self._running = True
         self._listener_task = asyncio.create_task(self._listen_loop())
@@ -108,9 +145,13 @@ class WorkerBroadcastListener:
                 pass
 
         if self._pubsub:
-            self._pubsub.punsubscribe()
-            self._pubsub.close()
+            try:
+                await asyncio.to_thread(self._pubsub.unsubscribe)
+                await asyncio.to_thread(self._pubsub.close)
+            except Exception:
+                pass
 
+        self._subscribed_uids.clear()
         logger.info("WorkerBroadcastListener stopped")
 
     async def _listen_loop(self):
@@ -121,14 +162,14 @@ class WorkerBroadcastListener:
 
         while self._running:
             try:
-                # Utiliser get_message avec timeout pour ne pas bloquer
-                message = self._pubsub.get_message(
+                message = await asyncio.to_thread(
+                    self._pubsub.get_message,
                     ignore_subscribe_messages=True,
-                    timeout=0.1  # 100ms
+                    timeout=0.1,
                 )
 
                 if message is None:
-                    await asyncio.sleep(0.01)  # Yield to other tasks
+                    await asyncio.sleep(0.01)
                     continue
 
                 await self._handle_message(message)
@@ -147,12 +188,11 @@ class WorkerBroadcastListener:
 
         Args:
             message: Message Redis PubSub avec:
-                - type: "pmessage" pour pattern match
-                - pattern: Le pattern qui a matche
+                - type: "message" pour subscribe direct
                 - channel: Le channel complet (ex: "ws:broadcast:user123")
                 - data: Le payload JSON
         """
-        if message["type"] != "pmessage":
+        if message["type"] != "message":
             return
 
         channel = message["channel"]
@@ -199,16 +239,10 @@ class WorkerBroadcastListener:
 
         Si communication_chat_type != "pinnokio", route vers
         CommunicationDispatcher.dispatch_outbound() pour les types dispatchables.
-
-        Args:
-            user_id: ID de l'utilisateur cible
-            payload: Payload a envoyer
-            channel_type: Type de channel (broadcast, stream, notification)
         """
         communication_chat_type = payload.get("communication_chat_type", "pinnokio")
 
         if communication_chat_type == "pinnokio":
-            # FLUX ACTUEL INCHANGE — WebSocket hub
             try:
                 if not self.hub.is_user_connected(user_id):
                     logger.debug(
@@ -224,7 +258,6 @@ class WorkerBroadcastListener:
             except Exception as e:
                 logger.error(f"Error forwarding to WebSocket: {e}")
         else:
-            # FLUX CANAL EXTERNE — dispatch vers microservice
             msg_type = payload.get("type", "")
             if msg_type in DISPATCHABLE_TYPES:
                 try:

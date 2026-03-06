@@ -1057,7 +1057,7 @@ async def _handle_external_card_response(
         # Publier sur Redis PubSub pour que le worker recoive la reponse
         try:
             redis_client = get_redis()
-            redis_channel = f"user:{uid}/{company_id}/job_chats/{thread_key}/messages"
+            redis_channel = f"user:{uid}/job_chats"
             # Publier dans le format enveloppe standard job_chat_message
             # Le worker unwrap via: if data['type']=='job_chat_message': data = data['message']
             redis_payload = {

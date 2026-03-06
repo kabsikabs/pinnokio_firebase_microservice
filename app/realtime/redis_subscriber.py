@@ -6,7 +6,7 @@ Ce module implémente l'écoute des messages Redis PubSub publiés par les jobbe
 (Router, APbookeeper, Bankbookeeper) et les traite selon le niveau contextuel.
 
 ARCHITECTURE:
-- Écoute les canaux Redis patterns: user:*
+- Écoute les canaux Redis par user (subscribe dynamique, pas de psubscribe)
 - Route les messages selon le type de canal
 - Met à jour le cache métier (USER, BUSINESS)
 - Publie via WebSocket selon les règles contextuelles
@@ -199,6 +199,15 @@ class RedisSubscriber:
         "general": "general",
     }
 
+    # Fixed channel suffixes per user (ElastiCache Serverless compatible — no psubscribe)
+    USER_CHANNEL_SUFFIXES = [
+        "notifications",
+        "direct_message_notif",
+        "task_manager",
+        "job_chats",
+        "pending_approval",
+    ]
+
     def __init__(self):
         """Initialise le RedisSubscriber."""
         self.redis = get_redis()
@@ -210,12 +219,48 @@ class RedisSubscriber:
         self._message_count = 0
         self._error_count = 0
         self._start_time = 0.0
+        self._subscribed_uids: set = set()
+        self._sub_lock = asyncio.Lock()
+
+    def _channels_for_uid(self, uid: str) -> list:
+        """Return the fixed channels for a given user."""
+        return [f"user:{uid}/{suffix}" for suffix in self.USER_CHANNEL_SUFFIXES]
+
+    async def subscribe_user(self, uid: str) -> None:
+        """Subscribe to all fixed channels for a user."""
+        async with self._sub_lock:
+            if uid in self._subscribed_uids:
+                return
+            if not self.pubsub:
+                return
+            channels = self._channels_for_uid(uid)
+            try:
+                await asyncio.to_thread(self.pubsub.subscribe, *channels)
+                self._subscribed_uids.add(uid)
+                logger.info("[REDIS_SUBSCRIBER] subscribe_user uid=%s channels=%d", uid, len(channels))
+            except Exception as e:
+                logger.error("[REDIS_SUBSCRIBER] subscribe_user_error uid=%s error=%s", uid, repr(e))
+
+    async def unsubscribe_user(self, uid: str) -> None:
+        """Unsubscribe from all fixed channels for a user."""
+        async with self._sub_lock:
+            if uid not in self._subscribed_uids:
+                return
+            if not self.pubsub:
+                return
+            channels = self._channels_for_uid(uid)
+            try:
+                await asyncio.to_thread(self.pubsub.unsubscribe, *channels)
+                self._subscribed_uids.discard(uid)
+                logger.info("[REDIS_SUBSCRIBER] unsubscribe_user uid=%s", uid)
+            except Exception as e:
+                logger.error("[REDIS_SUBSCRIBER] unsubscribe_user_error uid=%s error=%s", uid, repr(e))
 
     async def start(self) -> None:
         """
         Démarre le subscriber Redis PubSub.
 
-        S'abonne au pattern: user:*
+        Utilise des subscriptions dynamiques par user (compatible ElastiCache Serverless).
         Lance la boucle d'écoute en arrière-plan.
         """
         if self._running:
@@ -228,14 +273,19 @@ class RedisSubscriber:
         logger.info("[REDIS_SUBSCRIBER] ═══════════════════════════════════════════════════════")
         logger.info("[REDIS_SUBSCRIBER] RedisSubscriber START - initializing PubSub listener")
         logger.info("[REDIS_SUBSCRIBER] → Redis host=%s port=%s", self.redis.connection_pool.connection_kwargs.get("host"), self.redis.connection_pool.connection_kwargs.get("port"))
-        logger.info("[REDIS_SUBSCRIBER] → Pattern subscribed: user:*")
-        logger.info("[REDIS_SUBSCRIBER] → Channels to handle: notifications, direct_message_notif, task_manager, job_chats")
-        logger.info("[REDIS_SUBSCRIBER] → Chat channels: IGNORED (handled by llm_manager)")
+        logger.info("[REDIS_SUBSCRIBER] → Mode: dynamic subscribe per user (no psubscribe)")
+        logger.info("[REDIS_SUBSCRIBER] → Channels per user: %s", self.USER_CHANNEL_SUFFIXES)
 
         try:
             self.pubsub = self.redis.pubsub()
-            # S'abonner au pattern user:*
-            await asyncio.to_thread(self.pubsub.psubscribe, "user:*")
+
+            # Register hub callbacks for dynamic subscribe/unsubscribe
+            hub.on_first_connect(self.subscribe_user)
+            hub.on_last_disconnect(self.unsubscribe_user)
+
+            # Subscribe for already-connected users (in case of restart)
+            for uid in hub.get_connected_users():
+                await self.subscribe_user(uid)
 
             # Démarrer la boucle d'écoute
             self._listener_task = asyncio.create_task(self._listener_loop())
@@ -275,10 +325,14 @@ class RedisSubscriber:
 
             # Fermer la connexion PubSub
             if self.pubsub:
-                await asyncio.to_thread(self.pubsub.punsubscribe)
+                try:
+                    await asyncio.to_thread(self.pubsub.unsubscribe)
+                except Exception:
+                    pass
                 await asyncio.to_thread(self.pubsub.close)
                 self.pubsub = None
 
+            self._subscribed_uids.clear()
             uptime = time.time() - self._start_time
             logger.info("[REDIS_SUBSCRIBER] → closing PubSub connection...")
             logger.info("[REDIS_SUBSCRIBER] → Stats: messages=%s errors=%s uptime=%.2fs", self._message_count, self._error_count, uptime)
@@ -307,9 +361,8 @@ class RedisSubscriber:
                 # Écouter les messages (bloquant, mais dans un thread séparé)
                 message = await asyncio.to_thread(self.pubsub.get_message, timeout=1.0)
 
-                if message and message["type"] == "pmessage":
+                if message and message["type"] == "message":
                     self._message_count += 1
-                    pattern = message.get("pattern")
                     channel = message.get("channel")
                     data = message.get("data")
 
@@ -345,9 +398,14 @@ class RedisSubscriber:
                 await asyncio.to_thread(self.pubsub.close)
 
             self.pubsub = self.redis.pubsub()
-            await asyncio.to_thread(self.pubsub.psubscribe, "user:*")
 
-            logger.info("[REDIS_SUBSCRIBER] redis_reconnected - resubscribing to patterns...")
+            # Re-subscribe all currently connected users
+            uids_to_resub = list(self._subscribed_uids)
+            self._subscribed_uids.clear()
+            for uid in uids_to_resub:
+                await self.subscribe_user(uid)
+
+            logger.info("[REDIS_SUBSCRIBER] redis_reconnected - resubscribed %d users", len(uids_to_resub))
 
         except Exception as e:
             logger.error("[REDIS_SUBSCRIBER] reconnect_failed error=%s", str(e), exc_info=True)
@@ -410,7 +468,7 @@ class RedisSubscriber:
                 logger.debug("[REDIS_SUBSCRIBER] → routing to: task_manager handler")
                 await self._handle_task_manager_message(uid, channel, message_data)
 
-            elif "/job_chats/" in channel and "/messages" in channel:
+            elif channel.endswith("/job_chats"):
                 logger.debug("[REDIS_SUBSCRIBER] → routing to: job_chat handler")
                 await self._handle_job_chat_message(uid, channel, message_data)
 
@@ -418,24 +476,8 @@ class RedisSubscriber:
                 logger.debug("[REDIS_SUBSCRIBER] → routing to: pending_approval handler")
                 await self._handle_pending_approval_message(uid, channel, message_data)
 
-            elif "/chats/" in channel and "/messages" in channel:
-                # CARD/FOLLOW_CARD envoyees depuis agents L3 dans un chat regulier
-                # (ex: JournalEntryAgent → SUBMIT_FOR_APPROVAL en mode general_chat)
-                msg_type = message_data.get("message", {}).get("message_type", "") \
-                    if isinstance(message_data.get("message"), dict) \
-                    else message_data.get("message_type", "")
-                if msg_type in ("CARD", "FOLLOW_CARD"):
-                    logger.debug("[REDIS_SUBSCRIBER] → routing to: job_chat handler (CARD from chats/)")
-                    await self._handle_job_chat_message(uid, channel, message_data)
-                else:
-                    logger.debug("[REDIS_SUBSCRIBER] → routing to: IGNORE (chat handled by llm_manager)")
-
-            elif "/messages" in channel:
-                logger.debug("[REDIS_SUBSCRIBER] → routing to: IGNORE (chat handled by llm_manager)")
-                # Chat déjà géré par llm_manager, ne rien faire
-
             else:
-                logger.warning("[REDIS_SUBSCRIBER] → routing to: UNKNOWN CHANNEL TYPE")
+                logger.warning("[REDIS_SUBSCRIBER] → routing to: UNKNOWN CHANNEL TYPE channel=%s", channel)
 
             # Log de performance
             duration_ms = (time.time() - start_time) * 1000
