@@ -1043,6 +1043,19 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
         if callable(target):
             return target, "ERP"
 
+    # === ACCOUNTING (Cockpit — Neon PostgreSQL read-only queries) ===
+    if method.startswith("ACCOUNTING."):
+        from .frontend.pages.cockpit.rpc_executor import execute_accounting_rpc
+        name = method  # Keep full method name (e.g. "ACCOUNTING.get_trial_balance")
+
+        async def _accounting_wrapper(_method=name, **kwargs):
+            mandate_path = kwargs.pop("mandate_path", None)
+            if not mandate_path:
+                raise ValueError("mandate_path is required for ACCOUNTING methods")
+            return await execute_accounting_rpc(mandate_path, _method, kwargs)
+
+        return _accounting_wrapper, "ACCOUNTING"
+
     # === DASHBOARD (Next.js Dashboard - NEW) ===
     # Ce namespace est NOUVEAU et ne modifie pas les méthodes existantes
     # Endpoints: DASHBOARD.full_data, DASHBOARD.get_metrics, DASHBOARD.invalidate_cache
@@ -3284,6 +3297,57 @@ async def websocket_endpoint(ws: WebSocket):
                             payload=msg_payload
                         )
                         logger.info(f"[WS] HR settings_update handled - uid={uid}")
+
+                    # ============================================
+                    # COCKPIT DASHBOARD EVENTS
+                    # ============================================
+                    elif msg_type == "cockpit.generate":
+                        from .frontend.pages.cockpit import handle_cockpit_generate
+                        response = await handle_cockpit_generate(
+                            uid=uid, session_id=session_id, payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Cockpit generate handled - uid={uid}")
+
+                    elif msg_type == "cockpit.list_widgets":
+                        from .frontend.pages.cockpit import handle_cockpit_list_widgets
+                        response = await handle_cockpit_list_widgets(
+                            uid=uid, session_id=session_id, payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Cockpit list_widgets handled - uid={uid}")
+
+                    elif msg_type == "cockpit.pin_widget":
+                        from .frontend.pages.cockpit import handle_cockpit_pin_widget
+                        response = await handle_cockpit_pin_widget(
+                            uid=uid, session_id=session_id, payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Cockpit pin_widget handled - uid={uid}")
+
+                    elif msg_type == "cockpit.delete_widget":
+                        from .frontend.pages.cockpit import handle_cockpit_delete_widget
+                        response = await handle_cockpit_delete_widget(
+                            uid=uid, session_id=session_id, payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Cockpit delete_widget handled - uid={uid}")
+
+                    elif msg_type == "cockpit.refresh_widget":
+                        from .frontend.pages.cockpit import handle_cockpit_refresh_widget
+                        response = await handle_cockpit_refresh_widget(
+                            uid=uid, session_id=session_id, payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Cockpit refresh_widget handled - uid={uid}")
+
+                    elif msg_type == "cockpit.update_layout":
+                        from .frontend.pages.cockpit import handle_cockpit_update_layout
+                        response = await handle_cockpit_update_layout(
+                            uid=uid, session_id=session_id, payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Cockpit update_layout handled - uid={uid}")
 
                     # ============================================
                     # LLM STREAMING EVENTS

@@ -965,6 +965,50 @@ class OnboardingEvents:
     ERROR = "onboarding.error"
 
 
+class CockpitEvents:
+    """
+    Evenements pour le Cockpit Dashboard (AI Reporter).
+
+    Gere:
+    - Generation de widgets via l'agent comptable (LLM)
+    - CRUD widgets epingles (Firestore sous mandate_path/cockpit/)
+    - Rafraichissement des donnees (RPC direct, sans LLM)
+
+    Flow generation:
+    1. GENERATE: User prompt en langage naturel
+    2. GENERATE_QUEUED: Confirme la mise en queue
+    3. WIDGET_READY: Widget genere (via worker broadcast)
+
+    Flow CRUD (synchrone):
+    - LIST_WIDGETS / WIDGETS_LOADED
+    - PIN_WIDGET / WIDGET_PINNED
+    - DELETE_WIDGET / WIDGET_DELETED
+    - REFRESH_WIDGET / WIDGET_REFRESHED
+    - UPDATE_LAYOUT / LAYOUT_UPDATED
+    """
+    # Generation (async via LLM worker)
+    GENERATE = "cockpit.generate"
+    GENERATE_QUEUED = "cockpit.generate_queued"
+    WIDGET_READY = "cockpit.widget_ready"
+
+    # CRUD widgets (synchrone)
+    LIST_WIDGETS = "cockpit.list_widgets"
+    WIDGETS_LOADED = "cockpit.widgets_loaded"
+    PIN_WIDGET = "cockpit.pin_widget"
+    WIDGET_PINNED = "cockpit.widget_pinned"
+    DELETE_WIDGET = "cockpit.delete_widget"
+    WIDGET_DELETED = "cockpit.widget_deleted"
+    REFRESH_WIDGET = "cockpit.refresh_widget"
+    WIDGET_REFRESHED = "cockpit.widget_refreshed"
+
+    # Layout
+    UPDATE_LAYOUT = "cockpit.update_layout"
+    LAYOUT_UPDATED = "cockpit.layout_updated"
+
+    # Error
+    ERROR = "cockpit.error"
+
+
 # ============================================
 # Consolidated WS_EVENTS Class
 # ============================================
@@ -1010,6 +1054,7 @@ class WS_EVENTS:
     METRICS = MetricsEvents           # NEW: Shared metrics stores
     ONBOARDING = OnboardingEvents     # NEW: Company onboarding and setup
     HR = HREvents                     # NEW: Human Resources (PostgreSQL Neon)
+    COCKPIT = CockpitEvents           # NEW: AI Reporter Cockpit Dashboard
 
 
 # ============================================

@@ -1979,6 +1979,7 @@ async def _populate_widget_caches(
                     uid, company_id,
                     client_uuid=client_uuid,
                     bank_erp=bank_erp,
+                    mandate_path=mandate_path,
                     force_refresh=force_refresh,
                 )
             )

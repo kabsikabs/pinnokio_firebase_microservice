@@ -400,6 +400,159 @@ class ERPService:
         return lines
 
     @classmethod
+    def get_open_ap_invoices(
+        cls,
+        user_id: str,
+        company_id: str,
+        client_uuid: Optional[str] = None,
+    ) -> list:
+        """
+        Récupère les factures fournisseurs (AP) ouvertes depuis Odoo.
+        Factures postées mais pas encore totalement payées.
+
+        Returns:
+            Liste de dicts normalisés pour le bulk matching:
+            {id, name, date, amount, currency, supplier_name, reference, type}
+        """
+        manager = cls._get_manager()
+        connection = manager.get_connection(user_id, company_id, client_uuid=client_uuid)
+
+        if not connection:
+            raise Exception("Failed to connect to ERP")
+
+        domain = [
+            ["move_type", "=", "in_invoice"],
+            ["state", "=", "posted"],
+            ["payment_state", "in", ["not_paid", "partial"]],
+        ]
+        fields = [
+            "name", "invoice_date", "date", "ref",
+            "amount_total_signed", "amount_residual",
+            "payment_reference", "partner_id",
+            "invoice_partner_display_name",
+            "currency_id", "invoice_date_due",
+        ]
+
+        moves = connection._execute_kw(
+            "account.move", "search_read", [domain], {"fields": fields}
+        )
+
+        # Normalize to unified format
+        from .fx_rate_service import normalize_currency
+        items = []
+        for m in moves:
+            currency_raw = m.get("currency_id")
+            currency = (
+                currency_raw[1]
+                if isinstance(currency_raw, (list, tuple)) and len(currency_raw) > 1
+                else "EUR"
+            )
+            partner_name = m.get("invoice_partner_display_name") or ""
+            if not partner_name and isinstance(m.get("partner_id"), (list, tuple)):
+                partner_name = m["partner_id"][1] if len(m["partner_id"]) > 1 else ""
+
+            amount = abs(float(m.get("amount_residual") or m.get("amount_total_signed") or 0))
+            if amount == 0:
+                continue
+
+            items.append({
+                "id": m.get("id"),
+                "name": m.get("name", ""),
+                "date": m.get("invoice_date") or m.get("date") or "",
+                "amount": amount,
+                "currency": normalize_currency(currency),
+                "partner_name": partner_name,
+                "supplier_name": partner_name,
+                "reference": m.get("ref") or m.get("payment_reference") or "",
+                "invoice_date": m.get("invoice_date") or m.get("date") or "",
+                "due_date": m.get("invoice_date_due", ""),
+                "payment_reference": m.get("payment_reference") or "",
+                "ref": m.get("ref") or m.get("payment_reference") or "",
+                # Display fields for frontend badge
+                "display_name": partner_name,
+                "display_ref": m.get("name", ""),
+                "type": "invoice",
+            })
+
+        return items
+
+    @classmethod
+    def get_open_ar_invoices(
+        cls,
+        user_id: str,
+        company_id: str,
+        client_uuid: Optional[str] = None,
+    ) -> list:
+        """
+        Récupère les factures clients (AR) ouvertes depuis Odoo.
+        Factures postées mais pas encore totalement payées.
+
+        Returns:
+            Liste de dicts normalisés pour le bulk matching:
+            {id, name, date, amount, currency, partner_name, reference, type}
+        """
+        manager = cls._get_manager()
+        connection = manager.get_connection(user_id, company_id, client_uuid=client_uuid)
+
+        if not connection:
+            raise Exception("Failed to connect to ERP")
+
+        domain = [
+            ["move_type", "=", "out_invoice"],
+            ["state", "=", "posted"],
+            ["payment_state", "in", ["not_paid", "partial"]],
+        ]
+        fields = [
+            "name", "invoice_date", "date", "ref",
+            "amount_total_signed", "amount_residual",
+            "payment_reference", "partner_id",
+            "invoice_partner_display_name",
+            "currency_id", "invoice_date_due",
+        ]
+
+        moves = connection._execute_kw(
+            "account.move", "search_read", [domain], {"fields": fields}
+        )
+
+        from .fx_rate_service import normalize_currency
+        items = []
+        for m in moves:
+            currency_raw = m.get("currency_id")
+            currency = (
+                currency_raw[1]
+                if isinstance(currency_raw, (list, tuple)) and len(currency_raw) > 1
+                else "EUR"
+            )
+            partner_name = m.get("invoice_partner_display_name") or ""
+            if not partner_name and isinstance(m.get("partner_id"), (list, tuple)):
+                partner_name = m["partner_id"][1] if len(m["partner_id"]) > 1 else ""
+
+            amount = abs(float(m.get("amount_residual") or m.get("amount_total_signed") or 0))
+            if amount == 0:
+                continue
+
+            items.append({
+                "id": m.get("id"),
+                "name": m.get("name", ""),
+                "date": m.get("invoice_date") or m.get("date") or "",
+                "amount": amount,
+                "currency": normalize_currency(currency),
+                "partner_name": partner_name,
+                "supplier_name": partner_name,
+                "reference": m.get("ref") or m.get("payment_reference") or "",
+                "invoice_date": m.get("invoice_date") or m.get("date") or "",
+                "due_date": m.get("invoice_date_due", ""),
+                "payment_reference": m.get("payment_reference") or "",
+                "ref": m.get("ref") or m.get("payment_reference") or "",
+                "display_name": partner_name,
+                "display_ref": m.get("name", ""),
+                "type": "ar_invoice",
+                "contact_type": "customer",
+            })
+
+        return items
+
+    @classmethod
     def test_connection(
         cls,
         user_id: Optional[str] = None,

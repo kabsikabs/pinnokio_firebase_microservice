@@ -61,25 +61,16 @@ async def _listen_loop():
             # Import here to avoid circular imports at module load time
             from .job_actions_handler import (
                 handle_job_process,
-                handle_reverse_reconciliation_dispatch,
-                handle_reverse_recon_result,
+                handle_reverse_recon_scoring_backend,
             )
 
             # Route based on source:
-            # 1. reverse_recon_result → post-scoring orchestration (build banker payload + dispatch)
-            # 2. reverse_reconciliation → scoring dispatch to klk_bank (no notifs/cache)
-            # 3. everything else → full pipeline (notifs/cache/WSS)
+            # 1. reverse_reconciliation / reverse_recon_result → score locally via BulkMatchingEngine
+            # 2. everything else → full pipeline (notifs/cache/WSS)
             # IMPORTANT: "apbookeeper_automated_reconciliation" does NOT contain "reverse_reconciliation"
             # → it goes through handle_job_process (full pipeline with notifs/cache/WSS)
-            if source == "reverse_recon_result":
-                result = await handle_reverse_recon_result(
-                    uid=uid,
-                    payload=data.get("payload", {}),
-                    company_data=data.get("company_data", {}),
-                    source=source,
-                )
-            elif "reverse_reconciliation" in source:
-                result = await handle_reverse_reconciliation_dispatch(
+            if source == "reverse_recon_result" or "reverse_reconciliation" in source:
+                result = await handle_reverse_recon_scoring_backend(
                     uid=uid,
                     payload=data.get("payload", {}),
                     company_data=data.get("company_data", {}),
