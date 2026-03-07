@@ -2802,181 +2802,13 @@ async def _persist_jobs_to_task_manager(
 
 
 # ============================================
-# REVERSE RECONCILIATION DISPATCH
+# REVERSE RECON HELPERS
 # ============================================
 
+# NOTE: handle_reverse_reconciliation_dispatch REMOVED — scoring now handled
+# entirely in backend via handle_reverse_recon_scoring_backend (no klk_bank LLM).
+# NOTE: handle_reverse_recon_result REMOVED — klk_bank no longer sends scoring results.
 
-async def handle_reverse_reconciliation_dispatch(
-    uid: str,
-    payload: Dict[str, Any],
-    company_data: Dict[str, Any],
-    source: str = "reverse_reconciliation",
-) -> Dict[str, Any]:
-    """
-    Dispatch a reverse reconciliation request to the Bank worker.
-
-    Uses the same centralized pattern as handle_job_process:
-    - ActiveJobManager.register_job (cold start resilience)
-    - ensure_worker_running (ECS/LOCAL)
-    - Heartbeat check → conditional HTTP POST
-    - No notifications, no optimistic list change, no task_manager persistence
-
-    Args:
-        uid: Firebase user ID
-        payload: Reverse reconciliation payload (items, request_id, etc.)
-        company_data: Company context (mandate_path, company_id)
-        source: Source identifier
-
-    Returns:
-        {success, request_id, dispatch_method}
-    """
-    request_id = payload.get("request_id", str(uuid.uuid4()))
-    company_id = company_data.get("company_id") or payload.get("collection_name")
-
-    logger.info(
-        f"[JOB_ACTIONS] ═══════════════════════════════════════════════════════════"
-    )
-    requesting_dept = payload.get("requesting_department", "unknown")
-    logger.info(
-        f"[JOB_ACTIONS] handle_reverse_reconciliation_dispatch START - "
-        f"uid={uid} request_id={request_id} company_id={company_id} requesting_dept={requesting_dept}"
-    )
-
-    try:
-        mandate_path = company_data.get("mandate_path", "")
-
-        # Build URL for bankbookeeper worker
-        base_url = _get_base_url(job_type="bankbookeeper")
-        process_url = f"{base_url}/reverse-reconciliation-trigger"
-
-        # Build the jobbeur payload
-        jobbeur_payload = {
-            **payload,
-            "request_id": request_id,
-            "user_id": uid,
-            "collection_name": company_id,
-            "mandates_path": mandate_path,
-            "source": source,
-            "requesting_job_id": payload.get("requesting_job_id"),
-            "requesting_department": payload.get("requesting_department"),
-        }
-
-        # ═══════════════════════════════════════════════════════════════════
-        # Step 1: Register in active_jobs via ActiveJobManager
-        # Same pattern as handle_job_process Step 1.5
-        # ═══════════════════════════════════════════════════════════════════
-        try:
-            reg_result = ActiveJobManager.register_job(
-                mandate_path=mandate_path,
-                job_data=jobbeur_payload,
-                job_key=request_id,
-                job_type="reversereconciliation",
-            )
-            logger.info(
-                f"[JOB_ACTIONS] → Step 1: active_jobs registered (reversereconciliation): "
-                f"status={reg_result.get('status')} should_start={reg_result.get('should_start')} "
-                f"position={reg_result.get('position_in_queue')}"
-            )
-        except Exception as reg_err:
-            logger.warning(f"[JOB_ACTIONS] → Step 1: active_jobs registration failed: {reg_err}")
-
-        # ═══════════════════════════════════════════════════════════════════
-        # Step 2: Ensure worker is running (ECS in PROD, subprocess in LOCAL)
-        # Same pattern as handle_job_process Step 1.6
-        # ═══════════════════════════════════════════════════════════════════
-        ecs_starting = False
-        try:
-            environment = os.environ.get("PINNOKIO_ENVIRONMENT", "PROD").upper()
-            if environment == "LOCAL":
-                from ..local_worker_manager import LocalWorkerManager
-                worker_status = LocalWorkerManager.ensure_worker_running("bankbookeeper")
-            else:
-                from ..ecs_manager import ECSManager
-                worker_status = ECSManager.ensure_worker_running("bankbookeeper")
-
-            logger.info(f"[JOB_ACTIONS] → Step 2: Worker status={worker_status.get('status')} (env={environment})")
-
-            if worker_status.get("status") in ("starting", "provisioning"):
-                ecs_starting = True
-        except Exception as ecs_err:
-            logger.warning(f"[JOB_ACTIONS] → Step 2: Worker check failed: {ecs_err}")
-
-        # ═══════════════════════════════════════════════════════════════════
-        # Step 3: Check heartbeat → conditional HTTP dispatch
-        # Same pattern as handle_job_process Step 1.7
-        # ═══════════════════════════════════════════════════════════════════
-        skip_http = False
-        if ecs_starting:
-            logger.info("[JOB_ACTIONS] → Step 3: Worker starting up, skipping HTTP dispatch")
-            skip_http = True
-        else:
-            try:
-                redis = get_redis()
-                hb_key = "worker:banker:heartbeat"
-                heartbeat = redis.get(hb_key)
-                if not heartbeat:
-                    logger.info(f"[JOB_ACTIONS] → Step 3: No heartbeat ({hb_key}), skipping HTTP dispatch")
-                    skip_http = True
-            except Exception as hb_err:
-                logger.warning(f"[JOB_ACTIONS] → Step 3: Heartbeat check failed: {hb_err}")
-
-        dispatch_method = "http"
-
-        if skip_http:
-            dispatch_method = "ecs_starting" if ecs_starting else "active_jobs_pending"
-            logger.info(
-                f"[JOB_ACTIONS] handle_reverse_reconciliation_dispatch OK - "
-                f"request_id={request_id} dispatch_method={dispatch_method} (worker will poll active_jobs)"
-            )
-        else:
-            logger.info(f"[JOB_ACTIONS] → Step 4: Calling HTTP endpoint: {process_url}")
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    process_url,
-                    json=jobbeur_payload,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    status_code = response.status
-                    response_text = await response.text()
-
-                    if status_code in (200, 202):
-                        logger.info(
-                            f"[JOB_ACTIONS] handle_reverse_reconciliation_dispatch SUCCESS - "
-                            f"request_id={request_id} status={status_code}"
-                        )
-                    else:
-                        # HTTP failed but job is in active_jobs — worker will poll
-                        dispatch_method = "active_jobs_fallback"
-                        logger.warning(
-                            f"[JOB_ACTIONS] handle_reverse_reconciliation_dispatch HTTP FAILED - "
-                            f"status={status_code} body={response_text[:200]} "
-                            f"(fallback: worker will poll active_jobs)"
-                        )
-
-        return {
-            "success": True,
-            "request_id": request_id,
-            "dispatch_method": dispatch_method,
-        }
-
-    except Exception as e:
-        # Even on exception, the job may already be in active_jobs (registered in Step 1)
-        logger.error(
-            f"[JOB_ACTIONS] handle_reverse_reconciliation_dispatch FAILED: {e} "
-            f"(job may still be picked up via active_jobs polling)",
-            exc_info=True,
-        )
-        return {
-            "success": False,
-            "request_id": request_id,
-            "error": str(e),
-            "code": "DISPATCH_ERROR",
-        }
-
-
-# ============================================
-# REVERSE RECON RESULT — Post-scoring orchestration
-# ============================================
 
 async def _get_banker_workflow_params(mandate_path: str) -> Dict[str, Any]:
     """Fetch Banker_param from Firebase mandate workflow_params."""
@@ -3025,272 +2857,332 @@ async def _cleanup_reverse_recon_active_job(mandate_path: str, request_id: str):
         logger.warning(f"[JOB_ACTIONS] Reverse recon cleanup failed: {e}")
 
 
-async def handle_reverse_recon_result(
+
+# ============================================
+# REVERSE RECON — BACKEND-ONLY SCORING (replaces klk_bank LLM scoring)
+# ============================================
+
+async def handle_reverse_recon_scoring_backend(
     uid: str,
     payload: Dict[str, Any],
     company_data: Dict[str, Any],
-    source: str = "reverse_recon_result",
+    source: str = "reverse_reconciliation",
 ) -> Dict[str, Any]:
     """
-    Handle the post-scoring result from klk_bank reverse reconciliation.
+    Handle reverse reconciliation scoring entirely in the backend using
+    BulkMatchingSuggestionEngine (deterministic, no LLM, no klk_bank).
 
-    Replicates the logic previously in Router (new_router.py:5877-6058):
-    - Parse scoring results
-    - Collect matched items
-    - Build banker payload (grouped by bank_account_id)
-    - Dispatch via handle_job_process(bankbookeeper)
-    - Cleanup active_jobs
+    Replaces the old flow: backend → HTTP klk_bank → LLM scoring → Redis result → backend dispatch.
+    New flow: backend scores directly → auto-dispatch if HIGH confidence.
+
+    Triggered when Router/APbookeeper sends items to score against bank TX.
 
     Args:
         uid: Firebase user ID
-        payload: Contains 'response' (scoring result) and 'original_context'
-        company_data: Company context (mandate_path, collection_name)
+        payload: Contains 'items' (invoices/expenses to match), 'settings', etc.
+        company_data: Company context
         source: Source identifier
 
     Returns:
-        {success, message, ...}
+        {success, matched_count, dispatched_count, ...}
     """
-    response = payload.get("response", {})
-    original_context = payload.get("original_context", {})
-    request_id = response.get("request_id", "unknown")
     mandate_path = (
         company_data.get("mandate_path")
-        or original_context.get("mandates_path", "")
+        or payload.get("mandates_path", "")
     )
     collection_name = (
         company_data.get("collection_name")
-        or original_context.get("collection_name", "")
+        or payload.get("collection_name", "")
     )
-    client_uuid = (
-        company_data.get("client_uuid")
-        or original_context.get("client_uuid", "")
-    )
-    settings = original_context.get("settings", [])
-    automated_workflow = original_context.get("automated_workflow", True)
+    client_uuid = company_data.get("client_uuid") or payload.get("client_uuid", "")
+    items = payload.get("items", [])
+    settings = payload.get("settings", [])
+    request_id = payload.get("request_id") or str(uuid.uuid4())
 
     logger.info(
-        f"[JOB_ACTIONS] ═══════════════════════════════════════════════════════════"
+        f"[RECON_BACKEND] ═══════════════════════════════════════════════════════════"
     )
     logger.info(
-        f"[JOB_ACTIONS] handle_reverse_recon_result START - "
-        f"uid={uid} request_id={request_id} status={response.get('status')}"
+        f"[RECON_BACKEND] handle_reverse_recon_scoring_backend START - "
+        f"uid={uid} items={len(items)} source={source} request_id={request_id}"
     )
 
-    # ── Step 1: Early exit for non-actionable statuses ──
-    status = response.get("status", "unknown")
-    if status in ("no_match", "error", "no_transactions"):
-        logger.info(
-            f"[JOB_ACTIONS] Reverse recon result: {status} — no banker dispatch needed"
-        )
-        await _cleanup_reverse_recon_active_job(mandate_path, request_id)
-        return {
-            "success": True,
-            "request_id": request_id,
-            "status": status,
-            "message": f"Reverse recon result: {status} — no dispatch",
-        }
+    if not items:
+        logger.info("[RECON_BACKEND] No items to score — skipping")
+        return {"success": True, "request_id": request_id, "status": "no_items", "matched_count": 0}
 
-    # ── Step 2: Collect matched items from results ──
-    results_array = response.get("results", [])
-    matched_items = []
+    try:
+        from ..firebase_cache_handlers import FirebaseCacheHandlers
+        from ..bulk_matching_engine import BulkMatchingSuggestionEngine, BulkMatchingConfig
+        from ..fx_rate_service import get_fx_rates_cached, normalize_currency
+        from collections import Counter
 
-    for result in results_array:
-        item_id = result.get("item_id")
-        item_status = result.get("status", "unknown")
-        match_data = result.get("match_data", {})
-        original_item = result.get("original_item", {})
+        handlers = FirebaseCacheHandlers()
+        config = BulkMatchingConfig()
 
-        if item_status == "matched" and match_data:
-            transaction_id = match_data.get("transaction_id")
-            if transaction_id:
-                matched_items.append({
-                    "item_id": item_id,
-                    "original_item": original_item,
-                    "match_data": match_data,
-                    "transaction_id": transaction_id,
-                    "decision_zone": result.get("decision_zone"),
-                })
+        # 1. Load bank TX from cache (or ERP if no cache)
+        from ..cache.unified_cache_manager import get_firebase_cache_manager
+        cache = get_firebase_cache_manager()
+        cached = await cache.get_cached_data(uid, collection_name, "bank", "transactions")
 
-    logger.info(
-        f"[JOB_ACTIONS] Reverse recon: {len(matched_items)}/{len(results_array)} items matched"
-    )
+        if not cached or not cached.get("to_process"):
+            # Try loading from ERP
+            logger.info("[RECON_BACKEND] No bank cache — loading from ERP")
+            bank_result = await handlers.get_bank_transactions(
+                user_id=uid, company_id=collection_name,
+                mandate_path=mandate_path, skip_suggestions=True,
+            )
+            cached = bank_result.get("data", {})
 
-    if not matched_items:
-        logger.info("[JOB_ACTIONS] No matched items — skipping banker dispatch")
-        await _cleanup_reverse_recon_active_job(mandate_path, request_id)
-        return {
-            "success": True,
-            "request_id": request_id,
-            "status": "no_match",
-            "message": "No matched items in results",
-        }
-
-    # ── Step 3: Check automated_workflow ──
-    if not automated_workflow:
-        logger.info(
-            f"[JOB_ACTIONS] automated_workflow=False — {len(matched_items)} matched items, "
-            f"awaiting manual action"
-        )
-        await _cleanup_reverse_recon_active_job(mandate_path, request_id)
-        return {
-            "success": True,
-            "request_id": request_id,
-            "status": "awaiting_manual",
-            "matched_count": len(matched_items),
-            "message": "automated_workflow disabled — no auto dispatch",
-        }
-
-    # ── Step 4: Fetch banker params from Firebase ──
-    banker_params = await _get_banker_workflow_params(mandate_path)
-    banker_approval_required = banker_params["banker_approval_required"]
-    banker_approval_thresholdworkflow = banker_params["banker_approval_thresholdworkflow"]
-
-    # ── Step 5: Group by bank_account_id ──
-    bank_accounts_dict: Dict[str, Dict] = {}
-    first_journal_name = None
-
-    for item in matched_items:
-        match_data = item["match_data"]
-        original = item.get("original_item", {})
-
-        bank_account_id = str(match_data.get("bank_account_id", ""))
-        journal_name = match_data.get("journal_name", "")
-
-        if first_journal_name is None and journal_name:
-            first_journal_name = journal_name
-
-        if bank_account_id not in bank_accounts_dict:
-            bank_accounts_dict[bank_account_id] = {
-                "bank_account": journal_name,
-                "bank_account_id": bank_account_id,
-                "transactions": [],
-                "banker_approval_required": banker_approval_required,
-                "banker_approval_thresholdworkflow": banker_approval_thresholdworkflow,
+        to_process_list = cached.get("to_process", [])
+        if not to_process_list:
+            logger.info("[RECON_BACKEND] No to_process bank TX — nothing to match")
+            return {
+                "success": True, "request_id": request_id,
+                "status": "no_transactions", "matched_count": 0,
             }
 
-        # ── Build instructions_report ──
-        match_score = match_data.get("match_score", 0)
-        agent_confidence = match_data.get("agent_confidence", 0)
-        decision_zone = item.get("decision_zone", "unknown")
-        justification = match_data.get("justification", "")
-        supplier_name = original.get("supplier_name") or "N/A"
-        concern = original.get("concern") or "N/A"
-        currency = original.get("currency") or "N/A"
-        amount = match_data.get("amount") or original.get("amount") or 0
+        # 2. FX rates
+        tx_currencies = {normalize_currency(tx.get("currency", "CHF")) for tx in to_process_list}
+        item_currencies = {normalize_currency(it.get("currency", "CHF")) for it in items}
+        all_currencies = tx_currencies | item_currencies
+        currency_counts = Counter(
+            normalize_currency(tx.get("currency", "CHF")) for tx in to_process_list
+        )
+        base_currency = currency_counts.most_common(1)[0][0] if currency_counts else "CHF"
+        target_currencies = all_currencies - {base_currency}
 
-        score_pct = f"{match_score:.2%}" if isinstance(match_score, (int, float)) else str(match_score)
-        instructions_report = (
-            f"RAPPORT DE RECONCILIATION INVERSE\n"
-            f"Score de matching: {score_pct} | Confiance agent: {agent_confidence}/10 | Zone: {decision_zone}\n"
-            f"Fournisseur: {supplier_name} | Objet: {concern} | Montant: {amount} {currency}\n"
-            f"Justification: {justification or 'Aucune'}"
+        tx_dates = [tx.get("date", "") for tx in to_process_list if tx.get("date")]
+        date_from = min(tx_dates) if tx_dates else None
+        date_to = max(tx_dates) if tx_dates else None
+
+        try:
+            fx_rates = await get_fx_rates_cached(base_currency, target_currencies, date_from, date_to)
+        except Exception:
+            fx_rates = {}
+
+        engine = BulkMatchingSuggestionEngine(config, fx_rates)
+
+        # 3. Score each item against all TX
+        all_matched: List[Dict[str, Any]] = []
+
+        for item in items:
+            item_type = item.get("item_type", "invoice")
+            candidate = _normalize_reverse_recon_item(item, item_type)
+            if not candidate or not float(candidate.get("amount", 0) or 0):
+                continue
+
+            updated_txs = engine.update_suggestions_with_candidate(
+                to_process_list, candidate, item_type
+            )
+
+            # Collect HIGH confidence matches for auto-dispatch
+            for tx in updated_txs:
+                suggestions = tx.get("match_suggestions", {})
+                top = suggestions.get("top_matches", [])
+                if top and top[0].get("score", 0) >= config.high_confidence:
+                    # Check that top match corresponds to this candidate
+                    top_match = top[0]
+                    top_internal = top_match.get("_internal_id") or top_match.get("id", "")
+                    cand_id = candidate.get("id", "")
+                    if str(top_internal) == str(cand_id) or top_match.get("_job_id") == candidate.get("job_id"):
+                        all_matched.append({
+                            "tx": tx,
+                            "suggestion": top_match,
+                            "original_item": item,
+                        })
+
+        logger.info(
+            f"[RECON_BACKEND] Scoring done: {len(all_matched)} HIGH matches "
+            f"from {len(items)} items against {len(to_process_list)} TX"
         )
 
-        # ── Build transaction dict ──
-        transaction = {
-            "transaction_id": str(item.get("transaction_id", "")),
-            "transaction_name": match_data.get("transaction_name", ""),
-            "date": match_data.get("date") or original.get("date", ""),
-            "ref": original.get("job_id", "") or item.get("item_id", ""),
-            "amount": amount,
-            "currency_name": currency,
-            "partner_name": supplier_name,
-            "transaction_type": "",
-            "payment_ref": concern,
-            "journal_name": journal_name,
-            "journal_id": bank_account_id,
-            "instructions": instructions_report,
-            "pending": False,
-            "status": "in_queue",
+        # 4. Update bank cache with new suggestions
+        try:
+            cached["to_process"] = to_process_list
+            await cache.set_cached_data(
+                uid, collection_name, "bank", "transactions",
+                cached, ttl_seconds=2400,
+            )
+        except Exception as cache_err:
+            logger.warning(f"[RECON_BACKEND] Cache write failed: {cache_err}")
+
+        # 5. Auto-dispatch HIGH confidence matches
+        dispatched_count = 0
+        if all_matched:
+            banker_params = await _get_banker_workflow_params(mandate_path)
+
+            # Group by bank_account_id
+            bank_accounts_dict: Dict[str, Dict] = {}
+            first_journal_name = None
+
+            for entry in all_matched:
+                tx = entry["tx"]
+                suggestion = entry["suggestion"]
+                original = entry.get("original_item", {})
+
+                bank_account_id = str(tx.get("account_id", tx.get("journal_id", "")))
+                journal_name = tx.get("account_name", tx.get("journal_name", ""))
+
+                if first_journal_name is None and journal_name:
+                    first_journal_name = journal_name
+
+                if bank_account_id not in bank_accounts_dict:
+                    bank_accounts_dict[bank_account_id] = {
+                        "bank_account": journal_name,
+                        "bank_account_id": bank_account_id,
+                        "transactions": [],
+                        "banker_approval_required": banker_params["banker_approval_required"],
+                        "banker_approval_thresholdworkflow": banker_params["banker_approval_thresholdworkflow"],
+                    }
+
+                # Build reconciliation_data per contrat klk_bank
+                from ..bulk_matching_engine import build_reconciliation_data
+                recon_data = build_reconciliation_data(suggestion)
+
+                transaction = {
+                    "transaction_id": str(tx.get("id", "")),
+                    "instruction": None,
+                    "pending": False,
+                    "reconciliation_data": recon_data,
+                }
+                bank_accounts_dict[bank_account_id]["transactions"].append(transaction)
+
+            # Build and dispatch banker batch
+            banker_batch_id = f"bank_batch_auto_{uuid.uuid4().hex[:10]}"
+            jobs_data = list(bank_accounts_dict.values())
+
+            communication_mode = "pinnokio"
+            log_communication_mode = "pinnokio"
+            dms_system = "google_drive"
+            for s in settings:
+                if isinstance(s, dict):
+                    if "communication_mode" in s:
+                        communication_mode = s["communication_mode"]
+                    if "log_communication_mode" in s:
+                        log_communication_mode = s["log_communication_mode"]
+                    if "dms_system" in s:
+                        dms_system = s["dms_system"]
+
+            banker_payload = {
+                "collection_name": collection_name,
+                "batch_id": banker_batch_id,
+                "journal_name": first_journal_name or "",
+                "jobs_data": jobs_data,
+                "start_instructions": "",
+                "settings": [
+                    {"communication_mode": communication_mode},
+                    {"log_communication_mode": log_communication_mode},
+                    {"dms_system": dms_system},
+                ],
+                "client_uuid": client_uuid,
+                "user_id": uid,
+                "mandates_path": mandate_path,
+            }
+
+            logger.info(
+                f"[RECON_BACKEND] Dispatching banker batch {banker_batch_id} "
+                f"({len(all_matched)} TX across {len(bank_accounts_dict)} accounts)"
+            )
+
+            try:
+                dispatch_result = await handle_job_process(
+                    uid=uid,
+                    job_type="bankbookeeper",
+                    payload=banker_payload,
+                    company_data={
+                        "mandate_path": mandate_path,
+                        "collection_name": collection_name,
+                        "company_id": collection_name,
+                        "client_uuid": client_uuid,
+                    },
+                    source="auto_recon_backend_dispatch",
+                )
+                if dispatch_result.get("success"):
+                    dispatched_count = len(all_matched)
+                    logger.info(f"[RECON_BACKEND] Banker batch {banker_batch_id} dispatched OK")
+                else:
+                    logger.error(f"[RECON_BACKEND] Dispatch failed: {dispatch_result.get('error')}")
+            except Exception as e:
+                logger.error(f"[RECON_BACKEND] Dispatch exception: {e}", exc_info=True)
+
+        # 6. Cleanup reverse recon active_jobs (if registered by caller)
+        try:
+            await _cleanup_reverse_recon_active_job(mandate_path, request_id)
+        except Exception:
+            pass
+
+        return {
+            "success": True,
+            "request_id": request_id,
+            "status": "scored" if not all_matched else "dispatched",
+            "items_scored": len(items),
+            "matched_count": len(all_matched),
+            "dispatched_count": dispatched_count,
+            "message": (
+                f"{len(items)} items scored, {len(all_matched)} HIGH matches, "
+                f"{dispatched_count} dispatched to banker"
+            ),
         }
 
-        bank_accounts_dict[bank_account_id]["transactions"].append(transaction)
-
-    # ── Step 6: Build banker batch payload ──
-    banker_batch_id = f"bank_batch_{uuid.uuid4().hex[:10]}"
-    jobs_data = list(bank_accounts_dict.values())
-
-    # Extract communication settings from the original Router settings
-    communication_mode = "pinnokio"
-    log_communication_mode = "pinnokio"
-    dms_system = "google_drive"
-    for s in settings:
-        if isinstance(s, dict):
-            if "communication_mode" in s:
-                communication_mode = s["communication_mode"]
-            if "log_communication_mode" in s:
-                log_communication_mode = s["log_communication_mode"]
-            if "dms_system" in s:
-                dms_system = s["dms_system"]
-
-    banker_batch_payload = {
-        "collection_name": collection_name,
-        "batch_id": banker_batch_id,
-        "journal_name": first_journal_name or "",
-        "jobs_data": jobs_data,
-        "start_instructions": "",
-        "settings": [
-            {"communication_mode": communication_mode},
-            {"log_communication_mode": log_communication_mode},
-            {"dms_system": dms_system},
-        ],
-        "client_uuid": client_uuid,
-        "user_id": uid,
-        "mandates_path": mandate_path,
-    }
-
-    logger.info(
-        f"[JOB_ACTIONS] → Dispatching banker batch {banker_batch_id} "
-        f"({len(matched_items)} transactions across {len(bank_accounts_dict)} accounts)"
-    )
-
-    # ── Step 7: Dispatch via handle_job_process ──
-    try:
-        dispatch_result = await handle_job_process(
-            uid=uid,
-            job_type="bankbookeeper",
-            payload=banker_batch_payload,
-            company_data={
-                "mandate_path": mandate_path,
-                "collection_name": collection_name,
-                "company_id": collection_name,
-                "client_uuid": client_uuid,
-            },
-            source="reverse_recon_banker_dispatch",
-        )
-
-        if dispatch_result.get("success"):
-            logger.info(
-                f"[JOB_ACTIONS] handle_reverse_recon_result SUCCESS — "
-                f"banker batch {banker_batch_id} dispatched"
-            )
-        else:
-            logger.error(
-                f"[JOB_ACTIONS] handle_reverse_recon_result — banker dispatch FAILED: "
-                f"{dispatch_result.get('error', 'unknown')}"
-            )
-    except Exception as dispatch_err:
+    except Exception as e:
         logger.error(
-            f"[JOB_ACTIONS] handle_reverse_recon_result — banker dispatch exception: {dispatch_err}",
+            f"[RECON_BACKEND] handle_reverse_recon_scoring_backend FAILED: {e}",
             exc_info=True,
         )
-        dispatch_result = {"success": False, "error": str(dispatch_err)}
+        return {
+            "success": False,
+            "request_id": request_id,
+            "error": str(e),
+        }
 
-    # ── Step 8: Cleanup active_jobs ──
-    await _cleanup_reverse_recon_active_job(mandate_path, request_id)
 
-    return {
-        "success": dispatch_result.get("success", False),
-        "request_id": request_id,
-        "banker_batch_id": banker_batch_id,
-        "matched_count": len(matched_items),
-        "status": "dispatched" if dispatch_result.get("success") else "dispatch_failed",
-        "message": (
-            f"{len(matched_items)} matched item(s) dispatched to banker"
-            if dispatch_result.get("success")
-            else f"Banker dispatch failed: {dispatch_result.get('error', 'unknown')}"
-        ),
-    }
+def _normalize_reverse_recon_item(item: Dict, item_type: str) -> Dict:
+    """
+    Normalize a reverse recon item to the format expected by BulkMatchingEngine.
+
+    CRITICAL: For invoices from klk_accountant, "id" contains the Odoo move_id
+    (the real ERP ID). This MUST be preserved as the primary "id" field so that
+    build_reconciliation_data() can convert it to int for odoo_move_id.
+    The internal job_id goes in a separate "job_id" field.
+    """
+    if item_type == "invoice":
+        # Priority: item["id"] = Odoo move_id (from klk_accountant)
+        # Fallback: item_id, then job_id (internal — won't work for deterministic)
+        primary_id = item.get("id", "") or item.get("item_id", "") or item.get("job_id", "")
+        return {
+            "amount": float(item.get("amount", 0) or 0),
+            "currency": item.get("currency", "CHF"),
+            "invoice_date": item.get("date", "") or item.get("invoice_date", ""),
+            "date": item.get("date", "") or item.get("invoice_date", ""),
+            "partner_name": item.get("supplier_name", "") or item.get("partner_name", ""),
+            "ref": item.get("ref", "") or item.get("reference", "") or item.get("payment_reference", "") or item.get("name", ""),
+            "name": item.get("name", "") or item.get("concern", ""),
+            "payment_reference": item.get("payment_reference", ""),
+            "display_name": item.get("supplier_name", "") or item.get("partner_name", ""),
+            "display_ref": item.get("name", "") or item.get("concern", ""),
+            "display_amount": float(item.get("amount", 0) or 0),
+            "display_date": item.get("date", "") or item.get("invoice_date", ""),
+            "id": primary_id,
+            "job_id": item.get("job_id", ""),
+            "file_id": item.get("file_id", ""),
+        }
+    else:  # expense
+        return {
+            "amount": float(item.get("amount", 0) or 0),
+            "currency": item.get("currency", "CHF"),
+            "expense_date": item.get("date", "") or item.get("expense_date", ""),
+            "date": item.get("date", "") or item.get("expense_date", ""),
+            "description": item.get("concern", "") or item.get("description", ""),
+            "label": item.get("concern", "") or item.get("description", ""),
+            "employee_name": item.get("supplier_name", "") or item.get("employee_name", ""),
+            "display_name": item.get("concern", "") or item.get("description", ""),
+            "display_ref": item.get("supplier_name", ""),
+            "display_amount": float(item.get("amount", 0) or 0),
+            "display_date": item.get("date", "") or item.get("expense_date", ""),
+            "id": item.get("item_id", "") or item.get("job_id", "") or item.get("id", ""),
+            "job_id": item.get("job_id", ""),
+        }
 
 
 # ============================================
@@ -3302,8 +3194,7 @@ __all__ = [
     "handle_job_stop",
     "handle_job_restart",
     "handle_job_delete",
-    "handle_reverse_reconciliation_dispatch",
-    "handle_reverse_recon_result",
+    "handle_reverse_recon_scoring_backend",
     "create_and_publish_notification",
     "JOB_TYPE_CONFIG",
 ]

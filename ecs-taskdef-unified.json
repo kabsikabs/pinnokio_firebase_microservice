@@ -45,7 +45,10 @@
         {"name": "OPENAI_PINNOKIO_SECRET", "value": "openai_pinnokio"},
         {"name": "PINNOKIO_ENVIRONMENT", "value": "PROD"},
         {"name": "PINNOKIO_AWS_URL", "value": "http://klk-load-balancer-http-https-435479360.us-east-1.elb.amazonaws.com"},
-        {"name": "PINNOKIO_SOURCE", "value": "aws"}
+        {"name": "PINNOKIO_SOURCE", "value": "aws"},
+        {"name": "COLLECT_TELEGRAM_ENABLED", "value": "true"},
+        {"name": "DISPATCH_TELEGRAM_ENABLED", "value": "true"},
+        {"name": "PUBSUB_TRANSPORT", "value": "pubsub"}
       ],
       "logConfiguration": {
         "logDriver": "awslogs",

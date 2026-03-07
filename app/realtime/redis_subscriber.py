@@ -1185,6 +1185,218 @@ class RedisSubscriber:
             )
         return added_items
 
+    # ── Bank scoring after Router routes to AP/EX ─────────────────
+    async def _trigger_bank_scoring_after_routing(
+        self,
+        uid: str,
+        company_id: str,
+        mandate_path: str,
+        cross_domain_items: List[Tuple[str, dict]],
+    ) -> None:
+        """
+        After Router routes an item to expenses, score it against all bank TX
+        to_process. If score >= HIGH (0.85), auto-dispatch reconciliation in
+        Assisted mode (expense_entry).
+
+        INVOICES are SKIPPED here — they must first be posted in Odoo by
+        klk_accountant, which then sends a reverse_reconciliation request
+        with the real odoo_move_id for Deterministic mode.
+
+        Runs as fire-and-forget task (non-blocking).
+        """
+        try:
+            from app.firebase_cache_handlers import FirebaseCacheHandlers
+
+            handlers = FirebaseCacheHandlers()
+
+            for target_domain, item in cross_domain_items:
+                # Only score expenses at cross-domain time.
+                # Invoices: scored later after klk_accountant posts in Odoo.
+                if target_domain == "expenses":
+                    candidate_type = "expense"
+                    candidate = self._normalize_candidate_for_scoring(item, "expense")
+                else:
+                    logger.info(
+                        "[BANK_SCORING_ROUTING] Skipping %s — will be scored after ERP posting",
+                        target_domain,
+                    )
+                    continue
+
+                if not candidate or not float(candidate.get("amount", 0) or 0):
+                    continue
+
+                # Score against bank TX
+                result = await handlers.trigger_single_candidate_scoring(
+                    user_id=uid,
+                    company_id=company_id,
+                    mandate_path=mandate_path,
+                    candidate=candidate,
+                    candidate_type=candidate_type,
+                )
+
+                updated_count = result.get("updated_count", 0)
+                auto_dispatch_list = result.get("auto_dispatch", [])
+
+                # WSS push for updated suggestions (non-blocking)
+                if updated_count > 0:
+                    try:
+                        await publish_business_event(
+                            uid=uid,
+                            company_id=company_id,
+                            domain="bank",
+                            event_type="bank.suggestions_updated",
+                            payload={
+                                "action": "suggestions_updated",
+                                "updated_count": updated_count,
+                                "trigger": "routing_completed:expense",
+                            },
+                        )
+                    except Exception:
+                        pass  # non-blocking
+
+                # Auto-dispatch for HIGH confidence matches (Assisted mode for expenses)
+                if auto_dispatch_list:
+                    await self._auto_dispatch_bank_reconciliation(
+                        uid=uid,
+                        company_id=company_id,
+                        mandate_path=mandate_path,
+                        auto_dispatch_list=auto_dispatch_list,
+                    )
+
+        except Exception as e:
+            logger.warning(
+                "[BANK_SCORING_ROUTING] Failed (non-blocking): uid=%s error=%s",
+                uid, str(e),
+            )
+
+    @staticmethod
+    def _normalize_candidate_for_scoring(item: dict, candidate_type: str) -> dict:
+        """Normalize a cross-domain item to the format expected by BulkMatchingEngine."""
+        if candidate_type == "invoice":
+            return {
+                "amount": float(item.get("amount", 0) or 0),
+                "currency": item.get("currency", "CHF"),
+                "invoice_date": item.get("date", ""),
+                "date": item.get("date", ""),
+                "partner_name": item.get("supplier", ""),
+                "ref": item.get("file_name", ""),
+                "name": item.get("file_name", ""),
+                "display_name": item.get("supplier", "") or item.get("file_name", ""),
+                "display_ref": item.get("file_name", ""),
+                "display_amount": float(item.get("amount", 0) or 0),
+                "display_date": item.get("date", ""),
+                "id": item.get("job_id", ""),
+                "job_id": item.get("job_id", ""),
+                "file_id": item.get("file_id", ""),
+            }
+        else:  # expense
+            return {
+                "amount": float(item.get("amount", 0) or 0),
+                "currency": item.get("currency", "CHF"),
+                "expense_date": item.get("date", ""),
+                "date": item.get("date", ""),
+                "description": item.get("description", "") or item.get("category", ""),
+                "label": item.get("description", "") or item.get("category", ""),
+                "employee_name": item.get("supplier", ""),
+                "display_name": item.get("description", "") or item.get("supplier", ""),
+                "display_ref": item.get("supplier", ""),
+                "display_amount": float(item.get("amount", 0) or 0),
+                "display_date": item.get("date", ""),
+                "id": item.get("job_id", "") or item.get("expense_id", ""),
+                "job_id": item.get("job_id", ""),
+            }
+
+    async def _auto_dispatch_bank_reconciliation(
+        self,
+        uid: str,
+        company_id: str,
+        mandate_path: str,
+        auto_dispatch_list: List[dict],
+    ) -> None:
+        """
+        Auto-dispatch reconciliation for HIGH confidence matches.
+        Builds banker payload and dispatches via handle_job_process.
+        """
+        import uuid as uuid_mod
+        try:
+            from app.wrappers.job_actions_handler import (
+                handle_job_process,
+                _get_banker_workflow_params,
+            )
+            from app.bulk_matching_engine import build_reconciliation_data
+
+            banker_params = await _get_banker_workflow_params(mandate_path)
+
+            # Group by bank_account_id (from suggestion)
+            bank_accounts_dict: dict = {}
+            for entry in auto_dispatch_list:
+                tx = entry["tx"]
+                suggestion = entry["suggestion"]
+                bank_account_id = str(tx.get("account_id", tx.get("journal_id", "")))
+                journal_name = tx.get("account_name", tx.get("journal_name", ""))
+
+                if bank_account_id not in bank_accounts_dict:
+                    bank_accounts_dict[bank_account_id] = {
+                        "bank_account": journal_name,
+                        "bank_account_id": bank_account_id,
+                        "transactions": [],
+                        "banker_approval_required": banker_params["banker_approval_required"],
+                        "banker_approval_thresholdworkflow": banker_params["banker_approval_thresholdworkflow"],
+                    }
+
+                # Build reconciliation_data per contrat klk_bank
+                recon_data = build_reconciliation_data(suggestion)
+
+                transaction = {
+                    "transaction_id": str(tx.get("id", "")),
+                    "instruction": None,
+                    "pending": False,
+                    "reconciliation_data": recon_data,
+                }
+                bank_accounts_dict[bank_account_id]["transactions"].append(transaction)
+
+            batch_id = f"bank_batch_auto_{uuid_mod.uuid4().hex[:10]}"
+            jobs_data = list(bank_accounts_dict.values())
+
+            payload = {
+                "collection_name": company_id,
+                "batch_id": batch_id,
+                "journal_name": next(iter(bank_accounts_dict.values()), {}).get("bank_account", ""),
+                "jobs_data": jobs_data,
+                "start_instructions": "",
+                "settings": [
+                    {"communication_mode": "pinnokio"},
+                    {"log_communication_mode": "pinnokio"},
+                ],
+                "user_id": uid,
+                "mandates_path": mandate_path,
+            }
+
+            dispatch_result = await handle_job_process(
+                uid=uid,
+                job_type="bankbookeeper",
+                payload=payload,
+                company_data={
+                    "mandate_path": mandate_path,
+                    "collection_name": company_id,
+                    "company_id": company_id,
+                },
+                source="auto_recon_scoring_dispatch",
+            )
+
+            if dispatch_result.get("success"):
+                logger.info(
+                    "[AUTO_RECON] Dispatched banker batch %s — %d TX across %d accounts",
+                    batch_id, sum(len(a["transactions"]) for a in jobs_data), len(jobs_data),
+                )
+            else:
+                logger.warning(
+                    "[AUTO_RECON] Dispatch failed: %s", dispatch_result.get("error", "unknown")
+                )
+
+        except Exception as e:
+            logger.error("[AUTO_RECON] Failed: %s", str(e), exc_info=True)
+
     @staticmethod
     def _build_cross_domain_item(
         target_domain: str,
@@ -1239,6 +1451,14 @@ class RedisSubscriber:
             return "Banker"
         elif dept_lower in ("chat", "chat_usage", "chat_daily"):
             return "Chat"
+        elif dept_lower in ("exbookeeper", "ex_bookeeper"):
+            return "EXbookeeper"
+        elif dept_lower in ("hr", "payroll"):
+            return "HR"
+        elif dept_lower == "onboarding":
+            return "Onboarding"
+        elif dept_lower in ("reverse_reconciliation", "reversereconciliation"):
+            return "Reverse_reconciliation"
         return dept or "Other"
 
     def _update_billing_history_cache(
@@ -1677,17 +1897,29 @@ class RedisSubscriber:
                             if k in ap_sub and k not in item_data:
                                 item_data[k] = ap_sub[k]
 
+                elif domain in ("bank", "banking"):
+                    # Aplatir department_data.Bankbookeeper → top-level
+                    bk_sub = (
+                        dept_data.get("Bankbookeeper", {})
+                        or dept_data.get("banker", {})
+                        or dept_data.get("Banker", {})
+                    )
+                    if isinstance(bk_sub, dict) and bk_sub:
+                        _BANK_FLAT_KEYS = (
+                            "step_id", "step_label", "result_code",
+                            "reconciliation_details",
+                        )
+                        for k in _BANK_FLAT_KEYS:
+                            if k in bk_sub and k not in item_data:
+                                item_data[k] = bk_sub[k]
+                        logger.debug(
+                            "[REDIS_SUBSCRIBER] → Bankbookeeper flattened keys: %s",
+                            [k for k in _BANK_FLAT_KEYS if k in bk_sub],
+                        )
+
             # ── Generic lift: promote current_step to top-level ──
-            # Le billing_history (dashboard) gère déjà current_step via
-            # _update_billing_history_cache (ligne ~1268).  On utilise le
-            # même canal pour TOUTES les pages: on remonte current_step
-            # depuis item_data (data imbriqué) vers message_data (top-level)
-            # pour que le WS broadcast {domain}.task_manager_update l'inclue
-            # au niveau attendu par le frontend (payload.data.current_step).
             for _lift_key in ("current_step", "current_step_technical"):
-                # Source 1: déjà dans item_data (step-only updates)
                 _lift_val = item_data.get(_lift_key)
-                # Source 2: imbriqué dans department_data.APbookeeper (full updates)
                 if not _lift_val and domain == "invoices" and isinstance(dept_data, dict):
                     for _dept_variant in ("APbookeeper", "Apbookeeper", "apbookeeper"):
                         _ap = dept_data.get(_dept_variant) or {}
@@ -1697,6 +1929,15 @@ class RedisSubscriber:
                 if _lift_val:
                     item_data.setdefault(_lift_key, _lift_val)
                     message_data.setdefault(_lift_key, _lift_val)
+
+            # Aplatir les clés dot-path department_data.Bankbookeeper.* → top-level
+            if domain in ("bank", "banking"):
+                _DOT_PREFIX = "department_data.Bankbookeeper."
+                dot_keys_to_flatten = [k for k in item_data if isinstance(k, str) and k.startswith(_DOT_PREFIX)]
+                for dk in dot_keys_to_flatten:
+                    short_key = dk[len(_DOT_PREFIX):]
+                    if short_key and short_key not in item_data:
+                        item_data[short_key] = item_data[dk]
 
             self._update_business_cache_item(
                 uid=uid,
@@ -1727,6 +1968,18 @@ class RedisSubscriber:
                     job_id=job_id,
                     collection_path=message_data.get("collection_path", ""),
                 )
+
+                # Step 1-cross-scoring: Score new candidates against bank TX
+                if cross_domain_items:
+                    mandate_path = message_data.get("mandate_path", "")
+                    asyncio.create_task(
+                        self._trigger_bank_scoring_after_routing(
+                            uid=uid,
+                            company_id=company_id,
+                            mandate_path=mandate_path,
+                            cross_domain_items=cross_domain_items,
+                        )
+                    )
 
             # Étape 1a: Mise à jour active_jobs (suivi par-job)
             # Non-bloquant: met à jour jobs_status dans le document on_process

@@ -41,7 +41,10 @@
         {"name": "PINNOKIO_AWS_URL", "value": "http://klk-load-balancer-http-https-435479360.us-east-1.elb.amazonaws.com"},
         {"name": "PINNOKIO_SOURCE", "value": "aws"},
         {"name": "GOOGLE_AUTH_REDIRECT_LOCAL", "value": "https://app.pinnokioagent.com/google_auth_callback/"},
-        {"name": "GOOGLE_AUTH2_KEY", "value": "pinnokio_auth2"}
+        {"name": "GOOGLE_AUTH2_KEY", "value": "pinnokio_auth2"},
+        {"name": "COLLECT_TELEGRAM_ENABLED", "value": "true"},
+        {"name": "DISPATCH_TELEGRAM_ENABLED", "value": "true"},
+        {"name": "PUBSUB_TRANSPORT", "value": "pubsub"}
       ],
       "logConfiguration": {
         "logDriver": "awslogs",

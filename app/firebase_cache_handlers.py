@@ -422,6 +422,7 @@ class FirebaseCacheHandlers:
         bank_erp: str = None,
         mandate_path: str = None,  # Kept for backward compatibility
         force_refresh: bool = False,
+        skip_suggestions: bool = False,
     ) -> Dict[str, Any]:
         """
         Récupère les transactions bancaires avec réconciliation (ERP + Task Manager).
@@ -559,9 +560,14 @@ class FirebaseCacheHandlers:
                 banker = item if "transaction_id" in item else item.get("department_data", {}).get("Bankbookeeper", {}) or item.get("department_data", {}).get("banker", {}) or item.get("department_data", {}).get("Banker", {})
                 tx_id = str(banker.get("transaction_id") or item.get("task_id", ""))
 
+                # Extraire reconciliation_details et result_code depuis department_data
+                recon_details = banker.get("reconciliation_details")
+                result_code = banker.get("result_code", "")
+                step_label = banker.get("step_label", "")
+
                 if erp_tx:
                     amount = float(erp_tx.get("amount", 0) or 0)
-                    return {
+                    base = {
                         "id": tx_id,
                         "transaction_id": tx_id,
                         "account_id": str(banker.get("bank_account_id") or erp_tx.get("journal_id") or ""),
@@ -576,14 +582,14 @@ class FirebaseCacheHandlers:
                         "transaction_type": "credit" if amount >= 0 else "debit",
                         "status": item.get("status", status),
                         "batch_id": banker.get("batch_id", ""),
-                        "current_step": item.get("current_step", ""),
+                        "current_step": step_label or item.get("current_step", ""),
                         "job_id": item.get("task_id", ""),
                         "created_at": erp_tx.get("date", ""),
                         "updated_at": erp_tx.get("date", ""),
                     }
                 else:
                     amount = float(banker.get("txn_amount", 0) or 0)
-                    return {
+                    base = {
                         "id": tx_id,
                         "transaction_id": tx_id,
                         "account_id": str(banker.get("bank_account_id") or ""),
@@ -598,11 +604,18 @@ class FirebaseCacheHandlers:
                         "transaction_type": "credit" if amount >= 0 else "debit",
                         "status": item.get("status", status),
                         "batch_id": banker.get("batch_id", ""),
-                        "current_step": item.get("current_step", ""),
+                        "current_step": step_label or item.get("current_step", ""),
                         "job_id": item.get("task_id", ""),
                         "created_at": banker.get("transaction_date", ""),
                         "updated_at": banker.get("transaction_date", ""),
                     }
+
+                # Enrichir avec reconciliation_details et result_code si présents
+                if recon_details and isinstance(recon_details, dict):
+                    base["reconciliation_details"] = recon_details
+                if result_code:
+                    base["result_code"] = result_code
+                return base
 
             # Indexer les transactions ERP par ID pour recherche rapide
             erp_map = {str(tx.get("move_id") or tx.get("id")): tx for tx in erp_transactions}
@@ -671,6 +684,75 @@ class FirebaseCacheHandlers:
             # D. Ce qui reste dans erp_map = vraiment "À traiter"
             to_process_list = [_normalize_from_erp(tx) for tx in erp_map.values()]
 
+            # E. Enrichissement Bulk Matching Suggestions (non-bloquant)
+            if to_process_list and not skip_suggestions:
+                try:
+                    from .bulk_matching_engine import BulkMatchingSuggestionEngine, BulkMatchingConfig
+                    from .fx_rate_service import get_fx_rates_cached, normalize_currency
+
+                    # Collecter devises necessaires
+                    currencies = {normalize_currency(tx.get("currency", "CHF")) for tx in to_process_list}
+                    # Devise majoritaire = base
+                    from collections import Counter
+                    currency_counts = Counter(
+                        normalize_currency(tx.get("currency", "CHF")) for tx in to_process_list
+                    )
+                    base_currency = currency_counts.most_common(1)[0][0] if currency_counts else "CHF"
+                    target_currencies = currencies - {base_currency}
+
+                    # Date range from transactions
+                    tx_dates = [tx.get("date", "") for tx in to_process_list if tx.get("date")]
+                    date_from = min(tx_dates) if tx_dates else None
+                    date_to = max(tx_dates) if tx_dates else None
+
+                    # Fetch parallele: AP invoices + AR invoices + Expenses + FX rates
+                    ap_data, ar_data, exp_data, fx_data = await asyncio.gather(
+                        self._get_open_ap_for_matching(user_id, company_id, mandate_path),
+                        self._get_open_ar_for_matching(user_id, company_id, mandate_path),
+                        self._get_open_expenses_for_matching(user_id, company_id, mandate_path),
+                        get_fx_rates_cached(base_currency, target_currencies, date_from, date_to),
+                        return_exceptions=True,
+                    )
+
+                    ap_invoices = ap_data if not isinstance(ap_data, Exception) else []
+                    ar_invoices = ar_data if not isinstance(ar_data, Exception) else []
+                    expenses_list = exp_data if not isinstance(exp_data, Exception) else []
+                    fx_rates = fx_data if not isinstance(fx_data, Exception) else {}
+
+                    if isinstance(ap_data, Exception):
+                        logger.warning(f"[BANK] Bulk matching: AP fetch failed: {ap_data}")
+                    if isinstance(ar_data, Exception):
+                        logger.warning(f"[BANK] Bulk matching: AR fetch failed: {ar_data}")
+                    if isinstance(exp_data, Exception):
+                        logger.warning(f"[BANK] Bulk matching: Expenses fetch failed: {exp_data}")
+                    if isinstance(fx_data, Exception):
+                        logger.warning(f"[BANK] Bulk matching: FX rates failed: {fx_data}")
+
+                    # Score
+                    engine = BulkMatchingSuggestionEngine(BulkMatchingConfig(), fx_rates)
+                    suggestions = engine.compute_suggestions(
+                        to_process_list, ap_invoices, expenses_list, ar_invoices=ar_invoices
+                    )
+
+                    # Enrich
+                    enriched_count = 0
+                    for tx in to_process_list:
+                        s = suggestions.get(str(tx.get("id", "")))
+                        if s and (s.get("top_matches") or s.get("transfer_match")):
+                            tx["match_suggestions"] = s
+                            enriched_count += 1
+                        else:
+                            tx["match_suggestions"] = {
+                                "top_matches": [], "transfer_match": None, "scored_at": None
+                            }
+
+                    logger.info(
+                        f"[BANK] Bulk matching enriched {enriched_count}/{len(to_process_list)} "
+                        f"transactions (AP={len(ap_invoices)}, AR={len(ar_invoices)}, EXP={len(expenses_list)})"
+                    )
+                except Exception as e:
+                    logger.warning(f"[BANK] Bulk matching enrichment failed (non-blocking): {e}")
+
             # 5. Construction du résultat final (flat lists uniquement, pas de dict de batches)
             organized = {
                 "to_process": to_process_list,
@@ -708,6 +790,242 @@ class FirebaseCacheHandlers:
             import traceback
             traceback.print_exc()
             return {"data": {"to_process": [], "in_process": [], "pending": [], "processed": []}, "error": str(e)}
+
+    # ═══════════════════════════════════════════════════════════════
+    # BULK MATCHING HELPERS (used by get_bank_transactions)
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _get_open_ap_for_matching(
+        self, user_id: str, company_id: str, mandate_path: str
+    ) -> List[Dict]:
+        """
+        Retourne les factures AP ouvertes depuis l'ERP (Odoo), normalisees pour le bulk matching.
+        Query: account.move / move_type=in_invoice / state=posted / payment_state in [not_paid, partial]
+        Ce sont les factures deja saisies et pas encore payees — les vrais candidats pour le rapprochement bancaire.
+        """
+        try:
+            import asyncio
+            from .erp_service import ERPService
+
+            # client_uuid = None lets ERPService resolve credentials from Firebase
+            client_uuid = None
+            candidates = await asyncio.to_thread(
+                ERPService.get_open_ap_invoices,
+                user_id,
+                company_id,
+                client_uuid,
+            )
+            logger.info(f"[BANK] Bulk matching: {len(candidates)} open AP invoices from ERP")
+            return candidates
+        except Exception as e:
+            logger.warning(f"[BANK] _get_open_ap_for_matching error: {e}")
+            traceback.print_exc()
+            return []
+
+    async def _get_open_ar_for_matching(
+        self, user_id: str, company_id: str, mandate_path: str
+    ) -> List[Dict]:
+        """
+        Retourne les factures clients (AR) ouvertes depuis l'ERP (Odoo), normalisees pour le bulk matching.
+        Query: account.move / move_type=out_invoice / state=posted / payment_state in [not_paid, partial]
+        """
+        try:
+            import asyncio
+            from .erp_service import ERPService
+
+            client_uuid = None
+            candidates = await asyncio.to_thread(
+                ERPService.get_open_ar_invoices,
+                user_id,
+                company_id,
+                client_uuid,
+            )
+            logger.info(f"[BANK] Bulk matching: {len(candidates)} open AR invoices from ERP")
+            return candidates
+        except Exception as e:
+            logger.warning(f"[BANK] _get_open_ar_for_matching error: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+    async def _get_open_expenses_for_matching(
+        self, user_id: str, company_id: str, mandate_path: str
+    ) -> List[Dict]:
+        """
+        Retourne les expenses ouvertes, normalisees pour le bulk matching.
+        Deplie department_data.EXbookeeper vers des champs plats.
+        """
+        try:
+            result = await self.get_expenses(
+                user_id=user_id,
+                company_id=company_id,
+                mandate_path=mandate_path,
+            )
+            data = result.get("data", [])
+
+            raw_items = []
+            if isinstance(data, list):
+                raw_items = [
+                    item for item in data
+                    if item.get("status", "").lower() not in ("completed", "processed", "closed")
+                ]
+            elif isinstance(data, dict):
+                for key in ("to_process", "in_process", "pending"):
+                    items = data.get(key, [])
+                    if isinstance(items, list):
+                        raw_items.extend(items)
+
+            # Normaliser: extraire les champs metier depuis department_data
+            candidates = []
+            for item in raw_items:
+                dept = item.get("department_data", {})
+                ex = dept.get("EXbookeeper", {}) or dept.get("exbookeeper", {})
+
+                amount = float(
+                    ex.get("amount")
+                    or item.get("amount")
+                    or 0
+                )
+                if amount == 0:
+                    continue  # Pas de montant = pas de candidat
+
+                supplier = ex.get("supplier") or item.get("supplier_name") or ""
+                concern = ex.get("concern") or item.get("description") or ""
+
+                candidates.append({
+                    # Champs pour le scoring
+                    "amount": amount,
+                    "currency": ex.get("currency") or item.get("currency") or "CHF",
+                    "description": concern,
+                    "label": concern,
+                    "employee_name": supplier,
+                    "date": ex.get("date") or item.get("date") or "",
+                    "expense_date": ex.get("date") or item.get("date") or "",
+                    # Champs d'affichage (pour le badge frontend)
+                    "display_name": concern or supplier or item.get("file_name") or "",
+                    "display_ref": supplier,
+                    "display_amount": amount,
+                    "display_date": ex.get("date") or item.get("date") or "",
+                    # ID technique (cache pour le payload)
+                    "id": item.get("id") or item.get("job_id") or item.get("expense_id") or "",
+                    "job_id": item.get("job_id") or "",
+                })
+
+            return candidates
+        except Exception as e:
+            logger.warning(f"[BANK] _get_open_expenses_for_matching error: {e}")
+            return []
+
+    # ═══════════════════════════════════════════════════════════════
+    # SINGLE-CANDIDATE SCORING (post Router/AP completion)
+    # ═══════════════════════════════════════════════════════════════
+
+    async def trigger_single_candidate_scoring(
+        self,
+        user_id: str,
+        company_id: str,
+        mandate_path: str,
+        candidate: Dict,
+        candidate_type: str,
+    ) -> Dict:
+        """
+        Score a single new invoice/expense against all to_process bank TX.
+        Updates the cache in-place and returns auto-dispatch candidates (score >= HIGH).
+
+        Args:
+            candidate: Normalized candidate dict (amount, currency, date, etc.)
+            candidate_type: "invoice" or "expense"
+
+        Returns:
+            {
+                "updated_count": int,
+                "auto_dispatch": [{"tx": ..., "suggestion": ...}],
+            }
+        """
+        import asyncio
+        from .bulk_matching_engine import BulkMatchingSuggestionEngine, BulkMatchingConfig
+        from .fx_rate_service import get_fx_rates_cached, normalize_currency
+        from .cache.unified_cache_manager import get_firebase_cache_manager
+        from .llm_service.redis_namespaces import build_business_key, get_ttl_for_domain
+        import json
+
+        config = BulkMatchingConfig()
+        result = {"updated_count": 0, "auto_dispatch": []}
+
+        try:
+            # 1. Read bank cache from Redis
+            cache = get_firebase_cache_manager()
+            cached = await cache.get_cached_data(user_id, company_id, "bank", "transactions")
+            if not cached:
+                logger.info("[SINGLE_SCORING] No bank cache found — skipping")
+                return result
+
+            to_process_list = cached.get("to_process", [])
+            if not to_process_list:
+                logger.info("[SINGLE_SCORING] No to_process TX — skipping")
+                return result
+
+            # 2. Get FX rates
+            cand_currency = normalize_currency(candidate.get("currency", "CHF"))
+            tx_currencies = {normalize_currency(tx.get("currency", "CHF")) for tx in to_process_list}
+            all_currencies = tx_currencies | {cand_currency}
+            from collections import Counter
+            currency_counts = Counter(
+                normalize_currency(tx.get("currency", "CHF")) for tx in to_process_list
+            )
+            base_currency = currency_counts.most_common(1)[0][0] if currency_counts else "CHF"
+            target_currencies = all_currencies - {base_currency}
+
+            tx_dates = [tx.get("date", "") for tx in to_process_list if tx.get("date")]
+            date_from = min(tx_dates) if tx_dates else None
+            date_to = max(tx_dates) if tx_dates else None
+
+            try:
+                fx_rates = await get_fx_rates_cached(base_currency, target_currencies, date_from, date_to)
+            except Exception:
+                fx_rates = {}
+
+            # 3. Score single candidate against all TX
+            engine = BulkMatchingSuggestionEngine(config, fx_rates)
+            updated_txs = engine.update_suggestions_with_candidate(
+                to_process_list, candidate, candidate_type
+            )
+
+            if not updated_txs:
+                logger.info("[SINGLE_SCORING] No TX improved — skipping cache write")
+                return result
+
+            result["updated_count"] = len(updated_txs)
+
+            # 4. Collect auto-dispatch candidates (score >= high_confidence)
+            for tx in updated_txs:
+                suggestions = tx.get("match_suggestions", {})
+                top = suggestions.get("top_matches", [])
+                if top and top[0].get("score", 0) >= config.high_confidence:
+                    result["auto_dispatch"].append({
+                        "tx": tx,
+                        "suggestion": top[0],
+                    })
+
+            # 5. Write updated cache back to Redis
+            cached["to_process"] = to_process_list
+            await cache.set_cached_data(
+                user_id, company_id, "bank", "transactions",
+                cached, ttl_seconds=2400  # 40min
+            )
+
+            logger.info(
+                f"[SINGLE_SCORING] Updated {len(updated_txs)} TX suggestions, "
+                f"{len(result['auto_dispatch'])} auto-dispatch candidates "
+                f"(candidate_type={candidate_type})"
+            )
+
+        except Exception as e:
+            logger.warning(f"[SINGLE_SCORING] Failed (non-blocking): {e}")
+            import traceback
+            traceback.print_exc()
+
+        return result
 
     # ═══════════════════════════════════════════════════════════════
     # TASKS

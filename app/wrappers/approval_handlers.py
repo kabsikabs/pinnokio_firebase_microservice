@@ -388,9 +388,69 @@ class ApprovalHandlers:
         # Invoice mode - Saisie de facture complète
         if approval_type == "invoice":
             # Read from context_payload first (worker format), then flat (legacy)
-            invoice_details = ctx.get("invoice_details") or item.get("invoice_details", {})
+            invoice_details_raw = ctx.get("invoice_details") or item.get("invoice_details", {})
             accounting_lines = ctx.get("accounting_lines") or item.get("accounting_lines", [])
             invoice_totals = ctx.get("invoice_totals") or item.get("invoice_totals", {})
+
+            # Dropdowns — from dropdown_options first, then flat
+            available_suppliers = dropdown.get("suppliers") or item.get("available_suppliers", [])
+            available_accounts = dropdown.get("accounts") or item.get("available_accounts", [])
+            available_taxes = dropdown.get("taxes") or item.get("available_taxes", [])
+            available_currencies = dropdown.get("currencies") or item.get("available_currencies", [])
+
+            # --- Normalize Odoo field names → frontend field names ---
+            invoice_details = dict(invoice_details_raw)  # shallow copy
+
+            # ref → invoice_ref
+            if "ref" in invoice_details and "invoice_ref" not in invoice_details:
+                invoice_details["invoice_ref"] = invoice_details.pop("ref")
+            # date → accounting_date
+            if "date" in invoice_details and "accounting_date" not in invoice_details:
+                invoice_details["accounting_date"] = invoice_details.get("date")
+            # invoice_date_due → due_date
+            if "invoice_date_due" in invoice_details and "due_date" not in invoice_details:
+                invoice_details["due_date"] = invoice_details.pop("invoice_date_due")
+
+            # Resolve partner_name from dropdowns if missing
+            partner_id = invoice_details.get("partner_id")
+            if partner_id and not invoice_details.get("partner_name"):
+                for s in available_suppliers:
+                    if s.get("id") == partner_id or str(s.get("id")) == str(partner_id):
+                        invoice_details["partner_name"] = s.get("name", "")
+                        break
+
+            # Resolve currency_name from dropdowns if missing
+            currency_id = invoice_details.get("currency_id")
+            if currency_id and not invoice_details.get("currency_name"):
+                for c in available_currencies:
+                    if c.get("id") == currency_id or str(c.get("id")) == str(currency_id):
+                        invoice_details["currency_name"] = c.get("name", "")
+                        break
+
+            # --- Normalize accounting lines: resolve names from dropdowns ---
+            for line in accounting_lines:
+                # name → description
+                if "name" in line and "description" not in line:
+                    line["description"] = line.get("name")
+                # Resolve account_name/account_code from dropdowns if missing
+                acc_id = line.get("account_id")
+                if acc_id and not line.get("account_name"):
+                    for a in available_accounts:
+                        if a.get("id") == acc_id or str(a.get("id")) == str(acc_id):
+                            line["account_name"] = a.get("name", "")
+                            line["account_code"] = a.get("code", "")
+                            break
+                # Resolve tax_names from dropdowns if missing
+                tax_ids = line.get("tax_ids") or []
+                if tax_ids and not line.get("tax_names"):
+                    tax_names = []
+                    for tid in tax_ids:
+                        for t in available_taxes:
+                            if t.get("id") == tid or str(t.get("id")) == str(tid):
+                                tax_names.append(t.get("name", ""))
+                                break
+                    if tax_names:
+                        line["tax_names"] = tax_names
 
             # Compute totals if not provided
             if not invoice_totals and accounting_lines:
@@ -412,12 +472,6 @@ class ApprovalHandlers:
                     "expected_ttc": round(float(expected_ttc), 2) if expected_ttc else round(total_ttc, 2),
                     "is_balanced": abs(total_ttc - float(expected_ttc or total_ttc)) < 0.01,
                 }
-
-            # Dropdowns — from dropdown_options first, then flat
-            available_suppliers = dropdown.get("suppliers") or item.get("available_suppliers", [])
-            available_accounts = dropdown.get("accounts") or item.get("available_accounts", [])
-            available_taxes = dropdown.get("taxes") or item.get("available_taxes", [])
-            available_currencies = dropdown.get("currencies") or item.get("available_currencies", [])
 
             base.update({
                 "invoiceDetails": invoice_details,
@@ -442,10 +496,19 @@ class ApprovalHandlers:
 
         # Asset mode - Création d'immobilisation
         elif approval_type == "asset":
+            # Read from immobilisation_data container if present
+            immo = ctx.get("immobilisation_data", {})
             base.update({
-                "assetsToCreate": ctx.get("assets_to_create") or item.get("assets_to_create", []),
+                "assetsToCreate": immo.get("assets_to_create") or ctx.get("assets_to_create") or item.get("assets_to_create", []),
+                "expensesToPost": immo.get("expenses_to_post") or ctx.get("expenses_to_post") or item.get("expenses_to_post", []),
+                "assetInvoiceSummary": immo.get("invoice_summary") or ctx.get("invoice_summary") or item.get("asset_invoice_summary", {}),
                 "availableAssetModels": dropdown.get("asset_models") or item.get("available_asset_models", []),
+                "availableAssetAccounts": dropdown.get("asset_accounts") or dropdown.get("accounts") or item.get("available_asset_accounts", []),
+                "availableTaxes": dropdown.get("taxes") or item.get("available_taxes", []),
                 "assetsMeta": ctx.get("assets_meta") or item.get("assets_meta", {}),
+                # Pass invoice details for asset context (supplier info, dates)
+                "invoiceDetails": immo.get("invoice_details") or ctx.get("invoice_details") or item.get("invoice_details", {}),
+                "availableSuppliers": dropdown.get("suppliers") or item.get("available_suppliers", []),
             })
 
         return base

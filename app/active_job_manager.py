@@ -135,6 +135,13 @@ class ActiveJobManager:
                     if jid:
                         jobs_status[str(jid)] = "in_queue"
 
+        elif job_type == "reversereconciliation":
+            items = job_data.get("items", [])
+            for item in items:
+                jid = item.get("job_id") or item.get("item_id")
+                if jid:
+                    jobs_status[str(jid)] = "in_queue"
+
         return jobs_status
 
     # ─────────────────────────────────────────────
