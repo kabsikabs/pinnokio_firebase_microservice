@@ -1,24 +1,26 @@
-name: Deploy to ECS (pinnokio_microservice)
+name: Deploy firebase_microservice
 
-# DISABLED: auto-deploy disabled during development — re-enable when ready
-# on:
-#   push:
-#     branches: [ "master" ]
-#   workflow_dispatch:
 on:
-  workflow_dispatch:  # manual trigger only
+  push:
+    branches: [deploy/prod]
+    paths:
+      - 'app/**'
+      - 'Dockerfile'
+      - 'start.sh'
+      - 'requirements.txt'
+      - 'ecs-taskdef*.json'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
 
 env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: pinnokio_microservice
   ECS_CLUSTER: pinnokio_cluster
-  ECS_SERVICE: pinnokio_microservice
+  ECS_SERVICE: pinnokio_microservice_service
   ECS_TASK_FAMILY: pinnokio_microservice
   CONTAINER_NAME: pinnokio_microservice
   IMAGE_TAG: ${{ github.sha }}
   ECS_TG_ARN: arn:aws:elasticloadbalancing:us-east-1:654654322636:targetgroup/new-pinnokio-firebase-backend/6c7046f6f3969fee
-  # Optionnel: si vous souhaitez binder automatiquement le service à un TG IP:8090
-  # Fournir en secret GitHub: ECS_TG_ARN
 
 permissions:
   id-token: write
@@ -29,27 +31,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to Amazon ECR
-        id: login-ecr
+      - id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build, tag, and push image to ECR
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} .
-          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
-          echo "image=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT
+          docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest .
+          docker push --all-tags $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}
 
       - name: Render ECS task definition
         id: task-def
@@ -60,61 +58,20 @@ jobs:
           image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
           environment-variables: |
             GOOGLE_SERVICE_ACCOUNT_JSON_B64=${{ secrets.GCP_SECRET_B64 }}
-            RPC_IDEMP_DISABLE=${{ secrets.RPC_IDEMP_DISABLE }}
-            RPC_IDEMP_DISABLE_METHODS=${{ secrets.RPC_IDEMP_DISABLE_METHODS }}
-            RPC_IDEMP_TTL=${{ secrets.RPC_IDEMP_TTL }}
 
-      - name: Ensure ECS service exists (create if missing)
-        env:
-          SUBNET_IDS: ${{ secrets.ECS_SUBNET_IDS }} # comma-separated private subnets
-          SECURITY_GROUP_ID: ${{ secrets.ECS_SECURITY_GROUP_ID }}
-          TG_ARN: ${{ secrets.ECS_TG_ARN }}
+      - name: Ensure ECS service exists
         run: |
-          set -e
-          # fallback sur la variable d'environnement globale si le secret n'est pas fourni
-          if [ -z "$TG_ARN" ] && [ -n "$ECS_TG_ARN" ]; then TG_ARN="$ECS_TG_ARN"; fi
-          STATUS=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --query 'services[0].status' --output text || true)
-          if [ "$STATUS" = "ACTIVE" ]; then
-            echo "Service already exists"
-          else
-            echo "Creating ECS service $ECS_SERVICE in cluster $ECS_CLUSTER"
-            if [ -n "$TG_ARN" ]; then
-              aws ecs create-service \
-                --cluster "$ECS_CLUSTER" \
-                --service-name "$ECS_SERVICE" \
-                --task-definition ${{ env.ECS_TASK_FAMILY }} \
-                --desired-count 1 \
-                --launch-type FARGATE \
-                --load-balancers targetGroupArn=$TG_ARN,containerName=${{ env.CONTAINER_NAME }},containerPort=8090 \
-                --network-configuration "awsvpcConfiguration={subnets=[$(echo $SUBNET_IDS | sed 's/,/,/g')],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=DISABLED}"
-            else
-              aws ecs create-service \
-                --cluster "$ECS_CLUSTER" \
-                --service-name "$ECS_SERVICE" \
-                --task-definition ${{ env.ECS_TASK_FAMILY }} \
-                --desired-count 1 \
-                --launch-type FARGATE \
-                --network-configuration "awsvpcConfiguration={subnets=[$(echo $SUBNET_IDS | sed 's/,/,/g')],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=DISABLED}"
-            fi
-          fi
-
-      - name: Attach correct Target Group to ECS service (update if exists)
-        env:
-          TG_ARN: ${{ secrets.ECS_TG_ARN }}
-        run: |
-          set -e
-          # fallback sur la variable d'environnement globale si le secret n'est pas fourni
-          if [ -z "$TG_ARN" ] && [ -n "$ECS_TG_ARN" ]; then TG_ARN="$ECS_TG_ARN"; fi
-          if [ -n "$TG_ARN" ]; then
-            echo "Updating ECS service to use TG: $TG_ARN"
-            aws ecs update-service \
+          STATUS=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --query 'services[0].status' --output text 2>/dev/null || echo "MISSING")
+          if [ "$STATUS" != "ACTIVE" ]; then
+            echo "Creating ECS service $ECS_SERVICE..."
+            aws ecs create-service \
               --cluster "$ECS_CLUSTER" \
-              --service "$ECS_SERVICE" \
-              --load-balancers targetGroupArn="$TG_ARN",containerName="$CONTAINER_NAME",containerPort=8090 \
-              --force-new-deployment \
-              --region "$AWS_REGION"
-          else
-            echo "No TG ARN provided; skipping attach."
+              --service-name "$ECS_SERVICE" \
+              --task-definition ${{ env.ECS_TASK_FAMILY }} \
+              --desired-count 1 \
+              --launch-type FARGATE \
+              --load-balancers targetGroupArn=${{ env.ECS_TG_ARN }},containerName=${{ env.CONTAINER_NAME }},containerPort=8090 \
+              --network-configuration "awsvpcConfiguration={subnets=[subnet-00df58195d208c57b,subnet-0b7e260f32cdac3e7],securityGroups=[sg-0ce779d7b19d57649],assignPublicIp=ENABLED}"
           fi
 
       - name: Deploy Amazon ECS service
@@ -124,5 +81,4 @@ jobs:
           service: ${{ env.ECS_SERVICE }}
           cluster: ${{ env.ECS_CLUSTER }}
           wait-for-service-stability: true
-
-
+          wait-for-minutes: 10

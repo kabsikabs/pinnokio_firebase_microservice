@@ -25,7 +25,14 @@ def _load_service_account_info() -> dict:
         _SA_INFO = json.loads(env_json)
         return _SA_INFO
 
-    # 2) Secret GSM configurable (secret-id sans slash OU ressource complète projects/*/secrets/*/versions/*)
+    # 2) Fichier service account local (GOOGLE_APPLICATION_CREDENTIALS)
+    sa_file = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if sa_file and os.path.isfile(sa_file):
+        with open(sa_file, "r", encoding="utf-8") as f:
+            _SA_INFO = json.load(f)
+        return _SA_INFO
+
+    # 3) Secret GSM configurable (secret-id sans slash OU ressource complète projects/*/secrets/*/versions/*)
     secret_name = os.getenv("FIREBASE_ADMIN_SECRET_NAME", "pinnokio-listeners-firebase-admin")
     secret_json = get_secret(secret_name)
     _SA_INFO = json.loads(secret_json)

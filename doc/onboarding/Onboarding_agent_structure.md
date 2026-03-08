@@ -6,9 +6,10 @@
 - À chaque `enter_chat` ou `load_chat_history`, le brain est alimenté avec ces données et le mode sélectionné.
 
 ### Logs métier
-- Chaque job d’onboarding publie ses logs dans RTDB (`collection/chats/{job_id}`).
-- Le backend écoute ces logs via `listen_realtime_channel` et les recopie dans un message unique `collection/chats/follow_{job_id}/messages/{job_id}` avec `message_type = LOG_FOLLOW_UP`.
-- Ce message contient l’ensemble des entrées (liste `log_entries`) et peut être écrasé/reconstitué.
+- Chaque job d'onboarding publie ses logs dans RTDB (`collection/job_chats/{job_id}/messages`) pour la persistance.
+- Le jobbeur publie ensuite sur Redis PubSub (`user:{uid}/{collection}/job_chats/{job_id}/messages`) pour la communication temps réel.
+- Le backend écoute ces logs via `RedisSubscriber` (pattern `user:*`) et route vers `llm_manager._handle_onboarding_log_event()`.
+- Les logs sont stockés en mémoire dans la session et injectés dans l'historique LLM.
 
 ### Injection dans l’historique LLM
 - Lors du chargement d’un brain (`load_chat_history`, `_resume_workflow_after_lpt`, `enter_chat`), `_load_onboarding_log_history` lit le message `LOG_FOLLOW_UP`, agrège les entrées et appelle `BaseAIAgent.append_system_log(job_id, timestamp, contenu)`.
@@ -16,9 +17,11 @@
 - Ainsi, les logs font partie intégrante du contexte lors des requêtes LLM (budget tokens, résumés, etc.).
 
 ### Écoute temps réel
-- `_ensure_onboarding_listener` démarre une écoute asynchrone uniquement si nécessaire et synchronise les entrées initiales (chargées depuis RTDB).
-- `_handle_onboarding_log_event` se contente de mettre à jour le message RTDB suivi (`follow_{job_id}`) et de stocker les entrées en mémoire pour la session courante.
-- `_stop_onboarding_listener` ferme automatiquement les écouteurs lors d’un `flush_chat_history` ou à l’arrêt du thread.
+- `_ensure_onboarding_listener` configure l'écoute PubSub en marquant la session comme active (plus de listener RTDB).
+- Le `RedisSubscriber` centralisé écoute le pattern `user:*` et route les messages job_chats vers `_handle_job_chat_message()`.
+- `_handle_onboarding_log_event` traite les messages reçus via PubSub et stocke les entrées en mémoire pour la session courante.
+- `_stop_onboarding_listener` supprime simplement l'entrée du registre (plus de fermeture de listener RTDB nécessaire).
+- **Note** : L'écoute RTDB a été complètement supprimée. Seule la persistance RTDB (lecture historique et écriture) est conservée.
 
 ### Points restants / TODO
 - Définir la logique fine du handler côté frontend (affichage des logs, purge éventuelle).

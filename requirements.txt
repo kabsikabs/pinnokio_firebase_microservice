@@ -12,13 +12,10 @@ openai==1.97.1
 anthropic==0.69.0
 tiktoken>=0.12.0
 tenacity==9.1.2
+telethon==1.42.0
 pydantic>=2.11.0
 python-dotenv==1.1.1
-# ChromaDB dependencies (version 0.4.24 - compatible avec serveur actuel)
-# Note: AsyncHttpClient nécessite version >= 0.4.0 (supporté par 0.4.24)
-chromadb==0.4.14
-
-# Additional dependencies for ChromaDB
+# Data processing
 numpy>=1.24.0
 pandas>=2.0.0
 requests>=2.31.0
@@ -31,6 +28,8 @@ google-auth-oauthlib==1.2.1
 google-auth-httplib2==0.2.0
 # Dépendances pour l'interface utilisateur
 colorama==0.4.6
+# Multipart form data pour FastAPI UploadFile
+python-multipart>=0.0.9
 Pillow>=10.0.0
 # Dépendances pour la conversion PDF en images
 pdf2image>=1.16.0
@@ -41,5 +40,15 @@ croniter==6.0.0
 google-generativeai>=0.3.0
 google-genai==0.3.0
 aiohttp==3.13.1
+# Google Cloud Pub/Sub pour transport multi-canal (Telegram, Google Chat)
+google-cloud-pubsub>=2.0.0
 # AWS SDK pour CloudWatch Logs
 boto3>=1.35.0
+# PostgreSQL async driver pour Neon (module HR)
+asyncpg>=0.29.0
+# HTTP async client pour Jobber HR
+httpx==0.27.0
+# pytest-asyncio pour tests asynchrones
+pytest>=7.0.0
+pytest-asyncio>=0.23.0
+pytest-anyio>=0.0.0

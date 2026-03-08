@@ -5,6 +5,7 @@
   "cpu": "512",
   "memory": "1024",
   "executionRoleArn": "arn:aws:iam::654654322636:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::654654322636:role/pinnokio_ecs_task_role",
   "containerDefinitions": [
     {
       "name": "pinnokio_microservice",
@@ -23,7 +24,7 @@
         {"name": "FIREBASE_ADMIN_SECRET_NAME", "value": "pinnokio_firebase_admin"},
         {"name": "GOOGLE_SERVICE_ACCOUNT_SECRET", "value": "service_account_key"},
         {"name": "GOOGLE_APPLICATION_CREDENTIALS", "value": ""},
-        {"name": "AWS_SECRET_NAME", "value": ""},
+        {"name": "AWS_SECRET_NAME", "value": "AWS_ACCESS_KEY"},
         {"name": "LISTENERS_REDIS_HOST", "value": "pinnokio-cache-7uum2j.serverless.use1.cache.amazonaws.com"},
         {"name": "LISTENERS_REDIS_PORT", "value": "6379"},
         {"name": "LISTENERS_REDIS_PASSWORD", "value": ""},
@@ -38,7 +39,12 @@
         {"name": "STRIPE_CANCEL_URL", "value": "https://www.pinnokioagent.com/payment-canceled/"},
         {"name": "PINNOKIO_ENVIRONMENT", "value": "PROD"},
         {"name": "PINNOKIO_AWS_URL", "value": "http://klk-load-balancer-http-https-435479360.us-east-1.elb.amazonaws.com"},
-        {"name": "PINNOKIO_SOURCE", "value": "aws"}
+        {"name": "PINNOKIO_SOURCE", "value": "aws"},
+        {"name": "GOOGLE_AUTH_REDIRECT_LOCAL", "value": "https://app.pinnokioagent.com/google_auth_callback/"},
+        {"name": "GOOGLE_AUTH2_KEY", "value": "pinnokio_auth2"},
+        {"name": "COLLECT_TELEGRAM_ENABLED", "value": "true"},
+        {"name": "DISPATCH_TELEGRAM_ENABLED", "value": "true"},
+        {"name": "PUBSUB_TRANSPORT", "value": "pubsub"}
       ],
       "logConfiguration": {
         "logDriver": "awslogs",

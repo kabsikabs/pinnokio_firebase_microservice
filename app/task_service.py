@@ -60,7 +60,6 @@ celery_app.conf.update(
     # Routage des tâches
     task_routes={
         'app.computation_tasks.compute_document_analysis': {'queue': 'document_processing'},
-        'app.computation_tasks.compute_vector_embeddings': {'queue': 'vector_processing'},
         'app.computation_tasks.process_llm_conversation': {'queue': 'llm_processing'},
     },
     

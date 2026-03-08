@@ -22,7 +22,7 @@ from ..tools.g_cred import get_secret
 from abc import ABC, abstractmethod
 import json
 from datetime import datetime, timezone
-from ..chroma_vector_service import ChromaVectorService
+
 import base64
 import logging
 import tiktoken
@@ -303,6 +303,15 @@ class ModelPricing:
             "output_price": 0.08,
             "sales_multiplier": 8.5
         },
+        # Moonshot AI (Kimi K2.5)
+        "kimi-k2.5": {
+            "mode": "text",
+            "input_price": 0.50,              # Prix par million de tokens en entrée
+            "output_price": 2.80,             # Prix par million de tokens en sortie
+            "thought_price": 2.80,            # Prix du raisonnement (pensées)
+            "cached_input_price": 0.25,       # Prix réduit pour entrée en cache
+            "sales_multiplier": 16            # Multiplicateur pour prix de vente
+        },
     }
 
 
@@ -418,7 +427,8 @@ class ModelProvider(Enum):
     LLAMA = "llama"
     DEEP_SEEK = "deep_seek"
     PERPLEXITY = "perplexity"
-    GROQ = "groq"  
+    GROQ = "groq"
+    MOONSHOT_AI = "moonshot_ai"  
 class BaseAIAgent:
     """
     Agent de base pour l'IA avec support de différents systèmes de gestion documentaire (DMS).
@@ -502,13 +512,15 @@ class BaseAIAgent:
                 ModelSize.REASONING_MEDIUM: ["moonshotai/kimi-k2-instruct-0905", "qwen/qwen3-32b"],
                 ModelSize.REASONING_LARGE: ["deepseek-r1-distill-llama-70b"],
             },
+            ModelProvider.MOONSHOT_AI: {
+                ModelSize.MEDIUM: ["kimi-k2.5"],
+                ModelSize.REASONING_MEDIUM: ["kimi-k2.5"],  # Mode thinking activé
+            },
         }
         self.current_model = None
         self.system_prompt = None
         self.provider_instances = {}
         self.firebase_instance=FirebaseManagement()
-        # Initialisation de ChromaDB (Singleton)
-        self.chroma_db_instance = ChromaVectorService()
 
         # Initialisation du système DMS si spécifié
         self.dms_system = None
@@ -862,7 +874,26 @@ class BaseAIAgent:
                         }
                     ]
                 }]
-            
+
+            elif provider == ModelProvider.MOONSHOT_AI:
+                # Moonshot AI utilise le même format qu'OpenAI (compatible OpenAI API)
+                return [{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": text
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{media_type};base64,{base64.b64encode(img_data).decode('utf-8')}",
+                                "detail": "high"
+                            }
+                        }
+                    ]
+                }]
+
             else:
                 raise ValueError(f"Provider {provider} non supporté pour le traitement d'images")
 
@@ -1314,7 +1345,46 @@ class BaseAIAgent:
                             input_schema["required"]
                 
                 transformed_tools.append(transformed_tool)
-            
+
+            return transformed_tools
+
+        elif provider == ModelProvider.MOONSHOT_AI:
+            # Moonshot AI utilise le format OpenAI standard
+            # Si les outils sont déjà au bon format, on les retourne tels quels
+            if tools and isinstance(tools[0], dict) and "type" in tools[0] and tools[0]["type"] == "function":
+                return tools  # Déjà au bon format
+
+            # Sinon, transformer depuis le format Anthropic
+            transformed_tools = []
+            for tool in tools:
+                transformed_tool = {
+                    "type": "function",
+                    "function": {
+                        "name": tool.get("name"),
+                        "description": tool.get("description"),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                            "additionalProperties": False
+                        }
+                    }
+                }
+
+                # Récupération des propriétés depuis input_schema
+                if "input_schema" in tool:
+                    input_schema = tool["input_schema"]
+                    if "properties" in input_schema:
+                        transformed_tool["function"]["parameters"]["properties"] = \
+                            input_schema["properties"]
+
+                    # Gérer les champs requis
+                    if "required" in input_schema:
+                        transformed_tool["function"]["parameters"]["required"] = \
+                            input_schema["required"]
+
+                transformed_tools.append(transformed_tool)
+
             return transformed_tools
 
         else:
@@ -1450,7 +1520,31 @@ class BaseAIAgent:
             # Utiliser le mapping ou retourner "auto" par défaut
             return groq_mappings.get(tool_choice_type, "auto")
 
-        
+        elif provider == ModelProvider.MOONSHOT_AI:
+            # Moonshot AI utilise le format OpenAI standard
+            if not isinstance(tool_choice, dict):
+                return "auto"
+
+            tool_choice_type = tool_choice.get("type", "auto")
+
+            # Mappings pour Moonshot AI (compatible OpenAI)
+            moonshot_mappings = {
+                "auto": "auto",
+                "any": "required",
+                "none": "none"
+            }
+
+            # Cas spécial pour les outils nommés
+            if tool_choice_type == "tool" and "name" in tool_choice:
+                return {
+                    "type": "function",
+                    "function": {
+                        "name": tool_choice["name"]
+                    }
+                }
+
+            # Utiliser le mapping ou retourner "auto" par défaut
+            return moonshot_mappings.get(tool_choice_type, "auto")
 
         else:
             raise ValueError(f"Provider non supporté: {provider}")
@@ -1667,8 +1761,15 @@ class BaseAIAgent:
             # Formatage de la réponse Groq pour correspondre au format unifié
             return data
 
-        
-                
+        elif provider == ModelProvider.MOONSHOT_AI:
+            response = provider_instance.process_text(
+                content=content,
+                model_name=model,
+                stream=stream,
+                max_tokens=max_tokens,
+                thinking=False
+            )
+            return response
 
         else:
             raise ValueError(f"Provider {provider} not implemented")
@@ -1840,10 +1941,20 @@ class BaseAIAgent:
         elif provider == ModelProvider.DEEP_SEEK:
             # TODO: Implémenter le streaming DeepSeek
             yield {"content": "Streaming DeepSeek non implémenté", "is_final": True}
-            
+
+        elif provider == ModelProvider.MOONSHOT_AI:
+            # Utiliser la méthode streaming de Moonshot AI
+            async for chunk in provider_instance.moonshot_send_message_streaming(
+                content=content,
+                model_name=model,
+                max_tokens=max_tokens,
+                thinking=False
+            ):
+                yield chunk
+
         else:
             raise ValueError(f"Streaming not implemented for provider {provider}")
-    
+
     async def process_tool_use_streaming(
         self,
         content: str,
@@ -1950,7 +2061,19 @@ class BaseAIAgent:
                 "type": "error",
                 "error": "Streaming avec outils non implémenté pour DeepSeek"
             }
-        
+
+        elif provider == ModelProvider.MOONSHOT_AI:
+            # Déléguer à la méthode du provider Moonshot AI
+            async for event in provider_instance.moonshot_send_message_with_tools_streaming(
+                content=content,
+                tools=transformed_tools,  # Outils transformés (format OpenAI)
+                tool_mapping=tool_mapping,
+                model_name=model,
+                max_tokens=max_tokens,
+                thinking=True
+            ):
+                yield event
+
         else:
             yield {
                 "type": "error",
@@ -2285,10 +2408,41 @@ class BaseAIAgent:
                 return response['text_output']
             return response
 
+        elif provider == ModelProvider.MOONSHOT_AI:
+            # Moonshot AI (Kimi K2.5) supporte la vision
+            # content est déjà transformé par _transforme_image_for_provider au format OpenAI
+            response = provider_instance.moonshot_send_message(
+                content=content,
+                model_name=model,
+                max_tokens=max_tokens
+            )
+            print(f"impression de response vision pour Moonshot AI: {response}")
+
+            # Si un résumé final est demandé
+            if final_resume and response:
+                response_text = response if isinstance(response, str) else str(response)
+
+                resume_prompt = f"""Un document a été traité avec plusieurs pages.
+                Voici les réponses par page: {response_text}
+
+                Question initiale: {text}
+
+                Merci de faire une synthèse des réponses."""
+
+                final_summary = provider_instance.process_text(
+                    content=resume_prompt,
+                    model_name=model,
+                    max_tokens=max_tokens,
+                    thinking=False
+                )
+                print(f"impression du résumé final pour Moonshot AI: {final_summary}")
+                return final_summary
+
+            return response
 
         else:
             raise ValueError(f"Provider {provider} not implemented")
-    
+
     def process_tool_use(self,
                     content: str,
                     tools: List[Dict[str, Any]],
@@ -2408,7 +2562,20 @@ class BaseAIAgent:
                 max_tokens=max_tokens
             )
             return response
-        
+
+        elif provider == ModelProvider.MOONSHOT_AI:
+            response = provider_instance.process_tool_use(
+                content=content,
+                tools=transformed_tools,  # Utilise les outils transformés (format OpenAI)
+                model_name=model,
+                tool_mapping=transformed_mapping,
+                tool_choice=transformed_tool_choice,
+                thinking=thinking,
+                max_tokens=max_tokens,
+                raw_output=raw_output
+            )
+            return response
+
         else:
             raise ValueError(f"Provider {provider} not implemented")
 
@@ -2475,6 +2642,11 @@ class BaseAIAgent:
         elif model in self.provider_models[ModelProvider.GROQ][ModelSize.REASONING_LARGE]:
             return self.provider_models[ModelProvider.GROQ][ModelSize.REASONING_LARGE][0]
 
+        # Moonshot AI models
+        elif model in self.provider_models[ModelProvider.MOONSHOT_AI][ModelSize.MEDIUM]:
+            return self.provider_models[ModelProvider.MOONSHOT_AI][ModelSize.MEDIUM][0]
+        elif model in self.provider_models[ModelProvider.MOONSHOT_AI][ModelSize.REASONING_MEDIUM]:
+            return self.provider_models[ModelProvider.MOONSHOT_AI][ModelSize.REASONING_MEDIUM][0]
 
         raise ValueError(f"Unknown model: {model}")
 
@@ -2692,9 +2864,44 @@ class BaseAIAgent:
                 self.chat_history[provider.value] = transformed_history
                 logger.debug(f"[LOAD_HISTORY] Historique synchronisé dans BaseAIAgent.chat_history['{provider.value}']")
                 return True
-                
-        # Ajouter d'autres providers ici avec leurs transformations spécifiques
-                
+
+        elif provider == ModelProvider.MOONSHOT_AI:
+            # Format Moonshot AI: Compatible avec OpenAI format [{"role": "user/assistant", "content": "message"}]
+            transformed_history = self._transform_for_openai(history_to_load)
+            if hasattr(instance, 'chat_history'):
+                instance.chat_history = transformed_history
+                self.chat_history[provider.value] = transformed_history
+                logger.info(f"[LOAD_HISTORY] ✅ Historique Moonshot AI synchronisé: {len(transformed_history)} messages")
+                return True
+
+        elif provider == ModelProvider.GEMINI:
+            # Format Gemini: Compatible avec OpenAI format
+            transformed_history = self._transform_for_openai(history_to_load)
+            if hasattr(instance, 'chat_history'):
+                instance.chat_history = transformed_history
+                self.chat_history[provider.value] = transformed_history
+                logger.info(f"[LOAD_HISTORY] ✅ Historique Gemini synchronisé: {len(transformed_history)} messages")
+                return True
+
+        elif provider == ModelProvider.GROQ:
+            # Format Groq: Compatible avec OpenAI format
+            transformed_history = self._transform_for_openai(history_to_load)
+            if hasattr(instance, 'chat_history'):
+                instance.chat_history = transformed_history
+                self.chat_history[provider.value] = transformed_history
+                logger.info(f"[LOAD_HISTORY] ✅ Historique Groq synchronisé: {len(transformed_history)} messages")
+                return True
+
+        else:
+            # Fallback générique pour les autres providers (format OpenAI-compatible)
+            logger.warning(f"[LOAD_HISTORY] ⚠️ Provider {provider.value} non géré explicitement, utilisation format OpenAI")
+            transformed_history = self._transform_for_openai(history_to_load)
+            if hasattr(instance, 'chat_history'):
+                instance.chat_history = transformed_history
+                self.chat_history[provider.value] = transformed_history
+                logger.info(f"[LOAD_HISTORY] ✅ Historique (fallback) synchronisé: {len(transformed_history)} messages")
+                return True
+
         return False
 
     def _transform_for_anthropic(self, history):
@@ -8762,901 +8969,949 @@ class NEW_GROQ_AGENT:
         
         return output
 
-class Anthropic_KDB_AGENT:
-    def __init__(self,chroma_db_instance) -> None:
-        
-        #self.api_key=get_secret('voyageai_api_anthropic')
-        #self.vo=voyageai.Client(self.api_key)
-        anthropic=NEW_Anthropic_Agent()
-        self.agent=BaseAIAgent()
-        self.agent.register_provider(ModelProvider.ANTHROPIC,anthropic)
-        self.chroma_db_instance=chroma_db_instance
-        self.models=['claude-3-5-sonnet-20240620', 'claude-3-sonnet-20240229', 'claude-3-haiku-20240307', 'claude-3-opus-20240229']
-        self.AGENT_INIT()
 
-    def afficher_date_heure(self):
-        # Obtenir la date et l'heure actuelles
-        maintenant = datetime.now(timezone.utc)
-        # Formater la date et l'heure
-        date_heure_formatee = maintenant.strftime("%Y-%m-%d %H:%M:%S")
-        # Afficher la date et l'heure
-        return date_heure_formatee
+# ═══════════════════════════════════════════════════════════════════════════════
+# Constante pour les rôles de system prompt
+# ═══════════════════════════════════════════════════════════════════════════════
+SYSTEM_PROMPT_ROLES = ['system', 'developer']
 
 
-    def AGENT_INIT(self):
-        prompt = f"""Tu es un assistant spécialisé dans la recherche d'informations à travers une base de données vectorielle (ChromaDB). Ta mission est d'aider les utilisateurs à trouver des informations pertinentes en utilisant les outils adaptés à leur requête.
+class NEW_MOONSHOT_AIAgent:
+    """
+    Agent pour l'intégration de Moonshot AI (Kimi K2.5), compatible SDK OpenAI.
+    Supporte: texte, vision, tool calling, et mode thinking/reasoning.
+    """
 
-        # CONTEXTE TEMPOREL
-        Date et heure actuelles: {self.afficher_date_heure()}
-        Utilise cette information comme point de référence pour toute question temporelle.
-
-        # STRUCTURE DES MÉTADONNÉES DE FILTRAGE
-        Pour chaque recherche, tu dois créer un filtre de métadonnées adapté comportant ces clés:
-        
-        1. pinnokio_func (OBLIGATOIRE): Indique le département concerné:
-        - APbookeeper: Factures fournisseurs
-        - EXbookeeper: Notes de frais
-        - Bankbookeeper: Transactions bancaires
-        - HRmanager: Ressources humaines
-        - Admanager: Questions administratives
-        
-        2. source (OBLIGATOIRE): Indique le type de contenu à rechercher:
-        - journal: Journaux des traitements internes
-        - journal/chat: Échanges avec l'utilisateur
-        - context: Informations contextuelles
-        
-        3. file_name (OPTIONNEL): Nom spécifique du fichier si mentionné
-        - Si non spécifié, utilise toujours '<UNKNOWN>' comme valeur par défaut
-        - Format typique: "chat_{{job_id}}.txt" ou "journal_{{job_id}}.txt"
-
-        # OUTILS DISPONIBLES
-        Tu as accès aux outils suivants pour effectuer tes recherches:
-
-        1. ASK_PINNOKIO: Outil de base pour interroger la base de données vectorielle.
-        - Paramètres:
-            * user_query: Question précise pour la recherche
-            * metadata_filters: Dictionnaire avec pinnokio_func, source et éventuellement file_name
-
-        2. GET_JOB_ID: Outil pour extraire un identifiant de job (job_id) à partir d'une requête.
-        - Paramètres:
-            * user_query: Question pour rechercher un job_id
-            * metadata_filters: Dictionnaire avec pinnokio_func et source appropriés
-
-        3. GET_JOB_DETAILS: Outil pour obtenir les informations détaillées sur un job spécifique.
-        - Paramètres: 
-            * job_id: Identifiant du job (format klk-uuid)
-            * user_query: Question spécifique sur ce job
-            * mode: "basis" (information générale) ou "accounting_tech" (détails comptables)
-            * metadata_filters: Normalement pas nécessaire car job_id est suffisant
-
-        4. GET_BY_FILTER: Outil pour des recherches avec filtres complexes.
-        - Paramètres:
-            * user_query: Question pour la recherche
-            * metadata_filters: Dictionnaire complet avec tous les critères de filtrage
-
-        5. CREATE_METADATA_FILTER: Outil pour générer un dictionnaire de filtrage approprié
-        - Paramètres:
-            * user_query: Question de l'utilisateur
-            * pinnokio_func: Département concerné (obligatoire)
-            * source: Type de contenu (obligatoire)
-            * file_name: Nom du fichier (par défaut '<UNKNOWN>')
-
-        # WORKFLOW DE RECHERCHE
-        Suis ce processus pour répondre efficacement aux requêtes:
-
-        1. ANALYSE DE LA REQUÊTE
-        - Identifie le type d'information recherchée et le département concerné
-        - Détermine si la requête concerne un job spécifique, une facture, ou une information générale
-
-        2. CRÉATION DU FILTRE DE MÉTADONNÉES
-        - Utilise d'abord CREATE_METADATA_FILTER pour générer le dictionnaire de filtrage approprié
-        - Assure-toi que pinnokio_func et source sont correctement définis selon le contexte
-
-        3. SÉLECTION D'OUTIL
-        - Pour une requête générale → Utilise ASK_PINNOKIO avec le filtre créé
-        - Pour une requête sur un job sans ID → Utilise GET_JOB_ID avec le filtre créé, puis GET_JOB_DETAILS
-        - Pour une requête sur une facture → Utilise GET_JOB_ID avec filtres adaptés puis GET_JOB_DETAILS en mode "accounting_tech"
-        - Pour une recherche avec critères temporels ou multiples → Utilise GET_BY_FILTER avec le filtre créé
-
-        4. EXÉCUTION ET ANALYSE
-        - Exécute l'outil approprié avec le filtre de métadonnées
-        - Si nécessaire, utilise un deuxième outil pour affiner les résultats
-
-        5. RÉPONSE FINALE
-        - Fournis une réponse claire et concise basée sur les informations trouvées
-        - Si aucune information satisfaisante n'est trouvée, explique pourquoi
-        - Signale explicitement la fin de ta tâche par TASK_COMPLETE si tu as obtenu tous les résultats attendus
-
-        # EXEMPLES DE FLUX DE TRAVAIL
-
-        ## Exemple 1: Question sur une facture
-        Requête: "Comment a été comptabilisée la dernière facture de Société ABC?"
-        Actions:
-        1. Créer un filtre: {{"pinnokio_func": "APbookeeper", "source": "journal/chat", "file_name": "<UNKNOWN>"}}
-        2. Utiliser GET_JOB_ID avec ce filtre pour trouver le job_id associé
-        3. Utiliser GET_JOB_DETAILS avec le job_id trouvé en mode "accounting_tech"
-
-        ## Exemple 2: Question sur une note de frais
-        Requête: "Quelles étaient les notes de frais soumises la semaine dernière?"
-        Actions:
-        1. Créer un filtre: {{"pinnokio_func": "EXbookeeper", "source": "journal", "file_name": "<UNKNOWN>"}}
-        2. Utiliser GET_BY_FILTER avec ce filtre pour trouver les informations
-
-        ## Exemple 3: Question RH
-        Requête: "Quelles sont les dernières politiques de congés?"
-        Actions:
-        1. Créer un filtre: {{"pinnokio_func": "HRmanager", "source": "context", "file_name": "<UNKNOWN>"}}
-        2. Utiliser ASK_PINNOKIO avec ce filtre pour trouver les informations
-
-        N'oublie pas que ton objectif principal est de fournir des réponses pertinentes et précises aux utilisateurs. Choisis toujours l'outil le plus approprié en fonction du contexte de la requête.
+    def __init__(self, space_manager=None, collection_name=None, job_id=None):
         """
-        self.agent.update_system_prompt(prompt)
-    
-    
-    def antho_kdb(self,user_query,metadata_dict,model_index,excl_job_id=None):
-            if excl_job_id is not None:
-                file_to_exclude=f"journal_{excl_job_id}.txt"
-                resultat=self.chroma_db_instance.ask_pinnokio_chroma_2(user_query, metadata_filters=metadata_dict,exclude_file_name=file_to_exclude)
+        Initialise l'agent Moonshot AI avec la clé API nécessaire.
+
+        Args:
+            space_manager: Gestionnaire d'espace (optionnel).
+            collection_name: Nom de la collection (optionnel).
+            job_id: ID du job (optionnel).
+        """
+        self.chat_history = []
+        self.space_manager = space_manager
+        self.collection_name = collection_name
+        self.job_id = job_id
+        self.api_key = get_secret('moonshot_ai')
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url="https://api.moonshot.ai/v1",
+            timeout=120.0  # Timeout de 2 minutes
+        )
+        self.client_stream = AsyncOpenAI(
+            api_key=self.api_key,
+            base_url="https://api.moonshot.ai/v1",
+            timeout=120.0
+        )
+        self.token_usage = {}
+        self.current_model = None
+        self.models = ['kimi-k2.5']
+
+    def update_token_usage(self, raw_response):
+        """
+        Met à jour les compteurs de tokens pour Moonshot AI.
+        Format similaire à OpenAI.
+        """
+        if not (hasattr(raw_response, "model") and hasattr(raw_response, "usage")):
+            return
+
+        model = raw_response.model
+        usage = raw_response.usage
+
+        self.token_usage.setdefault(model, {
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_cached_tokens": 0,
+            "total_thought_tokens": 0,
+        })
+
+        prompt_tokens_raw = getattr(usage, "prompt_tokens", 0)
+        completion_tokens = getattr(usage, "completion_tokens", 0)
+
+        # Détails facultatifs
+        cached_tokens = 0
+        if hasattr(usage, "prompt_tokens_details"):
+            cached_tokens = getattr(usage.prompt_tokens_details, "cached_tokens", 0)
+
+        # Tokens de raisonnement (reasoning_tokens dans completion_tokens_details)
+        thought_tokens = 0
+        if hasattr(usage, "completion_tokens_details"):
+            thought_tokens = getattr(usage.completion_tokens_details, "reasoning_tokens", 0)
+
+        effective_prompt_tokens = max(prompt_tokens_raw - cached_tokens, 0)
+
+        self.token_usage[model]["total_input_tokens"] += effective_prompt_tokens
+        self.token_usage[model]["total_output_tokens"] += completion_tokens
+        self.token_usage[model]["total_cached_tokens"] += cached_tokens
+        self.token_usage[model]["total_thought_tokens"] += thought_tokens
+
+        self.current_model = model
+
+    def get_total_tokens(self):
+        """
+        Retourne l'utilisation totale des tokens pour chaque modèle.
+        """
+        token_stats = {}
+        for model, usage in self.token_usage.items():
+            stats = {
+                'total_input_tokens': usage['total_input_tokens'],
+                'total_output_tokens': usage['total_output_tokens'],
+                'total_cached_tokens': usage.get('total_cached_tokens', 0),
+                'total_thought_tokens': usage.get('total_thought_tokens', 0),
+                'model': model
+            }
+            token_stats[model] = stats
+        return token_stats
+
+    def flush_chat_history(self):
+        """Efface l'historique des messages user/assistant, conserve le system_prompt."""
+        system_messages = [msg for msg in self.chat_history if msg.get('role') in SYSTEM_PROMPT_ROLES]
+        self.chat_history = system_messages
+
+    def flush_all_chat_history(self):
+        """Efface TOUT l'historique, y compris le system_prompt."""
+        self.chat_history = []
+
+    def reset_token_counters(self):
+        """Réinitialise tous les compteurs de tokens."""
+        self.token_usage = {}
+
+    def add_user_message(self, content):
+        """Ajoute un message utilisateur à l'historique."""
+        if isinstance(content, dict):
+            content = json.dumps(content)
+        self.chat_history.append({'role': 'user', 'content': content})
+
+    def add_ai_message(self, content):
+        """Ajoute un message assistant à l'historique."""
+        if isinstance(content, dict):
+            content = json.dumps(content)
+        self.chat_history.append({'role': 'assistant', 'content': content})
+
+    def update_system_prompt(self, content):
+        """Met à jour le system prompt."""
+        if isinstance(content, dict):
+            content = json.dumps(content)
+        # Supprimer l'ancien system prompt s'il existe
+        self.chat_history = [msg for msg in self.chat_history if msg.get('role') != 'system']
+        # Ajouter le nouveau au début
+        self.chat_history.insert(0, {'role': 'system', 'content': content})
+
+    def process_text(self, content, model_index=None, model_name=None,
+                     stream=False, max_tokens=4096, thinking=True,
+                     thinking_budget=8192, **kwargs):
+        """
+        Génère du texte avec Moonshot AI (Kimi K2.5).
+
+        Args:
+            content: Le contenu du message
+            model_index: Index du modèle (optionnel)
+            model_name: Nom du modèle (optionnel)
+            stream: Activer le streaming
+            max_tokens: Nombre maximum de tokens de sortie
+            thinking: Activer le mode thinking (raisonnement)
+            thinking_budget: Budget de tokens pour le raisonnement
+
+        Returns:
+            str ou dict: La réponse générée
+        """
+        if not model_name and model_index is not None:
+            chosen_model = self.models[model_index]
+        else:
+            chosen_model = model_name or self.models[0]
+
+        self.add_user_message(content)
+
+        api_params = {
+            "model": chosen_model,
+            "messages": self.chat_history,
+            "max_tokens": max_tokens,
+            "stream": stream,
+        }
+
+        # Configuration selon le mode thinking
+        if thinking:
+            api_params["temperature"] = 1.0
+            api_params["top_p"] = 0.95
+        else:
+            api_params["temperature"] = 0.6
+            api_params["extra_body"] = {'thinking': {'type': 'disabled'}}
+
+        try:
+            if stream:
+                def stream_generator():
+                    response_stream = self.client.chat.completions.create(**api_params)
+                    full_content = ""
+                    full_reasoning = ""
+                    for chunk in response_stream:
+                        if chunk.choices and len(chunk.choices) > 0:
+                            delta = chunk.choices[0].delta
+                            if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                                full_reasoning += delta.reasoning_content
+                                yield {"thinking_text": delta.reasoning_content}
+                            if hasattr(delta, 'content') and delta.content:
+                                full_content += delta.content
+                                yield {"text_output": {"content": delta.content}}
+                    self.add_ai_message(full_content)
+                return stream_generator()
             else:
-                resultat=self.chroma_db_instance.ask_pinnokio_chroma_2(user_query, metadata_filters=metadata_dict)
-            print(f"impression de userquey_dans la recherche de chroma_db:{user_query}")
-            documents=resultat['documents']
-            #print(f"impression des documents recherché dans chromadb:{documents}")
-            prompt=f"""Voici les résultat de la recherche sémantique dans la base de donnée vectorielle, trouve la meilleures correspondance à la question initial qui est:
-            \n{user_query}\n.
-            
-            Si les résulats de la recherche vectoriel ne fournit pas de réponse satisfaisante, partager votre retour à l'utilisateur en expliquant l'insatisfesance de ton choix
-            réponses:{documents}"""
-            data=self.agent.process_text(prompt)
-            
-            self.agent.flush_chat_history()
-            return data
-    
-    def antho_dld_context(self,user_query,model_index):
-            
-            metadata_dict={'source':'context','pinnokio_func':'APbookeeper','file_name':'accounting_report.txt'}
-            resultat=self.chroma_db_instance.ask_pinnokio_chroma_2(user_query, metadata_filters=metadata_dict)
-            
-            documents=resultat['documents']
-            print(f"impression des documents recherché dans chromadb:{documents}")
-            prompt=f"""Voici les résultat de la recherche sémantique dans la base de donnée vectorielle, trouve la meilleures correspondance à la question initial qui est:
-            \n{user_query}\n.
-            
-            Si les résulats de la recherche vectoriel ne fournit pas de réponse satisfaisante, partager votre retour à l'utilisateur en expliquant l'insatisfesance de ton choix
-            réponses:{documents}"""
-            data=self.agent.process_text(prompt)
-            
-            self.agent.flush_chat_history()
-            return data
-    
-    
-    def antho_get_job_id_detail(self, user_query, metadata_dict, model_index, job_id=None,mode='basis'):
-        """Mode = 'basis' requete avec prompt basic de recherche sur job id
-        Mode= 'accounting_tech, prompt orienté dans la sémmantique pour une recherche précise sur les méthode de comptabilisation adapaté au FrameWork de Pinnokio"""
-        print(f"methode antho_get_job_id_details lancée.....")
-        if job_id is None:
-            resultat = self.chroma_db_instance.ask_pinnokio_chroma_2(user_query, metadata_filters=metadata_dict)
-            documents = resultat.get('documents', [])
-            #print(f"Documents trouvés dans ChromaDB : {documents}")
-            
-            prompt = f"""Voici les résultats de la recherche sémantique dans la base de données vectorielle, trouve la meilleure correspondance à la question initiale qui est :
-            \n{user_query}\n.
-            Récupère le job_id qui concerne la demande particulière de l'utilisateur.
-            Réponses : {documents}"""
-            
-            get_job_id_tool = [{
-                "name": "get_job_id",
-                "description": "outil d'extraction d'un job_id",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "job_id": {
-                            "type": "string",
-                            "description": "numéro uuid avec le préfixe klk "
+                response = self.client.chat.completions.create(**api_params)
+                self.update_token_usage(response)
+
+                message = response.choices[0].message
+                reasoning_content = getattr(message, 'reasoning_content', '') or ''
+                answer_text = message.content or ''
+
+                self.add_ai_message(answer_text)
+
+                # Always return string for consistency with other providers (OpenAI, etc.)
+                return answer_text
+
+        except Exception as e:
+            print(f"Erreur Moonshot AI process_text: {e}")
+            return None
+
+    def moonshot_send_message(self, content, model_index=None, model_name=None,
+                               max_tokens=4096, thinking=False, **kwargs):
+        """
+        Envoie un message avec contenu pré-formaté (images transformées par BaseAIAgent).
+        Utilisé pour la vision quand les images viennent de Drive, URL ou local.
+
+        Args:
+            content: Contenu pré-formaté au format OpenAI [{"role": "user", "content": [...]}]
+            model_index: Index du modèle (optionnel)
+            model_name: Nom du modèle (optionnel)
+            max_tokens: Nombre maximum de tokens de sortie
+            thinking: Activer le mode thinking
+
+        Returns:
+            str: La réponse générée
+        """
+        if not model_name and model_index is not None:
+            chosen_model = self.models[model_index]
+        else:
+            chosen_model = model_name or self.models[0]
+
+        # Le content est déjà formaté comme messages par _transforme_image_for_provider
+        # Format: [{"role": "user", "content": [{"type": "text", ...}, {"type": "image_url", ...}]}]
+        if isinstance(content, list) and len(content) > 0:
+            # Ajouter à l'historique et utiliser comme messages
+            for msg in content:
+                if isinstance(msg, dict) and 'role' in msg:
+                    self.chat_history.append(msg)
+            messages = self.chat_history
+        else:
+            # Fallback: traiter comme texte simple
+            self.add_user_message(content)
+            messages = self.chat_history
+
+        api_params = {
+            "model": chosen_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+        }
+
+        if thinking:
+            api_params["temperature"] = 1.0
+            api_params["top_p"] = 0.95
+        else:
+            api_params["temperature"] = 0.6
+            api_params["extra_body"] = {'thinking': {'type': 'disabled'}}
+
+        try:
+            response = self.client.chat.completions.create(**api_params)
+            self.update_token_usage(response)
+
+            message = response.choices[0].message
+            answer_text = message.content or ''
+
+            self.add_ai_message(answer_text)
+            return answer_text
+
+        except Exception as e:
+            print(f"Erreur Moonshot AI moonshot_send_message: {e}")
+            return None
+
+    def process_vision(self, text, local_files=None, model_index=None, model_name=None,
+                       max_tokens=4096, thinking=False, **kwargs):
+        """
+        Analyse d'images avec Moonshot AI (Kimi K2.5).
+
+        Args:
+            text: Le prompt textuel
+            local_files: Liste des chemins vers les fichiers images locaux
+            model_index: Index du modèle (optionnel)
+            model_name: Nom du modèle (optionnel)
+            max_tokens: Nombre maximum de tokens de sortie
+            thinking: Activer le mode thinking
+
+        Returns:
+            str ou dict: La réponse générée
+        """
+        if not model_name and model_index is not None:
+            chosen_model = self.models[model_index]
+        else:
+            chosen_model = model_name or self.models[0]
+
+        # Construire le contenu multimodal
+        content_parts = []
+
+        # Ajouter les images
+        if local_files:
+            for file_path in local_files:
+                try:
+                    with open(file_path, "rb") as f:
+                        image_data = f.read()
+                    base64_data = base64.b64encode(image_data).decode('utf-8')
+
+                    # Déterminer le type MIME
+                    ext = os.path.splitext(file_path)[1].lower()
+                    mime_map = {
+                        '.jpg': 'jpeg', '.jpeg': 'jpeg', '.png': 'png',
+                        '.gif': 'gif', '.webp': 'webp'
+                    }
+                    media_type = mime_map.get(ext, 'jpeg')
+
+                    content_parts.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/{media_type};base64,{base64_data}"
                         }
-                    },
-                    "required": ["job_id"]
+                    })
+                except Exception as e:
+                    print(f"Erreur lecture image {file_path}: {e}")
+
+        # Ajouter le texte
+        content_parts.append({
+            "type": "text",
+            "text": text
+        })
+
+        self.chat_history.append({'role': 'user', 'content': content_parts})
+
+        api_params = {
+            "model": chosen_model,
+            "messages": self.chat_history,
+            "max_tokens": max_tokens,
+        }
+
+        if thinking:
+            api_params["temperature"] = 1.0
+            api_params["top_p"] = 0.95
+        else:
+            api_params["temperature"] = 0.6
+            api_params["extra_body"] = {'thinking': {'type': 'disabled'}}
+
+        try:
+            response = self.client.chat.completions.create(**api_params)
+            self.update_token_usage(response)
+
+            message = response.choices[0].message
+            reasoning_content = getattr(message, 'reasoning_content', '') or ''
+            answer_text = message.content or ''
+
+            self.add_ai_message(answer_text)
+
+            if thinking and reasoning_content:
+                return {
+                    "answer_text": answer_text,
+                    "thinking_text": reasoning_content
+                }
+            return answer_text
+
+        except Exception as e:
+            print(f"Erreur Moonshot AI process_vision: {e}")
+            return {"error": str(e)}
+
+    def process_tool_use(self, content, tools, model_index=None, model_name=None,
+                         tool_mapping=None, tool_choice="auto", thinking=True,
+                         thinking_budget=8192, raw_output=False, max_tokens=4096,
+                         **kwargs):
+        """
+        Utilisation d'outils avec Moonshot AI (Kimi K2.5).
+
+        Args:
+            content: Le contenu du message
+            tools: Liste des outils au format OpenAI
+            model_index: Index du modèle (optionnel)
+            model_name: Nom du modèle (optionnel)
+            tool_mapping: Mapping des noms d'outils vers les fonctions
+            tool_choice: Choix d'outil ("auto", "required", "none" ou dict)
+            thinking: Activer le mode thinking
+            thinking_budget: Budget de tokens pour le raisonnement
+            raw_output: Retourner les données brutes
+            max_tokens: Nombre maximum de tokens
+
+        Returns:
+            list ou dict: Les réponses générées
+        """
+        if not model_name and model_index is not None:
+            chosen_model = self.models[model_index]
+        else:
+            chosen_model = model_name or self.models[0]
+
+        self.add_user_message(content)
+
+        api_params = {
+            "model": chosen_model,
+            "messages": self.chat_history,
+            "max_tokens": max_tokens,
+            "tools": tools,
+            "tool_choice": tool_choice,
+        }
+
+        if thinking:
+            api_params["temperature"] = 1.0
+            api_params["top_p"] = 0.95
+        else:
+            api_params["temperature"] = 0.6
+            api_params["extra_body"] = {'thinking': {'type': 'disabled'}}
+
+        try:
+            response = self.client.chat.completions.create(**api_params)
+            self.update_token_usage(response)
+
+            responses = []
+            message = response.choices[0].message
+
+            # Récupérer le raisonnement si disponible
+            reasoning_content = getattr(message, 'reasoning_content', '') or ''
+
+            # Traiter les appels d'outils
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                for tool_call in message.tool_calls:
+                    function_call = tool_call.function
+                    tool_name = function_call.name
+
+                    try:
+                        arguments = json.loads(function_call.arguments)
+
+                        # Chercher la fonction dans le mapping
+                        function_or_none = None
+                        if tool_mapping:
+                            for tool_dict in (tool_mapping if isinstance(tool_mapping, list) else [tool_mapping]):
+                                if tool_name in tool_dict:
+                                    function_or_none = tool_dict[tool_name]
+                                    break
+
+                        if callable(function_or_none):
+                            tool_result = function_or_none(**arguments)
+                            tool_response = {
+                                "tool_output": {
+                                    "tool_name": tool_name,
+                                    "content": tool_result
+                                }
+                            }
+                        else:
+                            tool_response = {
+                                "tool_output": {
+                                    "tool_name": tool_name,
+                                    "content": arguments
+                                }
+                            }
+                        responses.append(tool_response)
+
+                    except json.JSONDecodeError as e:
+                        print(f"Erreur JSON pour l'outil {tool_name}: {e}")
+                        responses.append({
+                            "tool_output": {
+                                "tool_name": tool_name,
+                                "content": {"error": str(e)}
+                            }
+                        })
+
+            # Traiter le contenu texte
+            if message.content:
+                text_response = {
+                    "text_output": {
+                        "content": {
+                            "answer_text": message.content,
+                            "thinking_text": reasoning_content
+                        }
+                    }
+                }
+                responses.append(text_response)
+
+            self.add_ai_message(message.content if message.content else str(responses))
+
+            if not raw_output:
+                return self.final_handle_responses(responses)
+            return responses
+
+        except Exception as e:
+            print(f"Erreur Moonshot AI process_tool_use: {e}")
+            return [{
+                "text_output": {
+                    "content": {
+                        "answer_text": f"Erreur: {str(e)}",
+                        "thinking_text": ""
+                    }
                 }
             }]
-            
-            tool_map = {'get_job_id': None}
-            tool_choice = {'type': 'tool', 'name': 'get_job_id'}
-            #print(f"Impreesion du prompt dasn antho_get_job_id_detail : {prompt}")
-            response_text = self.agent.process_tool_use(content=prompt,tools=get_job_id_tool,tool_mapping=tool_map, tool_choice=tool_choice)
-            #print(f"Réponse obtenue : {data}")
-            
 
-        if job_id is not None:
-            metadata_dict = {'source': 'journal/chat', 'pinnokio_func': 'APbookeeper', 'file_name': f"chat_{job_id}.txt"}
-            #print(f"Dictionnaire de métadonnées : {metadata_dict}")
-            
-            job_details = self.chroma_db_instance.ask_pinnokio_chroma_2(user_query, metadata_filters=metadata_dict)
-            
-            if 'documents' in job_details:
-                documents = job_details['documents']
-                #print(f"Documents trouvés pour le job_id : {documents}")
-                if mode=='basis':
-                    prompt = f"Voici les détails du chat du job_id demandé : {documents}\n\nMerci de l'analyser et de répondre à la question de l'utilisateur en fonction du contexte."
-                
-                elif mode=='accounting_tech':
-                    prompt=f""" \n\n
-                    Ta recherche est axée spécifiquement sur toute information pertinantes sur la maniere de saisire la facture. Pour faire cela tu as acces aux logs d'audit de la derniere facture saisie de ce contact. Ton objectif ces informations sont récupérables principalement 
-                    durant les échanges entre l'IA et l'utilisateur. Les informations de l'utilisateur permettent de connaitre si il existe des regles de repartiation spéciale en terme d'allocation de compte comptable. Ou si il est définit une regle pour reconnaitre
-                    les différents type de charge a reconnaitre sur les factures ou si il faut appliquer une regle spéciale en matiere d'encodage de TVA.
-                    Communique aussi les informations sur les comptes comptable utilisé et ainsi que sur la nature de la charge , ces informations sont récupérable durant les étapes de transfromation du log appelés:
-                    'BOOK_NEW_INVOICE_BASED_ON_HISTORY_INVOICE','CREATE_NEW_INVOICE','ROUTE_DEFINITION'  & 'ROUTE_DEFINITION_2' sont des étapes servant a trouver les informations sur le contact dans l'erp
-                     ATTENTION: Il est possible que le systeme reviennent plusieurs fois sur des étapes pour se corriger ou changer des informations en fonctions des demandes de l'utilisateur. Les informations finaux determinante seront toujours
-                      dans le dictionnaire présenté avant l'envoi dans ODOO dans l'étape 'POST_INVOICE_IN_ODOO'. Enfin , communique tres brievement sur l'étape realisé par la facture, les factures saisie dans le systeme on une étape 'POST_INVOICE_IN_ODOO' reussi et 'ARCHIVE_INVOICE'.
-                      Si le document que tu traites est dépourvu de la realisation de cette étape, tu peux communiquer evenutuellement sur d'autre information contextuel en relation avec saisie des facture de contact est communiqué dans le chat.
-                      Si aucune information pertinante est à relevé , réponds tout simplement en disant le context fourni n'indique aucun traitement spéciale de facture .
-                    Voici les détails du chat du job_id demandé : {documents}\n\n """
+    async def moonshot_send_message_streaming(
+        self,
+        content: str,
+        model_name: str,
+        max_tokens: int = 4096,
+        thinking: bool = False
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Envoie un message en streaming avec Moonshot AI.
 
-                data = self.agent.process_text(prompt)
-                response_text = data.get('text_output', {}).get('content', {}).get('answer_text', "Réponse non trouvée.")
-                
+        Args:
+            content: Le contenu du message
+            model_name: Nom du modèle
+            max_tokens: Nombre maximum de tokens
+            thinking: Activer le mode thinking
+
+        Yields:
+            Dict avec events: text_chunk, thinking_chunk, final
+        """
+        try:
+            self.add_user_message(content)
+
+            api_params = {
+                "model": model_name,
+                "messages": self.chat_history,
+                "max_tokens": max_tokens,
+                "stream": True,
+            }
+
+            # Configuration selon le mode thinking
+            if thinking:
+                api_params["temperature"] = 1.0
+                api_params["top_p"] = 0.95
             else:
-                response_text = "Les détails du job n'ont pas pu être récupérés."
+                api_params["temperature"] = 0.6
+                api_params["extra_body"] = {'thinking': {'type': 'disabled'}}
+
+            accumulated_text = ""
+            accumulated_thinking = ""
+            thinking_started = False  # Track if thinking phase has started
+            thinking_ended = False    # Track if thinking phase has ended
+
+            response = await self.client_stream.chat.completions.create(**api_params)
+
+            async for chunk in response:
+                if not chunk.choices:
+                    continue
+
+                delta = chunk.choices[0].delta
+
+                # Traiter le contenu de raisonnement (thinking)
+                if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                    # Emit thinking_start on first thinking chunk
+                    if not thinking_started:
+                        thinking_started = True
+                        yield {
+                            "type": "thinking_start",
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        }
+
+                    accumulated_thinking += delta.reasoning_content
+                    yield {
+                        "type": "thinking_chunk",
+                        "chunk": delta.reasoning_content
+                    }
+
+                # Traiter le contenu texte
+                if hasattr(delta, 'content') and delta.content:
+                    # Emit thinking_end when transitioning from thinking to text
+                    if thinking_started and not thinking_ended:
+                        thinking_ended = True
+                        yield {
+                            "type": "thinking_end",
+                            "thinking_content": accumulated_thinking,
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        }
+
+                    accumulated_text += delta.content
+                    yield {
+                        "type": "text_chunk",
+                        "chunk": delta.content
+                    }
+
+            # Emit thinking_end if we had thinking but no text output
+            if thinking_started and not thinking_ended:
+                yield {
+                    "type": "thinking_end",
+                    "thinking_content": accumulated_thinking,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+
+            # Sauvegarder la réponse dans l'historique
+            self.add_ai_message(accumulated_text)
+
+            # Événement final
+            yield {
+                "type": "final",
+                "content": accumulated_text,
+                "thinking": accumulated_thinking,
+                "model": model_name
+            }
+
+        except Exception as e:
+            logging.error(f"[MOONSHOT_STREAMING] Erreur: {e}", exc_info=True)
+            yield {
+                "type": "error",
+                "error": str(e)
+            }
+
+    async def moonshot_send_message_with_tools_streaming(
+        self,
+        content: str,
+        tools: List[Dict[str, Any]],
+        tool_mapping: Dict[str, Callable],
+        model_name: str,
+        max_tokens: int = 4096,
+        thinking: bool = True,
+        system_prompt: Optional[str] = None
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Envoie un message avec outils et streaming pour Moonshot AI.
+        Gère le cycle complet: message -> tool_use -> tool_result -> réponse
+
+        Args:
+            content: Message utilisateur (peut être vide pour tours suivants)
+            tools: Liste des définitions d'outils (format OpenAI)
+            tool_mapping: Dict {tool_name: fonction} pour exécuter les outils
+            model_name: Nom du modèle à utiliser
+            max_tokens: Nombre max de tokens
+            thinking: Activer le mode thinking
+            system_prompt: Prompt système (optionnel)
+
+        Yields:
+            Dict avec events: text_chunk, thinking_chunk, tool_use, tool_result, error
+        """
+        try:
+            # Préparer les messages
+            messages = self.chat_history.copy()
+
+            # Ajouter le system prompt si fourni
+            if system_prompt and (not messages or messages[0].get("role") != "system"):
+                messages.insert(0, {"role": "system", "content": system_prompt})
+
+            # N'ajouter un nouveau message utilisateur QUE si content n'est pas vide
+            if content and content.strip():
+                self.add_user_message(content)
+                messages.append({"role": "user", "content": content})
+
+            api_params = {
+                "model": model_name,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
+
+            # Ajouter tools si fournis
+            if tools:
+                api_params["tools"] = tools
+
+            # Configuration selon le mode thinking
+            if thinking:
+                api_params["temperature"] = 1.0
+                api_params["top_p"] = 0.95
+            else:
+                api_params["temperature"] = 0.6
+                api_params["extra_body"] = {'thinking': {'type': 'disabled'}}
+
+            accumulated_text = ""
+            accumulated_thinking = ""
+            tool_uses = []
+            last_usage = None
+            thinking_started = False  # Track if thinking phase has started
+            thinking_ended = False    # Track if thinking phase has ended
+
+            response = await self.client_stream.chat.completions.create(**api_params)
+
+            async for chunk in response:
+                if not chunk.choices:
+                    continue
+
+                delta = chunk.choices[0].delta
+
+                if hasattr(chunk, "usage") and chunk.usage:
+                    last_usage = chunk.usage
+
+                # Traiter le contenu de raisonnement (thinking)
+                if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                    # Emit thinking_start on first thinking chunk
+                    if not thinking_started:
+                        thinking_started = True
+                        yield {
+                            "type": "thinking_start",
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        }
+
+                    accumulated_thinking += delta.reasoning_content
+                    yield {
+                        "type": "thinking_chunk",
+                        "chunk": delta.reasoning_content
+                    }
+
+                # Traiter le contenu texte
+                if hasattr(delta, 'content') and delta.content:
+                    # Emit thinking_end when transitioning from thinking to text
+                    if thinking_started and not thinking_ended:
+                        thinking_ended = True
+                        yield {
+                            "type": "thinking_end",
+                            "thinking_content": accumulated_thinking,
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        }
+
+                    accumulated_text += delta.content
+                    yield {
+                        "type": "text_chunk",
+                        "chunk": delta.content
+                    }
+
+                # Traiter les appels d'outils
+                if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                    # Emit thinking_end when transitioning from thinking to tool use
+                    if thinking_started and not thinking_ended:
+                        thinking_ended = True
+                        yield {
+                            "type": "thinking_end",
+                            "thinking_content": accumulated_thinking,
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        }
+                    for tool_call in delta.tool_calls:
+                        # Accumuler les tool calls en chunks
+                        if not tool_uses or (tool_call.index >= len(tool_uses)):
+                            tool_uses.append({
+                                "id": tool_call.id if hasattr(tool_call, 'id') else f"tool_{len(tool_uses)}",
+                                "name": "",
+                                "arguments": ""
+                            })
+
+                        if hasattr(tool_call, 'function'):
+                            if hasattr(tool_call.function, 'name') and tool_call.function.name:
+                                tool_uses[tool_call.index]["name"] = tool_call.function.name
+                            if hasattr(tool_call.function, 'arguments') and tool_call.function.arguments:
+                                tool_uses[tool_call.index]["arguments"] += tool_call.function.arguments
+
+            # Emit thinking_end if we had thinking but no text/tool output triggered it
+            if thinking_started and not thinking_ended:
+                yield {
+                    "type": "thinking_end",
+                    "thinking_content": accumulated_thinking,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+
+            # Sauvegarder la réponse de l'assistant en format OpenAI
+            # Format OpenAI: {"role": "assistant", "content": ..., "tool_calls": [...]}
+            # Note: Moonshot AI requiert reasoning_content quand thinking est activé
+            assistant_message = {
+                "role": "assistant",
+                "content": accumulated_text if accumulated_text else None
+            }
+
+            # Ajouter reasoning_content si thinking est activé (requis par Moonshot)
+            if thinking and accumulated_thinking:
+                assistant_message["reasoning_content"] = accumulated_thinking
+
+            if tool_uses:
+                tool_calls_list = []
+                for tool_use in tool_uses:
+                    if tool_use["name"]:
+                        # Yield tool_use_start first (for UI feedback)
+                        yield {
+                            "type": "tool_use_start",
+                            "tool_name": tool_use["name"],
+                            "tool_id": tool_use["id"]
+                        }
+
+                        tool_calls_list.append({
+                            "id": tool_use["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tool_use["name"],
+                                "arguments": tool_use["arguments"] or "{}"
+                            }
+                        })
+
+                        # Yield l'événement tool_use
+                        yield {
+                            "type": "tool_use",
+                            "tool_name": tool_use["name"],
+                            "tool_input": json.loads(tool_use["arguments"]) if tool_use["arguments"] else {},
+                            "tool_id": tool_use["id"]
+                        }
+
+                if tool_calls_list:
+                    assistant_message["tool_calls"] = tool_calls_list
+
+            # Sauvegarder dans l'historique (ajouter directement le dict au format OpenAI)
+            self.chat_history.append(assistant_message)
+
+            # Mettre à jour le tracking tokens
+            try:
+                if last_usage is not None:
+                    class _TokenUsage:
+                        def __init__(self, usage_data, model_name):
+                            self.usage = usage_data
+                            self.model = model_name
+                    self.update_token_usage(_TokenUsage(last_usage, model_name))
+            except Exception as e:
+                print(f"[MOONSHOT_STREAMING] Impossible d'enregistrer l'usage tokens: {e}")
+
+            # Exécuter les outils si présents
+            if tool_uses and tool_mapping:
+                tool_results_added = False
+
+                for tool_use in tool_uses:
+                    if not tool_use["name"]:
+                        continue
+
+                    tool_name = tool_use["name"]
+                    tool_input = json.loads(tool_use["arguments"]) if tool_use["arguments"] else {}
+
+                    if tool_name in tool_mapping:
+                        tool_function = tool_mapping[tool_name]
+
+                        # Exécuter l'outil (async ou sync)
+                        if asyncio.iscoroutinefunction(tool_function):
+                            tool_result = await tool_function(**tool_input)
+                        else:
+                            tool_result = await asyncio.to_thread(tool_function, **tool_input)
+
+                        # Formater le résultat
+                        tool_result_str = json.dumps(tool_result) if isinstance(tool_result, dict) else str(tool_result)
+
+                        # Ajouter le résultat en format OpenAI directement à l'historique
+                        # Format OpenAI: {"role": "tool", "tool_call_id": ..., "content": ...}
+                        self.chat_history.append({
+                            "role": "tool",
+                            "tool_call_id": tool_use["id"],
+                            "content": tool_result_str
+                        })
+                        tool_results_added = True
+
+                        # Yield l'événement tool_result
+                        yield {
+                            "type": "tool_result",
+                            "tool_name": tool_name,
+                            "result": tool_result
+                        }
+
+                # Appel récursif pour obtenir la réponse finale
+                if tool_results_added:
+
+                    # Appel récursif pour obtenir la réponse finale
+                    async for event in self.moonshot_send_message_with_tools_streaming(
+                        content="",  # Contenu vide, continuer avec l'historique
+                        tools=tools,
+                        tool_mapping=tool_mapping,
+                        model_name=model_name,
+                        max_tokens=max_tokens,
+                        thinking=thinking,
+                        system_prompt=system_prompt
+                    ):
+                        yield event
+
+        except Exception as e:
+            logging.error(f"[MOONSHOT_STREAMING] Erreur: {e}", exc_info=True)
+            yield {
+                "type": "error",
+                "error": str(e)
+            }
+
+    def moonshot_agent(self, content, model_index=None, model_name=None,
+                       tools=None, tool_mapping=None, tool_choice="auto",
+                       thinking=True, thinking_budget=8192, raw_output=False,
+                       max_tokens=4096, **kwargs):
+        """
+        Point d'entrée principal pour l'agent Moonshot AI.
+        Wrapper autour de process_tool_use pour compatibilité.
+        """
+        if tools:
+            return self.process_tool_use(
+                content=content,
+                tools=tools,
+                model_index=model_index,
+                model_name=model_name,
+                tool_mapping=tool_mapping,
+                tool_choice=tool_choice,
+                thinking=thinking,
+                thinking_budget=thinking_budget,
+                raw_output=raw_output,
+                max_tokens=max_tokens,
+                **kwargs
+            )
         else:
-            response_text = "Le Job_id n'a pas pu être extrait."
-            #print(response_text)
-
-        self.agent.flush_chat_history()
-        return response_text
-
-    def antho_get_by_filter(self,user_query,metadata_dict,model_index):
-        # Appel asynchrone à la base de données
-        if metadata_dict.get('file_name') == '<UNKNOWN>':
-            del metadata_dict['file_name']
-        print(f"imprssion de metadata dict:{metadata_dict}")
-        filtered_metadatas, node_ids, documents = self.chroma_db_instance.fetch_documents_with_date_range(
-            query_text=user_query,
-            criteria=metadata_dict
-        )
-
-        #print(f"impression de userquery_dans la recherche de chroma_db:{user_query}")
-
-        prompt = f"""Voici les résultat de la recherche sémantique dans la base de donnée vectorielle, trouve la meilleures correspondance à la question initial qui est:
-        \n{user_query}\n.
-        
-        Si les résulats de la recherche vectoriel ne fournit pas de réponse satisfaisante, partager votre retour à l'utilisateur en expliquant l'insatisfesance de ton choix
-        réponses:{documents}"""
-        print(f"impression du prompt pour kdb:{prompt}")
-        chosen_model = self.models[model_index]
-        
-        data=self.agent.process_text(prompt)
-        
-        print(f"imprssion de la reponse final dans analyse_mulitpe_docds:{data}")
-        return  data
-    
-    def x_CHROMADB_AGENT(self, user_query, initial_metadata_dict=None, model_index=0):
-        """
-        Point d'entrée principal pour l'agent de recherche dans ChromaDB
-        
-        Args:
-            collection_name: Nom de la collection ChromaDB à interroger
-            user_query: Question de l'utilisateur
-            initial_metadata_dict: Dictionnaire initial de métadonnées (optionnel)
-            model_index: Index du modèle à utiliser (défaut: 0)
-            
-        Returns:
-            Réponse de l'agent
-        """
-        # Définition des outils disponibles
-        tools = [
-            {
-                "name": "CREATE_METADATA_FILTER",
-                "description": "Créer un dictionnaire de filtrage pour la recherche",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "pinnokio_func": {
-                            "type": "string",
-                            "description": "Département concerné (APbookeeper, EXbookeeper, Bankbookeeper, HRmanager, Admanager)",
-                            "enum": ["APbookeeper", "EXbookeeper", "Bankbookeeper", "HRmanager", "Admanager"]
-                        },
-                        "source": {
-                            "type": "string",
-                            "description": "Type de contenu (journal, journal/chat, context)",
-                            "enum": ["journal", "journal/chat", "context"]
-                        },
-                        "file_name": {
-                            "type": "string",
-                            "description": "Nom du fichier spécifique si mentionné, sinon '<UNKNOWN>'"
-                        }
-                    },
-                    "required": ["pinnokio_func", "source"]
-                }
-            },
-            {
-                "name": "ASK_PINNOKIO",
-                "description": "Recherche simple dans la base de données vectorielle",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "user_query": {
-                            "type": "string",
-                            "description": "Question précise pour la recherche"
-                        },
-                        "metadata_filters": {
-                            "type": "object",
-                            "description": "Filtres de métadonnées pour affiner la recherche"
-                        }
-                    },
-                    "required": ["user_query", "metadata_filters"]
-                }
-            },
-            {
-                "name": "GET_JOB_ID",
-                "description": "Extraction d'un job_id à partir d'une requête",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "user_query": {
-                            "type": "string",
-                            "description": "Requête pour rechercher un job_id spécifique"
-                        },
-                        "metadata_filters": {
-                            "type": "object",
-                            "description": "Filtres de métadonnées pour affiner la recherche"
-                        }
-                    },
-                    "required": ["user_query", "metadata_filters"]
-                }
-            },
-            {
-                "name": "GET_JOB_DETAILS",
-                "description": "Obtenir les détails d'un job spécifique",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "job_id": {
-                            "type": "string",
-                            "description": "Identifiant du job (format klk-uuid)"
-                        },
-                        "user_query": {
-                            "type": "string",
-                            "description": "Question spécifique sur ce job"
-                        },
-                        "mode": {
-                            "type": "string",
-                            "description": "Mode de recherche: 'basis' ou 'accounting_tech'",
-                            "enum": ["basis", "accounting_tech"]
-                        }
-                    },
-                    "required": ["job_id", "user_query"]
-                }
-            },
-            {
-                "name": "GET_BY_FILTER",
-                "description": "Recherche avancée avec filtres multiples",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "user_query": {
-                            "type": "string",
-                            "description": "Question pour la recherche"
-                        },
-                        "metadata_filters": {
-                            "type": "object",
-                            "description": "Dictionnaire de filtres de métadonnées"
-                        }
-                    },
-                    "required": ["user_query", "metadata_filters"]
-                }
-            },
-            {
-                "name": "TASK_COMPLETE",
-                "description": "Signaler la fin de la tâche de recherche",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "message": {
-                            "type": "string",
-                            "description": "Message final résumant les résultats obtenus"
-                        }
-                    },
-                    "required": ["message"]
-                }
-            }
-        ]
-        
-        # Fonction pour créer un dictionnaire de métadonnées
-        def create_metadata_filter(pinnokio_func, source, file_name="<UNKNOWN>"):
-            return {
-                "pinnokio_func": pinnokio_func,
-                "source": source,
-                "file_name": file_name
-            }
-        
-        # Mapping des outils vers leurs fonctions respectives
-        tool_map = {
-            'CREATE_METADATA_FILTER': create_metadata_filter,
-            'ASK_PINNOKIO': lambda user_query, metadata_filters: self.antho_kdb(
-                
-                user_query=user_query, 
-                metadata_dict=metadata_filters, 
-                model_index=model_index
-            ),
-            'GET_JOB_ID': lambda user_query, metadata_filters: self.antho_get_job_id_detail(
-                
-                user_query=user_query, 
-                metadata_dict=metadata_filters, 
-                model_index=model_index, 
-                job_id=None, 
-                mode='basis'
-            ),
-            'GET_JOB_DETAILS': lambda job_id, user_query, mode='basis': self.antho_get_job_id_detail(
-                
-                user_query=user_query, 
-                metadata_dict={"pinnokio_func": "APbookeeper", "source": "journal/chat", "file_name": f"chat_{job_id}.txt"},
-                model_index=model_index, 
-                job_id=job_id, 
-                mode=mode
-            ),
-            'GET_BY_FILTER': lambda user_query, metadata_filters: self.antho_get_by_filter(
-                user_query=user_query, 
-                metadata_dict=metadata_filters, 
-                model_index=model_index
-            ),
-            'TASK_COMPLETE': lambda message: f"SIGNAL_TERMINATE: {message}"
-        }
-        
-        # Configuration initiale de l'agent avec le prompt système
-        self.AGENT_INIT()
-        
-        # Lancement du workflow avec un maximum de tours pour éviter les boucles infinies
-        max_turns = 10
-        turn_count = 0
-        
-        # Si un dictionnaire initial de métadonnées est fourni, on l'utilise comme contexte supplémentaire
-        metadata_context = ""
-        if initial_metadata_dict:
-            metadata_context = f"\nContexte initial de filtrage: {json.dumps(initial_metadata_dict)}"
-        
-        # Message initial pour l'agent
-        current_message = f"Nouvelle requête utilisateur: {user_query}{metadata_context}\n\nAnalyse cette requête, détermine les métadonnées de filtrage appropriées en utilisant CREATE_METADATA_FILTER, puis utilise l'outil le plus adapté pour répondre à la question."
-        
-        # Historique des étapes et résultats pour construire la réponse finale
-        workflow_steps = []
-        final_response = None
-        
-        while turn_count < max_turns:
-            turn_count += 1
-            print(f"Tour {turn_count}/{max_turns}")
-            
-            # L'agent décide quel outil utiliser
-            response = self.agent.process_tool_use(
-                content=current_message,
-                tools=tools,
-                tool_mapping=tool_map,
-                raw_output=True,
+            return self.process_text(
+                content=content,
+                model_index=model_index,
+                model_name=model_name,
+                thinking=thinking,
+                thinking_budget=thinking_budget,
+                max_tokens=max_tokens,
+                **kwargs
             )
-            
-            print(f"Réponse de l'agent (tour {turn_count}): {response}")
-            
-            # Vérifier si l'agent a terminé sa tâche
-            if isinstance(response, str) and "SIGNAL_TERMINATE" in response:
-                final_message = response.replace("SIGNAL_TERMINATE: ", "")
-                print(f"Tâche terminée: {final_message}")
-                final_response = final_message
-                workflow_steps.append(f"Terminaison: {final_message}")
-                break
-                
-            # Si l'agent a utilisé un outil, traiter la réponse
-            if isinstance(response, list) and len(response) > 0:
-                tool_response = response[0]
-                
-                # Cas d'utilisation d'un outil
-                if "tool_output" in tool_response:
-                    tool_name = tool_response.get("tool_input", {}).get("tool_name", "outil inconnu")
-                    tool_result = tool_response["tool_output"].get("content", "Résultat non disponible")
-                    
-                    # Enregistrer l'étape du workflow
-                    workflow_steps.append(f"Utilisation de {tool_name}: {tool_result}...")
-                    
-                    # Cas spécial pour CREATE_METADATA_FILTER
-                    if tool_name == "CREATE_METADATA_FILTER":
-                        current_message = f"Filtres de métadonnées créés: {tool_result}\n\nMaintenant, sélectionne l'outil approprié pour répondre à la question originale en utilisant ces filtres."
-                    # Cas spécial pour GET_JOB_ID
-                    elif tool_name == "GET_JOB_ID" and "job_id" in tool_result:
-                        job_id = tool_result.get("job_id")
-                        current_message = f"Job ID trouvé: {job_id}\n\nMaintenant, utilise GET_JOB_DETAILS pour obtenir les informations complètes sur ce job."
-                    # Cas général
-                    else:
-                        current_message = f"Résultat de {tool_name}: {tool_result}\n\nContinue ton analyse ou termine la tâche si tu as obtenu toutes les informations nécessaires."
-                # Cas de réponse textuelle directe
-                else:
-                    text_response = tool_response.get("text_output", {}).get("content", {}).get("answer_text", "")
-                    workflow_steps.append(f"Réponse directe: {text_response}...")
-                    final_response = text_response
-                    break
+
+    def final_handle_responses(self, input_data):
+        """Traite les réponses et les normalise."""
+        if isinstance(input_data, list):
+            if len(input_data) == 1:
+                return self.basic_handle_response(input_data[0])
             else:
-                # Si l'agent a répondu directement en texte
-                text_response = response.get("text_output", {}).get("content", {}).get("answer_text", "")
-                workflow_steps.append(f"Réponse directe: {text_response}...")
-                final_response = text_response
-                break
-        
-        if final_response is None:
-            workflow_summary = "\n- ".join([""] + workflow_steps)
-            final_response = f"Le processus de recherche a atteint sa limite de tours sans fournir une réponse définitive. Voici les étapes exécutées:{workflow_summary}"
+                results = []
+                for item in input_data:
+                    result = self.basic_handle_response(item)
+                    results.append(result)
+                return results
+        else:
+            return self.basic_handle_response(input_data)
 
-        # Maintenant, que nous ayons une réponse finale ou un message d'erreur,
-        # générer un résumé concis avec l'agent
-        self.agent.flush_chat_history()
+    def basic_handle_response(self, response):
+        """Traite une réponse individuelle."""
+        data = {}
 
-        workflow_summary = "\n- ".join([""] + workflow_steps)
-        summarization_prompt = f"""
-        Voici la question initiale de l'utilisateur : 
-        "{user_query}"
+        has_tool_output = 'tool_output' in response
+        has_text_output = 'text_output' in response
 
-        Voici les informations que nous avons pu recueillir :
-        {final_response}
-
-        Voici également un résumé des étapes de recherche effectuées :
-        {workflow_summary}
-
-        Génère un résumé concis et précis qui répond clairement à la question initiale de l'utilisateur.
-        Assure-toi que ta réponse soit structurée, factuelle et directement liée à la demande.
-        Ne mentionne pas les étapes de recherche, mais concentre-toi uniquement sur les informations pertinentes.
-        """
-
-        # Utiliser l'agent pour générer un résumé concis
-        summarized_response = self.agent.process_text(summarization_prompt)
-
-        # Extraire le texte de la réponse
-        if isinstance(summarized_response, dict):
-            if 'text_output' in summarized_response:
-                text_output = summarized_response.get('text_output', {})
-                if isinstance(text_output, dict):
-                    final_response = text_output.get('content', {}).get('answer_text', final_response)
-                else:
-                    final_response = str(text_output)
-
-        # Nettoyage de l'historique de chat pour la prochaine utilisation
-        self.agent.flush_chat_history()
-
-        return final_response
-    def CHROMADB_AGENT(self, user_query, initial_metadata_dict=None, model_index=0):
-        """
-        Point d'entrée principal pour l'agent de recherche dans ChromaDB
-        
-        Args:
-            user_query: Question de l'utilisateur
-            initial_metadata_dict: Dictionnaire initial de métadonnées (optionnel)
-            model_index: Index du modèle à utiliser (défaut: 0)
-            
-        Returns:
-            Réponse de l'agent
-        """
-        tools = [
-            # ... (your tools definition remains the same)
-            {
-                "name": "CREATE_METADATA_FILTER",
-                "description": "Créer un dictionnaire de filtrage pour la recherche",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "pinnokio_func": {
-                            "type": "string",
-                            "description": "Département concerné (APbookeeper, EXbookeeper, Bankbookeeper, HRmanager, Admanager)",
-                            "enum": ["APbookeeper", "EXbookeeper", "Bankbookeeper", "HRmanager", "Admanager"]
-                        },
-                        "source": {
-                            "type": "string",
-                            "description": "Type de contenu (journal, journal/chat, context)",
-                            "enum": ["journal", "journal/chat", "context"]
-                        },
-                        "file_name": {
-                            "type": "string",
-                            "description": "Nom du fichier spécifique si mentionné, sinon '<UNKNOWN>'"
-                        }
-                    },
-                    "required": ["pinnokio_func", "source"]
-                }
-            },
-            {
-                "name": "ASK_PINNOKIO",
-                "description": "Recherche simple dans la base de données vectorielle",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "user_query": {
-                            "type": "string",
-                            "description": "Question précise pour la recherche"
-                        },
-                        "metadata_filters": {
-                            "type": "object",
-                            "description": "Filtres de métadonnées pour affiner la recherche"
-                        }
-                    },
-                    "required": ["user_query", "metadata_filters"]
-                }
-            },
-            {
-                "name": "GET_JOB_ID",
-                "description": "Extraction d'un job_id à partir d'une requête",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "user_query": {
-                            "type": "string",
-                            "description": "Requête pour rechercher un job_id spécifique"
-                        },
-                        "metadata_filters": {
-                            "type": "object",
-                            "description": "Filtres de métadonnées pour affiner la recherche"
-                        }
-                    },
-                    "required": ["user_query", "metadata_filters"]
-                }
-            },
-            {
-                "name": "GET_JOB_DETAILS",
-                "description": "Obtenir les détails d'un job spécifique",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "job_id": {
-                            "type": "string",
-                            "description": "Identifiant du job (format klk-uuid)"
-                        },
-                        "user_query": {
-                            "type": "string",
-                            "description": "Question spécifique sur ce job"
-                        },
-                        "mode": {
-                            "type": "string",
-                            "description": "Mode de recherche: 'basis' ou 'accounting_tech'",
-                            "enum": ["basis", "accounting_tech"]
-                        }
-                    },
-                    "required": ["job_id", "user_query"]
-                }
-            },
-            {
-                "name": "GET_BY_FILTER",
-                "description": "Recherche avancée avec filtres multiples",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "user_query": {
-                            "type": "string",
-                            "description": "Question pour la recherche"
-                        },
-                        "metadata_filters": {
-                            "type": "object",
-                            "description": "Dictionnaire de filtres de métadonnées"
-                        }
-                    },
-                    "required": ["user_query", "metadata_filters"]
-                }
-            },
-            {
-                "name": "TASK_COMPLETE",
-                "description": "Signaler la fin de la tâche de recherche",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "message": {
-                            "type": "string",
-                            "description": "Message final résumant les résultats obtenus"
-                        }
-                    },
-                    "required": ["message"]
-                }
+        if has_tool_output and has_text_output:
+            text_content = response['text_output'].get('content', '')
+            tool_content = response['tool_output'].get('content', {})
+            data = {
+                'text_output': {'text': text_content},
+                'tool_output': tool_content
             }
-        ]
-        
-        def create_metadata_filter(pinnokio_func, source, file_name="<UNKNOWN>"):
-            # Strip potential whitespace from inputs, especially enum values
-            pinnokio_func = pinnokio_func.strip() if isinstance(pinnokio_func, str) else pinnokio_func
-            source = source.strip() if isinstance(source, str) else source
-            file_name = file_name.strip() if isinstance(file_name, str) else file_name
-            
-            # Validate against enums if possible (though agent should handle this)
-            valid_pinnokio_funcs = ["APbookeeper", "EXbookeeper", "Bankbookeeper", "HRmanager", "Admanager"]
-            valid_sources = ["journal", "journal/chat", "context"]
-            if pinnokio_func not in valid_pinnokio_funcs:
-                print(f"Warning: Invalid pinnokio_func '{pinnokio_func}' provided to create_metadata_filter. Using APbookeeper as default.")
-                # Potentially raise error or use a default
-                # pinnokio_func = "APbookeeper" 
-            if source not in valid_sources:
-                print(f"Warning: Invalid source '{source}' provided to create_metadata_filter. Using 'journal' as default.")
-                # source = "journal"
-
-            return {
-                "pinnokio_func": pinnokio_func,
-                "source": source,
-                "file_name": file_name
-            }
-        
-        tool_map = {
-            'CREATE_METADATA_FILTER': create_metadata_filter,
-            'ASK_PINNOKIO': lambda user_query, metadata_filters: self.antho_kdb(
-                user_query=user_query, 
-                metadata_dict=metadata_filters, 
-                model_index=model_index
-            ),
-            'GET_JOB_ID': lambda user_query, metadata_filters: self.antho_get_job_id_detail(
-                user_query=user_query, 
-                metadata_dict=metadata_filters, 
-                model_index=model_index, 
-                job_id=None, 
-                mode='basis'
-            ),
-            'GET_JOB_DETAILS': lambda job_id, user_query, mode='basis': self.antho_get_job_id_detail(
-                user_query=user_query, 
-                metadata_dict={"pinnokio_func": "APbookeeper", "source": "journal/chat", "file_name": f"chat_{job_id}.txt"}, # Example default metadata
-                model_index=model_index, 
-                job_id=job_id, 
-                mode=mode
-            ),
-            'GET_BY_FILTER': lambda user_query, metadata_filters: self.antho_get_by_filter(
-                user_query=user_query, 
-                metadata_dict=metadata_filters, 
-                model_index=model_index
-            ),
-            'TASK_COMPLETE': lambda message: f"SIGNAL_TERMINATE: {message}"
-        }
-        
-        self.AGENT_INIT() 
-        
-        max_turns = 10 # Max 5-7 recommended for Anthropic tools
-        turn_count = 0
-        
-        metadata_context = ""
-        if initial_metadata_dict:
-            metadata_context = f"\nContexte initial de filtrage: {json.dumps(initial_metadata_dict)}"
-        
-        current_message = f"Nouvelle requête utilisateur: {user_query}{metadata_context}\n\nAnalyse cette requête, détermine les métadonnées de filtrage appropriées en utilisant CREATE_METADATA_FILTER si nécessaire, puis utilise l'outil le plus adapté pour répondre à la question. Si tu as la réponse, utilise TASK_COMPLETE pour terminer."
-        
-        workflow_steps = [f"Requête initiale: {user_query}{metadata_context}"]
-        final_response = None
-        
-        while turn_count < max_turns:
-            turn_count += 1
-            print(f"--- CHROMADB_AGENT Tour {turn_count}/{max_turns} ---")
-            print(f"Message à l'agent: {current_message}")
-            
-            # L'agent décide quel outil utiliser ou répond directement
-            # process_tool_use returns a list of response blocks
-            # Example: [{'tool_output': {'tool_use_id': ..., 'tool_name': ..., 'content': ...}}, {'text_output': ...}]
-            # or just [{'text_output': ...}]
-            agent_sdk_response_blocks = self.agent.process_tool_use(
-                content=current_message,
-                tools=tools,
-                tool_mapping=tool_map,
-                raw_output=True, # This ensures we get the structured output
-            )
-            
-            print(f"Réponse brute de l'agent SDK (tour {turn_count}): {agent_sdk_response_blocks}")
-            
-            # Assume no tool will be called unless found
-            next_turn_prompt_parts = [] # Accumulate parts for the next prompt to the agent
-            tool_was_called_this_turn = False
-
-            for block in agent_sdk_response_blocks:
-                if "tool_output" in block:
-                    tool_was_called_this_turn = True
-                    tool_output_data = block["tool_output"]
-                    # tool_name might be in tool_input (Anthropic SDK v2) or tool_output (some wrappers)
-                    tool_name = block.get("tool_input", {}).get("tool_name", tool_output_data.get("tool_name", "outil inconnu"))
-                    tool_result = tool_output_data.get("content", "Résultat non disponible")
-                    tool_input_args_str = str(block.get("tool_input", {}).get("input", {}))
-
-
-                    workflow_steps.append(f"Tour {turn_count}: Utilisation de {tool_name}({tool_input_args_str}) -> Résultat (premier 200 chars): {str(tool_result)[:200]}...")
-
-                    # 1. Check for explicit termination by TASK_COMPLETE tool
-                    if tool_name == "TASK_COMPLETE":
-                        if isinstance(tool_result, str) and "SIGNAL_TERMINATE:" in tool_result:
-                            final_response = tool_result.replace("SIGNAL_TERMINATE:", "").strip()
-                            workflow_steps.append(f"Terminaison explicite par TASK_COMPLETE: {final_response}")
-                            break # Break from iterating blocks
-
-                    # 2. Check for implicit termination from *other* tools' output
-                    elif isinstance(tool_result, str) and "TASK_COMPLETE" in tool_result:
-                        # The sub-LLM (e.g., in antho_kdb) has signaled completion
-                        final_response = tool_result.split("TASK_COMPLETE", 1)[0].strip()
-                        # If there's text after TASK_COMPLETE, it might be a message for the user
-                        if len(tool_result.split("TASK_COMPLETE", 1)) > 1 and tool_result.split("TASK_COMPLETE", 1)[1].strip():
-                            final_response += "\n" + tool_result.split("TASK_COMPLETE", 1)[1].strip()
-
-                        workflow_steps.append(f"Terminaison implicite (résultat de {tool_name} contenait TASK_COMPLETE): {final_response}")
-                        break # Break from iterating blocks
-                    
-                    # 3. Process normal tool output for next turn
-                    else:
-                        if tool_name == "CREATE_METADATA_FILTER":
-                            next_turn_prompt_parts.append(f"Filtres de métadonnées créés: {tool_result}\n\nMaintenant, sélectionne l'outil approprié pour répondre à la question originale '{user_query}' en utilisant ces filtres, ou utilise TASK_COMPLETE si tu as la réponse.")
-                        elif tool_name == "GET_JOB_ID":
-                            # Check if tool_result is a dictionary and contains job_id
-                            if isinstance(tool_result, dict) and "job_id" in tool_result:
-                                job_id = tool_result.get("job_id")
-                                next_turn_prompt_parts.append(f"Job ID trouvé: {job_id}\n\nMaintenant, utilise GET_JOB_DETAILS pour obtenir les informations complètes sur ce job ({user_query}).")
-                            elif isinstance(tool_result, str): # If it's a string response
-                                 next_turn_prompt_parts.append(f"Résultat de GET_JOB_ID: {tool_result}\n\nAnalyse ce résultat. Si un job_id est clairement identifié, utilise GET_JOB_DETAILS. Sinon, continue ou termine.")
-                            else: # Fallback for unexpected tool_result format
-                                next_turn_prompt_parts.append(f"Résultat de GET_JOB_ID: {tool_result}\n\nAnalyse ce résultat. Si un job_id est clairement identifié, utilise GET_JOB_DETAILS. Sinon, continue ton analyse ou termine la tâche.")
-                        else: # ASK_PINNOKIO, GET_JOB_DETAILS, GET_BY_FILTER
-                            next_turn_prompt_parts.append(f"Résultat de {tool_name}: {tool_result}\n\nContinue ton analyse de la requête '{user_query}' ou termine la tâche avec TASK_COMPLETE si tu as obtenu toutes les informations nécessaires.")
-                
-                elif "text_output" in block:
-                    text_content = block.get("text_output", {}).get("content", {}).get("answer_text", "")
-                    if text_content: # Only add if there's actual text
-                        workflow_steps.append(f"Tour {turn_count}: Réponse textuelle de l'agent: {text_content}")
-                        # If this is the *only* kind of response (no tool call), it might be the final answer
-                        # But usually, text_output accompanies a tool_use or is a thinking step.
-                        next_turn_prompt_parts.append(f"L'agent a aussi dit: {text_content}\nContinue la tâche pour '{user_query}'.")
-
-            if final_response is not None:
-                print(f"Tâche terminée dans le tour {turn_count}.")
-                break # Break from the main while loop
-
-            if not next_turn_prompt_parts:
-                 # This case can happen if agent returns empty response or unexpected format
-                if tool_was_called_this_turn: # A tool was called but didn't fit specific handling to form next prompt
-                    current_message = f"L'outil a été exécuté. Analyse la situation pour la requête '{user_query}' et décide de la prochaine étape ou utilise TASK_COMPLETE."
-                else: # No tool called, no text output with content
-                    workflow_steps.append(f"Tour {turn_count}: L'agent n'a pas appelé d'outil ni fourni de texte significatif.")
-                    current_message = f"Ta dernière réponse n'était pas claire. Pour la requête '{user_query}', réessaie d'utiliser un outil ou termine avec TASK_COMPLETE si tu as une réponse."
+        elif has_text_output:
+            text_content = response['text_output'].get('content', '')
+            if isinstance(text_content, dict) and 'answer_text' in text_content:
+                data = text_content['answer_text']
             else:
-                current_message = "\n".join(next_turn_prompt_parts)
+                data = text_content
+        elif has_tool_output:
+            tool_content = response['tool_output'].get('content', {})
+            if isinstance(tool_content, list):
+                data = []
+                for item in tool_content:
+                    if isinstance(item, dict) and 'text' in item:
+                        data.append(item['text'])
+            else:
+                data = tool_content
+        else:
+            print("Format de réponse non reconnu.")
 
-        if final_response is None:
-            workflow_summary = "\n- ".join([""] + workflow_steps)
-            final_response = f"Le processus de recherche a atteint sa limite de {max_turns} tours sans fournir une réponse définitive via TASK_COMPLETE. Voici les étapes exécutées:{workflow_summary}"
-            workflow_steps.append(f"Terminaison: Limite de tours atteinte.")
-
-        # Summarization step
-        self.agent.flush_chat_history() # Good practice
-        
-        # Construct a clear summary of the workflow for the summarizer
-        # Avoid overly long workflow_steps in the prompt if they are too verbose
-        summarized_workflow_for_prompt = "\n- ".join([""] + [s[:500] + "..." if len(s) > 500 else s for s in workflow_steps])
+        return data
 
 
-        summarization_prompt = f"""
-        La question initiale de l'utilisateur était : 
-        "{user_query}"
+class _Anthropic_KDB_AGENT_REMOVED:
+    """REMOVED: ChromaDB agent migrated to Firestore RAG (rag_standalone_handler.py in Worker LLM).
+    Class stub kept to avoid import errors if referenced externally."""
+    pass
 
-        Voici les informations finales recueillies par l'agent de recherche après plusieurs étapes :
-        "{final_response}"
 
-        Voici un résumé des étapes de recherche effectuées (utile pour le contexte, mais ne pas répéter dans la réponse finale) :
-        {summarized_workflow_for_prompt}
-
-        En te basant PRINCIPALEMENT sur les "informations finales recueillies", génère une réponse concise, claire et factuelle à la question initiale de l'utilisateur.
-        Si les informations finales indiquent un échec ou une absence de résultats, explique cela poliment.
-        Ne mentionne PAS explicitement les outils utilisés ou le processus de recherche interne à moins que ce ne soit crucial pour expliquer pourquoi une réponse n'a pas pu être trouvée.
-        Concentre-toi sur la fourniture d'une réponse directe.
-        Si la réponse finale est déjà une explication d'échec (par exemple, "Aucune facture trouvée..."), reformule-la pour qu'elle soit une réponse directe et polie à l'utilisateur.
-        """
-        print(f"\n--- PROMPT DE SYNTHESE --- \n{summarization_prompt}\n-------------------------\n")
-
-        summarized_answer_obj = self.agent.process_text(summarization_prompt) # model_index is handled by AnthoAgent
-        
-        final_summarized_text = final_response # Fallback to pre-summary response
-
-        if isinstance(summarized_answer_obj, dict):
-            if 'text_output' in summarized_answer_obj:
-                text_output_content = summarized_answer_obj.get('text_output', {}).get('content', {})
-                if isinstance(text_output_content, dict):
-                    final_summarized_text = text_output_content.get('answer_text', final_summarized_text)
-                elif isinstance(text_output_content, str): # Sometimes content might be a direct string
-                    final_summarized_text = text_output_content
-            # If the structure is simpler, e.g. directly {'answer_text': '...'}
-            elif 'answer_text' in summarized_answer_obj:
-                 final_summarized_text = summarized_answer_obj.get('answer_text', final_summarized_text)
-
-        elif isinstance(summarized_answer_obj, str): # If process_text returns a direct string
-            final_summarized_text = summarized_answer_obj
-
-        print(f"--- RÉPONSE FINALE SYNTHÉTISÉE --- \n{final_summarized_text}\n------------------------------\n")
-        
-        self.agent.flush_chat_history()
-        return final_summarized_text
+# Legacy alias
+Anthropic_KDB_AGENT = _Anthropic_KDB_AGENT_REMOVED
 
 
 class TextStreamer:

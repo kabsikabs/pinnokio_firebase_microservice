@@ -400,6 +400,159 @@ class ERPService:
         return lines
 
     @classmethod
+    def get_open_ap_invoices(
+        cls,
+        user_id: str,
+        company_id: str,
+        client_uuid: Optional[str] = None,
+    ) -> list:
+        """
+        Récupère les factures fournisseurs (AP) ouvertes depuis Odoo.
+        Factures postées mais pas encore totalement payées.
+
+        Returns:
+            Liste de dicts normalisés pour le bulk matching:
+            {id, name, date, amount, currency, supplier_name, reference, type}
+        """
+        manager = cls._get_manager()
+        connection = manager.get_connection(user_id, company_id, client_uuid=client_uuid)
+
+        if not connection:
+            raise Exception("Failed to connect to ERP")
+
+        domain = [
+            ["move_type", "=", "in_invoice"],
+            ["state", "=", "posted"],
+            ["payment_state", "in", ["not_paid", "partial"]],
+        ]
+        fields = [
+            "name", "invoice_date", "date", "ref",
+            "amount_total_signed", "amount_residual",
+            "payment_reference", "partner_id",
+            "invoice_partner_display_name",
+            "currency_id", "invoice_date_due",
+        ]
+
+        moves = connection._execute_kw(
+            "account.move", "search_read", [domain], {"fields": fields}
+        )
+
+        # Normalize to unified format
+        from .fx_rate_service import normalize_currency
+        items = []
+        for m in moves:
+            currency_raw = m.get("currency_id")
+            currency = (
+                currency_raw[1]
+                if isinstance(currency_raw, (list, tuple)) and len(currency_raw) > 1
+                else "EUR"
+            )
+            partner_name = m.get("invoice_partner_display_name") or ""
+            if not partner_name and isinstance(m.get("partner_id"), (list, tuple)):
+                partner_name = m["partner_id"][1] if len(m["partner_id"]) > 1 else ""
+
+            amount = abs(float(m.get("amount_residual") or m.get("amount_total_signed") or 0))
+            if amount == 0:
+                continue
+
+            items.append({
+                "id": m.get("id"),
+                "name": m.get("name", ""),
+                "date": m.get("invoice_date") or m.get("date") or "",
+                "amount": amount,
+                "currency": normalize_currency(currency),
+                "partner_name": partner_name,
+                "supplier_name": partner_name,
+                "reference": m.get("ref") or m.get("payment_reference") or "",
+                "invoice_date": m.get("invoice_date") or m.get("date") or "",
+                "due_date": m.get("invoice_date_due", ""),
+                "payment_reference": m.get("payment_reference") or "",
+                "ref": m.get("ref") or m.get("payment_reference") or "",
+                # Display fields for frontend badge
+                "display_name": partner_name,
+                "display_ref": m.get("name", ""),
+                "type": "invoice",
+            })
+
+        return items
+
+    @classmethod
+    def get_open_ar_invoices(
+        cls,
+        user_id: str,
+        company_id: str,
+        client_uuid: Optional[str] = None,
+    ) -> list:
+        """
+        Récupère les factures clients (AR) ouvertes depuis Odoo.
+        Factures postées mais pas encore totalement payées.
+
+        Returns:
+            Liste de dicts normalisés pour le bulk matching:
+            {id, name, date, amount, currency, partner_name, reference, type}
+        """
+        manager = cls._get_manager()
+        connection = manager.get_connection(user_id, company_id, client_uuid=client_uuid)
+
+        if not connection:
+            raise Exception("Failed to connect to ERP")
+
+        domain = [
+            ["move_type", "=", "out_invoice"],
+            ["state", "=", "posted"],
+            ["payment_state", "in", ["not_paid", "partial"]],
+        ]
+        fields = [
+            "name", "invoice_date", "date", "ref",
+            "amount_total_signed", "amount_residual",
+            "payment_reference", "partner_id",
+            "invoice_partner_display_name",
+            "currency_id", "invoice_date_due",
+        ]
+
+        moves = connection._execute_kw(
+            "account.move", "search_read", [domain], {"fields": fields}
+        )
+
+        from .fx_rate_service import normalize_currency
+        items = []
+        for m in moves:
+            currency_raw = m.get("currency_id")
+            currency = (
+                currency_raw[1]
+                if isinstance(currency_raw, (list, tuple)) and len(currency_raw) > 1
+                else "EUR"
+            )
+            partner_name = m.get("invoice_partner_display_name") or ""
+            if not partner_name and isinstance(m.get("partner_id"), (list, tuple)):
+                partner_name = m["partner_id"][1] if len(m["partner_id"]) > 1 else ""
+
+            amount = abs(float(m.get("amount_residual") or m.get("amount_total_signed") or 0))
+            if amount == 0:
+                continue
+
+            items.append({
+                "id": m.get("id"),
+                "name": m.get("name", ""),
+                "date": m.get("invoice_date") or m.get("date") or "",
+                "amount": amount,
+                "currency": normalize_currency(currency),
+                "partner_name": partner_name,
+                "supplier_name": partner_name,
+                "reference": m.get("ref") or m.get("payment_reference") or "",
+                "invoice_date": m.get("invoice_date") or m.get("date") or "",
+                "due_date": m.get("invoice_date_due", ""),
+                "payment_reference": m.get("payment_reference") or "",
+                "ref": m.get("ref") or m.get("payment_reference") or "",
+                "display_name": partner_name,
+                "display_ref": m.get("name", ""),
+                "type": "ar_invoice",
+                "contact_type": "customer",
+            })
+
+        return items
+
+    @classmethod
     def test_connection(
         cls,
         user_id: Optional[str] = None,
@@ -943,10 +1096,12 @@ class ERPService:
         async def send_progress(stage: str, progress: int, message: str):
             try:
                 await hub.broadcast(user_id, {
-                    "type": "coa_sync_progress",
-                    "stage": stage,
-                    "progress": progress,
-                    "message": message
+                    "type": "coa.sync_progress",
+                    "payload": {
+                        "stage": stage,
+                        "progress": progress,
+                        "message": message,
+                    }
                 })
             except Exception as e:
                 logger.warning(f"[ERP] WSS broadcast failed: {e}")
@@ -1323,7 +1478,7 @@ class ERPService:
             if unknown_types:
                 await send_progress("mapping_nature", 55, f"Agent: mapping de {len(unknown_types)} nouveaux account_type...")
 
-                from .llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_Anthropic_Agent
+                from .llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_MOONSHOT_AIAgent
 
                 def _extract_text(obj: Any) -> str:
                     if isinstance(obj, str):
@@ -1379,16 +1534,16 @@ class ERPService:
                         firebase_user_id=user_id,
                         job_id="coa_nature_mapping",
                     )
-                    anthropic_instance = NEW_Anthropic_Agent(collection_name=company_id, job_id="coa_nature_mapping")
-                    anthropic_instance.update_system_prompt(system_prompt)
-                    agent.register_provider(ModelProvider.ANTHROPIC, anthropic_instance, ModelSize.SMALL)
-                    agent.default_provider = ModelProvider.ANTHROPIC
+                    moonshot_instance = NEW_MOONSHOT_AIAgent(collection_name=company_id, job_id="coa_nature_mapping")
+                    moonshot_instance.update_system_prompt(system_prompt)
+                    agent.register_provider(ModelProvider.MOONSHOT_AI, moonshot_instance, ModelSize.MEDIUM)
+                    agent.default_provider = ModelProvider.MOONSHOT_AI
                     resp = agent.process_tool_use(
                         content=user_prompt,
                         tools=[],
                         tool_mapping={},
-                        size=ModelSize.SMALL,
-                        provider=ModelProvider.ANTHROPIC,
+                        size=ModelSize.MEDIUM,
+                        provider=ModelProvider.MOONSHOT_AI,
                         max_tokens=2048,
                         raw_output=True,
                     )
@@ -1442,7 +1597,7 @@ class ERPService:
                     nature = "PROFIT_AND_LOSS"
                 accounts_by_nature[nature].append(item)
 
-            from .llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_Anthropic_Agent
+            from .llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_MOONSHOT_AIAgent
 
             def _extract_text(obj: Any) -> str:
                 if isinstance(obj, str):
@@ -1512,17 +1667,17 @@ class ERPService:
                     firebase_user_id=user_id,
                     job_id=f"coa_function_mapping_{nature.lower()}",
                 )
-                anthropic_instance = NEW_Anthropic_Agent(collection_name=company_id, job_id=f"coa_function_mapping_{nature.lower()}")
-                anthropic_instance.update_system_prompt(system_prompt)
-                agent.register_provider(ModelProvider.ANTHROPIC, anthropic_instance, ModelSize.SMALL)
-                agent.default_provider = ModelProvider.ANTHROPIC
+                moonshot_instance = NEW_MOONSHOT_AIAgent(collection_name=company_id, job_id=f"coa_function_mapping_{nature.lower()}")
+                moonshot_instance.update_system_prompt(system_prompt)
+                agent.register_provider(ModelProvider.MOONSHOT_AI, moonshot_instance, ModelSize.MEDIUM)
+                agent.default_provider = ModelProvider.MOONSHOT_AI
 
                 resp = agent.process_tool_use(
                     content=user_prompt,
                     tools=[],
                     tool_mapping={},
-                    size=ModelSize.SMALL,
-                    provider=ModelProvider.ANTHROPIC,
+                    size=ModelSize.MEDIUM,
+                    provider=ModelProvider.MOONSHOT_AI,
                     max_tokens=4096,
                     raw_output=True,
                 )
@@ -1619,19 +1774,6 @@ class ERPService:
             # ═══════════════════════════════════════════════════════════════
             await send_progress("complete", 100, "Synchronisation terminée avec succès!")
 
-            try:
-                await hub.broadcast(user_id, {
-                    "type": "coa_sync_complete",
-                    "success": True,
-                    "accounts_synced": len(erp_account_ids),
-                    "accounts_added": accounts_added,
-                    "accounts_updated": accounts_updated,
-                    "accounts_deleted": len(deleted_ids),
-                    "accounts_deactivated": accounts_deactivated,
-                })
-            except Exception:
-                pass
-
             return {
                 "success": True,
                 "message": "Plan comptable synchronisé avec succès",
@@ -1646,16 +1788,6 @@ class ERPService:
 
         except Exception as e:
             logger.error(f"❌ [ERP] sync_coa_from_erp error: {e}", exc_info=True)
-            
-            # Signal d'erreur
-            try:
-                await hub.broadcast(user_id, {
-                    "type": "coa_sync_complete",
-                    "success": False,
-                    "error": str(e)
-                })
-            except Exception:
-                pass
             
             return {
                 "success": False,
@@ -1695,7 +1827,7 @@ class ERPService:
         import asyncio
         import json
         import re
-        from .llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_Anthropic_Agent
+        from .llm.klk_agents import BaseAIAgent, ModelProvider, ModelSize, NEW_MOONSHOT_AIAgent
         
         # Catégories disponibles pour l'enrichissement
         expense_function_list = [
@@ -1750,28 +1882,28 @@ Réponds au format JSON strict:
                 job_id=f"coa_enrichment"
             )
             
-            # ⭐ ENREGISTRER L'INSTANCE DU PROVIDER ANTHROPIC
-            anthropic_instance = NEW_Anthropic_Agent(
+            # ⭐ ENREGISTRER L'INSTANCE DU PROVIDER MOONSHOT_AI
+            moonshot_instance = NEW_MOONSHOT_AIAgent(
                 collection_name=company_id,
                 job_id="coa_enrichment"
             )
-            anthropic_instance.update_system_prompt(system_prompt)
-            agent.register_provider(ModelProvider.ANTHROPIC, anthropic_instance, ModelSize.SMALL)
-            agent.default_provider = ModelProvider.ANTHROPIC
-            
+            moonshot_instance.update_system_prompt(system_prompt)
+            agent.register_provider(ModelProvider.MOONSHOT_AI, moonshot_instance, ModelSize.MEDIUM)
+            agent.default_provider = ModelProvider.MOONSHOT_AI
+
             await send_progress("enriching_expenses", 55, "Traitement par l'IA...")
-            
+
             # ═══════════════════════════════════════════════════════════════
             # APPEL LLM VIA process_tool_use (méthode standard)
-            # Utilise size=ModelSize.SMALL (Claude Haiku) pour rapidité et coût
+            # Utilise size=ModelSize.MEDIUM (Kimi K2.5) pour rapidité et coût
             # ═══════════════════════════════════════════════════════════════
             def _sync_call():
                 return agent.process_tool_use(
                     content=user_prompt,
                     tools=[],  # Pas d'outils, juste génération de texte
                     tool_mapping={},
-                    size=ModelSize.SMALL,  # Claude Haiku pour rapidité
-                    provider=ModelProvider.ANTHROPIC,
+                    size=ModelSize.MEDIUM,  # Kimi K2.5 pour rapidité
+                    provider=ModelProvider.MOONSHOT_AI,
                     max_tokens=4096,
                     raw_output=True
                 )

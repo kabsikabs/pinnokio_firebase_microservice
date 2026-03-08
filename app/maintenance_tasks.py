@@ -35,7 +35,6 @@ def health_check_services():
         health_status = {
             "redis": _check_redis_health(),
             "firestore": _check_firestore_health(),
-            "chroma": _check_chroma_health()
         }
         
         overall_health = all(status["status"] == "ok" for status in health_status.values())
@@ -65,17 +64,6 @@ def _check_firestore_health() -> dict:
         db = get_firestore()
         # Test simple de lecture
         list(db.collections())
-        return {"status": "ok"}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
-def _check_chroma_health() -> dict:
-    """Vérifie la santé de ChromaDB."""
-    try:
-        from .chroma_vector_service import get_chroma_vector_service
-        chroma_service = get_chroma_vector_service()
-        # Test de heartbeat
-        chroma_service.chroma.heartbeat()
         return {"status": "ok"}
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -333,6 +321,16 @@ def finalize_daily_chat_billing(target_date: str | None = None, days_back: int =
                 try:
                     _ = fbm.get_user_balance(mandate_path=mp)
                     balances_updated += 1
+                    # Update L1 Redis cache (no WSS from Celery — no hub)
+                    try:
+                        from app.balance_service import get_balance_service_sync
+                        _bal_svc = get_balance_service_sync()
+                        _uid = mp.split('/')[1] if '/' in mp else None
+                        if _uid:
+                            _fresh = fbm.get_balance_info(mandate_path=mp)
+                            _bal_svc.update_balance_cache(_uid, _fresh)
+                    except Exception as _cache_err:
+                        logger.warning("[BILLING_CRON] L1 cache update failed (non-blocking): %s", _cache_err)
                 except Exception as e:
                     logger.error("[BILLING_CRON] balance_update_error mandate_path=%s error=%s", mp, repr(e))
 

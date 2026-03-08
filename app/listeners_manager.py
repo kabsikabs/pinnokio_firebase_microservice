@@ -163,26 +163,20 @@ class ListenersManager:
         self.logger.info("user_attach_start uid=%s", uid)
         unsubs: List[Callable[[], None]] = []
         try:
-            self.logger.info("user_attach_firebase_query uid=%s", uid)
-            q = (
-                self.db.collection("clients").document(uid)
-                .collection("notifications")
-                .where(filter=FieldFilter("read", "==", False))
-            )
-            self.logger.info("user_attach_firebase_listener uid=%s", uid)
-            unsub_notif = q.on_snapshot(lambda docs, changes, rt: self._on_notifications(uid, docs, changes, rt))  # type: ignore[arg-type]
-            unsubs.append(unsub_notif)
-            self.logger.info("user_attach_notification_listener_attached uid=%s", uid)
-
+            # ❌ LISTENERS FIRESTORE/RTDB DÉSACTIVÉS - Migration vers PubSub Redis
+            # Les notifications et messages sont maintenant publiés directement sur Redis PubSub
+            # par les jobbeurs après écriture dans Firebase/RTDB
+            # Le subscription_manager écoute les canaux Redis PubSub au lieu des listeners Firebase
+            
+            self.logger.info("user_attach_skip_firestore_listeners uid=%s reason=migrated_to_redis_pubsub", uid)
+            
+            # Charger les données initiales une fois (pour compatibilité)
+            # Le subscription_manager s'occupe déjà de cela dans la Phase 4 de l'orchestration
+            # On garde juste la publication initiale pour les anciens clients
             self.logger.info("user_attach_publish_sync_notifications uid=%s", uid)
             self._publish_notifications_sync(uid)
-
-            # Messages directs (Firebase Realtime Database)
-            self.logger.info("user_attach_rtdb_messages uid=%s", uid)
-            unsub_msg = self._start_direct_messages_listener(uid)
-            if unsub_msg:
-                unsubs.append(unsub_msg)
-                self.logger.info("user_attach_message_listener_attached uid=%s", uid)
+            
+            self.logger.info("user_attach_publish_sync_messages uid=%s", uid)
             self._publish_messages_sync(uid)
 
             # ❌ WORKFLOW LISTENER RETIRÉ : Désormais démarré à la demande par job_id
@@ -733,15 +727,16 @@ class ListenersManager:
                             msg_id
                         )
                         
-                        # Appeler send_card_response de manière asynchrone
+                        # Enqueue la réponse carte via LLMGateway (queue → worker)
+                        # ⭐ MIGRATION 2026-02-04: Remplace l'appel direct à llm_manager
                         try:
                             import asyncio
-                            from .llm_service import get_llm_manager
-                            
-                            async def handle_card_response():
+                            from .llm_service.llm_gateway import get_llm_gateway
+
+                            async def enqueue_card_response():
                                 try:
-                                    llm_manager = get_llm_manager()
-                                    result = await llm_manager.send_card_response(
+                                    gateway = get_llm_gateway()
+                                    result = await gateway.enqueue_card_response(
                                         user_id=uid,
                                         collection_name=space_code,
                                         thread_key=thread_key,
@@ -751,28 +746,25 @@ class ListenersManager:
                                         user_message=user_message
                                     )
                                     self.logger.info(
-                                        "✅ CARD_RESPONSE_HANDLED uid=%s msg_id=%s action=%s result=%s",
-                                        uid, msg_id, action, result.get('success', False)
+                                        "✅ CARD_RESPONSE_ENQUEUED uid=%s msg_id=%s action=%s job_id=%s",
+                                        uid, msg_id, action, result.get('job_id', 'unknown')[:8]
                                     )
                                 except Exception as e:
                                     self.logger.error(
-                                        "❌ CARD_RESPONSE_ERROR uid=%s msg_id=%s error=%s",
+                                        "❌ CARD_RESPONSE_ENQUEUE_ERROR uid=%s msg_id=%s error=%s",
                                         uid, msg_id, str(e), exc_info=True
                                     )
-                            
+
                             # Exécuter de manière asynchrone dans la boucle d'événements
                             try:
                                 loop = asyncio.get_event_loop()
                                 if loop.is_running():
-                                    # Si la boucle est déjà en cours d'exécution, créer une tâche
-                                    asyncio.create_task(handle_card_response())
+                                    asyncio.create_task(enqueue_card_response())
                                 else:
-                                    # Sinon, exécuter directement
-                                    loop.run_until_complete(handle_card_response())
+                                    loop.run_until_complete(enqueue_card_response())
                             except RuntimeError:
-                                # Si aucune boucle n'existe, en créer une nouvelle
-                                asyncio.run(handle_card_response())
-                            
+                                asyncio.run(enqueue_card_response())
+
                         except Exception as e:
                             self.logger.error(
                                 "❌ CARD_ACTION_ROUTING_ERROR uid=%s msg_id=%s error=%s",

@@ -7,7 +7,7 @@ import threading
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Optional, Callable, Awaitable, Any
+from typing import Optional, Callable, Awaitable, Any,Dict
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from firebase_admin import credentials, firestore, initialize_app,auth
 import firebase_admin
@@ -308,47 +308,9 @@ class FirebaseManagement:
                 })
                 print(f"✅ Mandat {mandate_path} supprimé pour {telegram_username}")
             
-            if firebase_user_id and mandate_doc_id:
-                try:
-                    # Construire le chemin du document mandat depuis mandate_path
-                    mandate_doc_path = f"{mandate_path}"
-                    mandate_doc_ref = self.db.document(mandate_doc_path)
-                    
-                    # Récupérer le document mandat
-                    mandate_doc = mandate_doc_ref.get()
-                    if mandate_doc.exists:
-                        mandate_doc_data = mandate_doc.to_dict()
-                        
-                        # Préparer les mises à jour
-                        updates = {}
-                        
-                        # A. Supprimer de telegram_auth_users
-                        telegram_auth_users = mandate_doc_data.get('telegram_auth_users', [])
-                        if telegram_username in telegram_auth_users:
-                            telegram_auth_users.remove(telegram_username)
-                            updates['telegram_auth_users'] = telegram_auth_users
-                            print(f"✅ {telegram_username} supprimé de telegram_auth_users")
-                        
-                        # B. NOUVEAU : Supprimer du mapping telegram_users_mapping
-                        telegram_users_mapping = mandate_doc_data.get('telegram_users_mapping', {})
-                        if telegram_username in telegram_users_mapping:
-                            del telegram_users_mapping[telegram_username]
-                            updates['telegram_users_mapping'] = telegram_users_mapping
-                            print(f"✅ {telegram_username} supprimé du mapping telegram_users_mapping")
-                        
-                        # Appliquer les mises à jour si nécessaire
-                        if updates:
-                            mandate_doc_ref.update(updates)
-                            print(f"✅ Document mandat {mandate_path} nettoyé")
-                        else:
-                            print(f"⚠️ Rien à nettoyer dans le document mandat")
-                            
-                    else:
-                        print(f"⚠️ Document mandat non trouvé: {mandate_doc_path}")
-                        
-                except Exception as e:
-                    print(f"⚠️ Erreur lors de la mise à jour du document mandat: {str(e)}")
-                    # Ne pas faire échouer la suppression principale pour cette erreur
+            # NOTE: Mandate document cleanup (auth_users, room_assignments, users_mapping)
+            # is handled by telegram_handler.py handle_telegram_remove_user() BEFORE calling this method.
+            # This method only manages the telegram_users/{username} collection document.
             
             return True
             
@@ -390,6 +352,312 @@ class FirebaseManagement:
         except Exception as e:
             print(f"❌ Erreur lors de la mise à jour de l'activité: {str(e)}")
             return False
+
+    def get_banker_jobs_from_task_manager(self, user_id: str, mandate_path: str) -> Dict[str, Any]:
+        """
+        Récupère l'état des jobs bancaires depuis task_manager (Source de Vérité).
+        
+        Remplace l'ancienne logique basée sur les notifications et pending sheets.
+        
+        Args:
+            user_id (str): Firebase UID
+            mandate_path (str): Chemin du mandat pour filtrer les tâches
+            
+        Returns:
+            Dict structuré:
+            {
+                "processed": [...],     # Tâches terminées
+                "pending": [...],       # Tâches en attente (détail)
+                "in_process": {...}     # Tâches en cours groupées par batch_id
+            }
+        """
+        try:
+            
+            
+            # Initialiser la structure de retour
+            result = {
+                "processed": [],
+                "pending": [],
+                "in_process": {}  # Dict groupé par batch_id
+            }
+            
+            # Requête sur task_manager
+            # Filtre 1: mandate_path (filtrage post-query si startswith pas dispo, mais ici on suppose égalité)
+            # Filtre 2: department == 'banker' (ou 'Banker')
+            
+            task_ref = self.db.collection("clients").document(user_id).collection("task_manager")
+            
+            # On récupère tout le task_manager pour ce mandat (ou filtré plus finement si possible)
+            # Note: Firestore ne supporte pas nativement "startswith" ou "contains" simple combiné
+            # On va filtrer en mémoire pour être sûr, ou utiliser des filtres d'égalité si mandate_path est exact
+            
+            # Optimisation: Filtrer par department directement si possible, sinon tout charger
+            # Comme mandate_path est stocké dans le doc, on peut filtrer dessus si indexé
+            
+            # Stratégie: Récupérer les tâches 'banker' et filtrer mandate_path en python
+            query = task_ref.where(filter=FieldFilter("department", "in", ["Bankbookeeper", "banker", "Banker"]))
+            docs = query.stream()
+            
+            for doc in docs:
+                data = doc.to_dict()
+                doc_mandate_path = data.get("mandate_path", "")
+                
+                # Filtrage strict sur le mandat
+                if doc_mandate_path != mandate_path:
+                    continue
+                    
+                status = data.get("status", "").lower()
+                department_data = data.get("department_data", {})
+                banker_data = department_data.get("Bankbookeeper", {}) or department_data.get("banker", {}) or department_data.get("Banker", {})
+
+                # Filtrer les docs batch-level (pas de transaction_id dans banker_data).
+                # Ces docs sont créés par update_job_status_job_id(job_id=batch_id) pour
+                # le suivi du batch global. Seuls les docs transaction-level (avec
+                # transaction_id) sont des vraies transactions affichables.
+                tx_id = banker_data.get("transaction_id")
+                if not tx_id:
+                    continue
+
+                # Cas 1: Completed -> Processed
+                if status in ["completed", "close", "closed"]:
+                    result["processed"].append(data)
+                    
+                # Cas 2: Pending -> Liste simple avec détails
+                elif status == "pending":
+                    # Extraire les infos clés pour le croisement
+                    item = {
+                        "task_id": doc.id,
+                        "status": status,  # Garder le statut original
+                        "batch_id": banker_data.get("batch_id"),
+                        "bank_account_id": banker_data.get("bank_account_id"), # journal_id
+                        "transaction_id": banker_data.get("transaction_id"),   # move_id
+                        "txn_amount": banker_data.get("txn_amount"),
+                        "txn_currency": banker_data.get("txn_currency"),
+                        # Garder le reste au cas où
+                        **banker_data
+                    }
+                    result["pending"].append(item)
+                    
+                # Cas 3: On Process -> Groupé par batch_id
+                elif status in ["on_process", "processing", "in_progress", "in_queue", "running", "stopping"]:
+                    batch_id = banker_data.get("batch_id") or "unknown_batch"
+
+                    item = {
+                        "task_id": doc.id,
+                        "status": status,  # Garder le statut original (on_process, processing, etc.)
+                        "bank_account_id": banker_data.get("bank_account_id"),
+                        "transaction_id": banker_data.get("transaction_id"),
+                        "txn_amount": banker_data.get("txn_amount"),
+                        "txn_currency": banker_data.get("txn_currency"),
+                        **banker_data
+                    }
+                    
+                    if batch_id not in result["in_process"]:
+                        result["in_process"][batch_id] = []
+                    
+                    result["in_process"][batch_id].append(item)
+            
+            return result
+            
+        except Exception as e:
+            print(f"❌ Erreur get_banker_jobs_from_task_manager: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"processed": [], "pending": [], "in_process": {}}
+
+    def get_apbookeeper_jobs_from_task_manager(self, user_id: str, mandate_path: str) -> Dict[str, Any]:
+        """
+        Récupère l'état des jobs APBookkeeper depuis task_manager (Source de Vérité).
+
+        Remplace l'ancienne logique basée sur fetch_journal_entries + check_job_status (notifications).
+
+        Args:
+            user_id (str): Firebase UID
+            mandate_path (str): Chemin du mandat pour filtrer les tâches
+
+        Returns:
+            Dict structuré:
+            {
+                "to_process": [...],    # Tâches à traiter (error, to_process)
+                "in_process": [...],    # Tâches en cours (on_process, in_queue)
+                "pending": [...],       # Tâches en attente
+                "processed": [...],     # Tâches terminées (completed, close, closed)
+                "step_mapping": {...}   # Mapping current_step → translated_term
+            }
+        """
+        try:
+            result = {
+                "to_process": [],
+                "in_process": [],
+                "pending": [],
+                "processed": [],
+                "step_mapping": {}
+            }
+
+            # 1. Charger le mapping ap_approval_list pour traduire current_step
+            try:
+                approval_ref = self.db.document(f"{mandate_path}/setup/ap_approval_list")
+                approval_doc = approval_ref.get()
+                if approval_doc.exists:
+                    mapping_data = approval_doc.to_dict() or {}
+                    # Structure: { "STEP_KEY": { "original_term": "...", "translated_term": "..." } }
+                    for step_key, step_info in mapping_data.items():
+                        if isinstance(step_info, dict) and "translated_term" in step_info:
+                            original = step_info.get("original_term", step_key)
+                            result["step_mapping"][original] = step_info["translated_term"]
+            except Exception as e:
+                print(f"[AP] Warning: Could not load ap_approval_list: {e}")
+
+            # 2. Requête task_manager filtrée par department APbookeeper/Apbookeeper
+            task_ref = self.db.collection("clients").document(user_id).collection("task_manager")
+            query = task_ref.where(filter=FieldFilter("department", "in", ["APbookeeper", "Apbookeeper", "apbookeeper"]))
+            docs = query.stream()
+
+            for doc in docs:
+                data = doc.to_dict()
+                doc_mandate_path = data.get("mandate_path", "")
+
+                # Filtrage strict sur le mandat
+                if doc_mandate_path != mandate_path:
+                    continue
+
+                status = (data.get("status") or "").lower()
+
+                # Skip purged/incomplete documents (no status = billing skeleton after delete)
+                if not status:
+                    continue
+                department_data = data.get("department_data", {})
+                ap_data = department_data.get("APbookeeper", {}) or department_data.get("Apbookeeper", {}) or department_data.get("apbookeeper", {})
+
+                # Extraire le timestamp (format "9 janvier 2026 à 23:59:45 UTC+1") → date seule
+                raw_timestamp = data.get("timestamp", "")
+                date_str = ""
+                if raw_timestamp:
+                    # Prendre la partie avant " à " pour extraire la date
+                    parts = str(raw_timestamp).split(" à ")
+                    date_str = parts[0].strip() if parts else str(raw_timestamp)
+
+                # Construire l'item standardisé
+                file_id = ap_data.get("file_id", "")
+                uri_link = data.get("uri_drive_link", "") or data.get("uri_file_link", "")
+
+                item = {
+                    "task_id": doc.id,
+                    "job_id": ap_data.get("job_id", doc.id),
+                    "file_name": ap_data.get("file_name", data.get("file_name", "")),
+                    "file_id": file_id,
+                    "drive_file_id": file_id,
+                    "uri_drive_link": uri_link,
+                    "date": date_str,
+                    "current_step": data.get("current_step", ""),
+                    "status": status,
+                }
+
+                # Classement par statut (garder le statut original pour le badge frontend)
+                if status in ["completed", "close", "closed"]:
+                    result["processed"].append(item)
+                elif status == "pending":
+                    result["pending"].append(item)
+                elif status in ["on_process", "processing", "in_progress", "in_queue", "running", "stopping"]:
+                    result["in_process"].append(item)
+                else:
+                    # error, to_process, stopped, skipped ou inconnu → to_process
+                    if status not in ["error", "to_process", "stopped", "skipped"]:
+                        item["status"] = "to_process"
+                    result["to_process"].append(item)
+
+            return result
+
+        except Exception as e:
+            print(f"❌ Erreur get_apbookeeper_jobs_from_task_manager: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"to_process": [], "in_process": [], "pending": [], "processed": [], "step_mapping": {}}
+
+    def get_router_jobs_from_task_manager(self, user_id: str, mandate_path: str) -> Dict[str, Any]:
+        """
+        Récupère l'état des jobs Router depuis task_manager (Source de Vérité).
+
+        Utilisé pour le croisement avec les fichiers Drive:
+        - Drive = liste brute des fichiers (base "to_process")
+        - task_manager = source de vérité des statuts
+        - Junction: job_id (Drive file_id == task_manager job_id)
+
+        Args:
+            user_id (str): Firebase UID
+            mandate_path (str): Chemin du mandat pour filtrer les tâches
+
+        Returns:
+            Dict structuré:
+            {
+                "in_process": [...],   # on_process, in_queue, running, stopping
+                "pending": [...],      # pending
+                "processed": [...],    # completed, close, closed
+                "by_job_id": {...}     # job_id → item (index pour croisement Drive)
+            }
+        """
+        try:
+            result = {
+                "in_process": [],
+                "pending": [],
+                "processed": [],
+                "by_job_id": {}
+            }
+
+            task_ref = self.db.collection("clients").document(user_id).collection("task_manager")
+            query = task_ref.where(filter=FieldFilter("department", "in", ["router", "Router"]))
+            docs = query.stream()
+
+            for doc in docs:
+                data = doc.to_dict()
+                doc_mandate_path = data.get("mandate_path", "")
+
+                if doc_mandate_path != mandate_path:
+                    continue
+
+                status = (data.get("status") or "").lower()
+                job_id = data.get("job_id", doc.id)
+                file_name = data.get("file_name", "")
+                raw_timestamp = data.get("timestamp", "")
+
+                date_str = ""
+                if raw_timestamp:
+                    parts = str(raw_timestamp).split(" à ")
+                    date_str = parts[0].strip() if parts else str(raw_timestamp)
+
+                # Extraire le service de destination depuis department_data.router
+                dept_data = data.get("department_data", {})
+                router_data = dept_data.get("router", {}) or dept_data.get("Router", {})
+                routed_to = router_data.get("selected_service", "")
+
+                item = {
+                    "task_id": doc.id,
+                    "job_id": job_id,
+                    "file_name": file_name,
+                    "date": date_str,
+                    "status": status,
+                    "routed_to": routed_to,
+                }
+
+                # Index par job_id pour croisement avec Drive
+                result["by_job_id"][job_id] = item
+
+                # Classement par statut (garder le statut original pour le badge frontend)
+                if status in ["completed", "close", "closed"]:
+                    result["processed"].append(item)
+                elif status == "pending":
+                    result["pending"].append(item)
+                elif status in ["on_process", "processing", "in_progress", "in_queue", "running", "stopping"]:
+                    result["in_process"].append(item)
+                # else: error, to_process → pas ajouté (reste dans to_process du Drive)
+
+            return result
+
+        except Exception as e:
+            print(f"❌ Erreur get_router_jobs_from_task_manager: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"in_process": [], "pending": [], "processed": [], "by_job_id": {}}
 
     def get_telegram_user_by_username(self, telegram_username: str):
         """
@@ -1395,6 +1663,28 @@ class FirebaseManagement:
             print(f"Les types d'ERP existent déjà dans la collection settings_param/erp_type.")
             return erp_doc.to_dict().get('erp_types', [])
 
+    def load_email_types(self):
+        """
+        Charge les types d'email dans la collection /settings_param/email_type.
+        Si les données n'existent pas déjà, elles seront créées.
+        """
+        email_ref = self.db.collection('settings_param').document('email_type')
+        email_doc = email_ref.get()
+
+        if not email_doc.exists or not email_doc.to_dict().get('email_types'):
+            email_data = {
+                'email_types': [
+                    {'id': '1', 'active': True, 'email_displayname': 'Gmail', 'email_name': 'gmail'},
+                    {'id': '2', 'active': True, 'email_displayname': 'Outlook', 'email_name': 'outlook'}
+                ]
+            }
+            email_ref.set(email_data)
+            print(f"Les types d'email ont été chargés dans la collection settings_param/email_type.")
+            return email_data['email_types']
+        else:
+            print(f"Les types d'email existent déjà dans la collection settings_param/email_type.")
+            return email_doc.to_dict().get('email_types', [])
+
     def load_chat_types(self):
         """
         Charge les types de chat dans la collection /settings_param/chat_type.
@@ -1461,6 +1751,8 @@ class FirebaseManagement:
             return self.load_dms_types()
         elif param_type == 'chat':
             return self.load_chat_types()
+        elif param_type == 'email':
+            return self.load_email_types()
         elif param_type == 'currencies':
             return self.load_currencies()
         else:
@@ -1478,24 +1770,26 @@ class FirebaseManagement:
             list: Liste des paramètres
         """
         try:
-            if param_type not in ['erp', 'dms', 'chat', 'currencies','communication']:
+            if param_type not in ['erp', 'dms', 'chat', 'currencies', 'communication', 'email']:
                 print(f"Type de paramètre inconnu: {param_type}")
                 return []
-            
+
             collection_name = {
                 'erp': 'erp_type',
                 'dms': 'dms_type',
                 'chat': 'chat_type',
                 'currencies': 'currencies',
-                'communication': 'communication_type'
+                'communication': 'communication_type',
+                'email': 'email_type',
             }[param_type]
-            
+
             field_name = {
                 'erp': 'erp_types',
                 'dms': 'dms_types',
                 'chat': 'chat_types',
                 'currencies': 'currencies',
-                'communication': 'communication_types'
+                'communication': 'communication_types',
+                'email': 'email_types',
             }[param_type]
             
             param_ref = self.db.collection('settings_param').document(collection_name)
@@ -3197,8 +3491,93 @@ class FirebaseManagement:
             print(f"❌ Erreur get_notifications: {e}")
             return []
 
-    
-    
+    def fetch_routing_documents(self, user_id: str, mandate_path: str) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Récupère les documents de routing triés par status depuis la collection notifications.
+
+        Cette méthode implémente la logique de tri pour les onglets de la page Routing:
+        - in_process: documents avec status in ['in_queue', 'on_process', 'stopping']
+        - pending: documents avec status == 'pending'
+        - processed: documents avec status == 'completed'
+
+        Note: Les documents "À traiter" (to_process) viennent du Drive, pas de cette méthode.
+
+        Args:
+            user_id (str): L'ID Firebase de l'utilisateur
+            mandate_path (str): Le chemin du mandat (company_id)
+
+        Returns:
+            Dict avec les clés 'in_process', 'pending', 'processed' contenant les listes de documents
+        """
+        result = {
+            "in_process": [],
+            "pending": [],
+            "processed": []
+        }
+
+        try:
+            if not user_id:
+                print("[fetch_routing_documents] user_id manquant")
+                return result
+
+            # Collection des notifications/jobs
+            collection_path = f"clients/{user_id}/notifications"
+            collection_ref = self.db.collection(collection_path)
+
+            # Récupérer tous les documents pour ce mandat (filtrer par function_name='Router' si applicable)
+            # Note: On filtre par company_id/mandate car un user peut avoir plusieurs mandats
+            try:
+                query = collection_ref.where(filter=FieldFilter("function_name", "==", "Router"))
+                docs = query.stream()
+            except Exception:
+                # Fallback si le champ function_name n'existe pas
+                docs = collection_ref.stream()
+
+            # Status groups selon les types définis
+            in_process_statuses = ['in_queue', 'on_process', 'stopping']
+            pending_statuses = ['pending']
+            processed_statuses = ['completed']
+
+            for doc in docs:
+                data = doc.to_dict() or {}
+                data["id"] = doc.id
+
+                # Extraire le status du document
+                status = data.get("status", "").lower()
+
+                # Construire l'objet document avec les champs nécessaires
+                doc_item = {
+                    "id": doc.id,
+                    "job_id": data.get("job_id", doc.id),
+                    "file_name": data.get("file_name", data.get("name", "")),
+                    "status": status,
+                    "timestamp": data.get("timestamp", data.get("created_at", "")),
+                    "source": data.get("source", ""),
+                    "drive_file_id": data.get("file_id", data.get("drive_file_id", "")),
+                    "uri_drive_link": data.get("uri_file_link", data.get("drive_link", "")),
+                    "pinnokio_func": data.get("function_name", data.get("pinnokio_func", "Router")),
+                }
+
+                # Trier dans la bonne catégorie selon le status
+                if status in in_process_statuses:
+                    result["in_process"].append(doc_item)
+                elif status in pending_statuses:
+                    result["pending"].append(doc_item)
+                elif status in processed_statuses:
+                    result["processed"].append(doc_item)
+                # Les autres statuts (to_process, error, stopped) sont gérés côté Drive
+
+            print(f"[fetch_routing_documents] Retrieved: in_process={len(result['in_process'])}, "
+                  f"pending={len(result['pending'])}, processed={len(result['processed'])}")
+
+            return result
+
+        except Exception as e:
+            print(f"❌ Erreur fetch_routing_documents: {e}")
+            return result
+
+
+
     def update_job_status(self, user_id: str, job_id: str, new_status: str, additional_info: dict = None):
         """
         Met à jour le statut d'un job spécifique.
@@ -3557,6 +3936,16 @@ class FirebaseManagement:
                 expense_ref.set(expense_payload, merge=True)
                 created_or_updated += 1
 
+            # Update L1 balance cache after catchup (balance may have changed)
+            if created_or_updated > 0 and user_id and mandate_path:
+                try:
+                    from app.balance_service import get_balance_service_sync
+                    _bal_svc = get_balance_service_sync()
+                    _fresh = self.get_balance_info(mandate_path=mandate_path, user_id=user_id)
+                    _bal_svc.update_balance_cache(user_id, _fresh)
+                except Exception as _cache_err:
+                    logger.warning("[BILLING] L1 cache update after catchup failed: %s", _cache_err)
+
             return {
                 "success": True,
                 "days_back": days_back,
@@ -3684,57 +4073,75 @@ class FirebaseManagement:
 
     def check_and_create_client_document(self, user_data):
         """
-        Vérifie si le document utilisateur existe et effectue les actions nécessaires.
-        
+        Vérifie si les documents utilisateur existent et les crée si nécessaire.
+
+        Crée INDÉPENDAMMENT:
+        1. users/{uid}
+        2. clients/{uid}
+        3. clients/{uid}/bo_clients/{uid}
+
         Args:
             user_data (dict): Données utilisateur contenant `email` et `displayName`.
         """
         user_id = user_data['uid']
         user_document_data = {
-        "uid": user_data["uid"],
-        "email": user_data["email"],
-        "displayName": user_data.get("displayName", ""),
-        "photoURL": user_data.get("photoUrl", "")
+            "uid": user_data["uid"],
+            "email": user_data["email"],
+            "displayName": user_data.get("displayName", ""),
+            "photoURL": user_data.get("photoUrl", "")
         }
-        
-        user_ref = self.db.collection("users").document(user_id)
-        print(f"🔍 Référence du document : {user_ref.path}")
 
-        doc = user_ref.get()
-        # Vérification de l'existence du document
-        if doc.exists:
-            print(f"✅ Le document pour l'utilisateur {user_id} existe déjà.")
+        # ═══════════════════════════════════════════════════════════════
+        # 1. Check/Create users/{uid}
+        # ═══════════════════════════════════════════════════════════════
+        user_ref = self.db.collection("users").document(user_id)
+        print(f"🔍 Vérification users/{user_id}")
+
+        user_doc = user_ref.get()
+        if user_doc.exists:
+            print(f"✅ users/{user_id} existe déjà - mise à jour")
             user_ref.update(user_data)
         else:
-            print(f"⚠️ Le document pour l'utilisateur {user_id} n'existe pas. Création...")
-            # Création du document principal dans 'users'
+            print(f"⚠️ users/{user_id} n'existe pas - création")
             user_ref.set(user_document_data)
-            print(f"✅ Document 'users' créé pour l'utilisateur {user_id}.")
+            print(f"✅ users/{user_id} créé")
 
-            # Création du document dans 'clients'
-            print(f"⚠️ Le document pour l'utilisateur {user_id} n'existe pas. Création...")
-            # Création du document principal
-            user_ref=self.db.collection('clients').document(user_id)
-            client_uuid=f"client_{str(uuid.uuid4())[:8]}"
-            user_ref.set({
+        # ═══════════════════════════════════════════════════════════════
+        # 2. Check/Create clients/{uid} (INDÉPENDAMMENT de users/)
+        # ═══════════════════════════════════════════════════════════════
+        client_ref = self.db.collection('clients').document(user_id)
+        print(f"🔍 Vérification clients/{user_id}")
+
+        client_doc = client_ref.get()
+        if client_doc.exists:
+            print(f"✅ clients/{user_id} existe déjà")
+        else:
+            print(f"⚠️ clients/{user_id} n'existe pas - création")
+            client_ref.set({
                 "client_email": user_data["email"],
-                "client_name": user_data["displayName"],
+                "client_name": user_data.get("displayName", ""),
                 "created_at": firestore.SERVER_TIMESTAMP,
-               
             })
-            # Création du sous-document
-            sub_doc_ref = user_ref.collection("bo_clients").document(user_id)
-            sub_doc_ref.set({
-               
-                "client_name": user_data["displayName"],
-                "created_at": firestore.SERVER_TIMESTAMP,
-                "client_uuid":client_uuid
-            })
+            print(f"✅ clients/{user_id} créé")
 
-            print(f"✅ Documents créés pour l'utilisateur {user_id}.")
-            # Règle de sécurité ou rôle dans PostgreSQL
-            
-            print(f"Assigning admin role to user in postgres {user_id}")
+        # ═══════════════════════════════════════════════════════════════
+        # 3. Check/Create clients/{uid}/bo_clients/{uid} (INDÉPENDAMMENT)
+        # ═══════════════════════════════════════════════════════════════
+        bo_client_ref = client_ref.collection("bo_clients").document(user_id)
+        print(f"🔍 Vérification clients/{user_id}/bo_clients/{user_id}")
+
+        bo_client_doc = bo_client_ref.get()
+        if bo_client_doc.exists:
+            print(f"✅ clients/{user_id}/bo_clients/{user_id} existe déjà")
+        else:
+            print(f"⚠️ clients/{user_id}/bo_clients/{user_id} n'existe pas - création")
+            client_uuid = f"klk_client_{str(uuid.uuid4())[:8]}"
+            bo_client_ref.set({
+                "client_name": user_data.get("displayName", ""),
+                "created_at": firestore.SERVER_TIMESTAMP,
+                "client_uuid": client_uuid
+            })
+            print(f"✅ clients/{user_id}/bo_clients/{user_id} créé avec client_uuid={client_uuid}")
            
 
     def get_erp_path(self, mandate_path: str, erp_name: str) -> dict:
@@ -3794,29 +4201,22 @@ class FirebaseManagement:
 
         found_files = []
 
-        # Itérer sur chaque 'pinnokio_func' pour rechercher les fichiers correspondants
+        if user_id:
+            base_path = f'clients/{user_id}/task_manager'
+        else:
+            base_path = 'task_manager'
+        task_manager_ref = self.db.collection(base_path)
+
+        # Itérer sur chaque 'pinnokio_func' (= department) pour rechercher les fichiers correspondants
         for pinnokio_func in pinnokio_funcs:
-            # Trouver le document correspondant dans 'klk_vision' pour chaque 'pinnokio_func'
-            matching_department_doc_id = self.find_matching_department(user_id,pinnokio_func)
-
-            if not matching_department_doc_id:
-                print(f"Aucun département correspondant à '{pinnokio_func}' trouvé dans 'klk_vision'.")
-                continue  # Passer à l'itération suivante si le département n'existe pas
-
-            # Référence à la sous-collection 'journal' du département correspondant
-            if user_id:
-                base_path = f'clients/{user_id}/klk_vision'
-            else:
-                base_path = 'klk_vision'
-            journal_ref = self.db.collection(base_path).document(matching_department_doc_id).collection('journal')
-
-            # Rechercher les fichiers dans la base de données pour chaque file_name
+            # Rechercher les fichiers dans task_manager pour chaque file_name
             for file_name in file_names:
-                query = journal_ref.where(filter=FieldFilter('file_name', '==', file_name)).where(filter=FieldFilter('mandat_id', '==', mandat_id)).get()
-                
-                if query:
-                    for doc in query:
-                        found_files.append(doc.to_dict())
+                query = task_manager_ref.where(filter=FieldFilter('department', '==', pinnokio_func)) \
+                                        .where(filter=FieldFilter('file_name', '==', file_name)) \
+                                        .where(filter=FieldFilter('mandat_id', '==', mandat_id)).stream()
+
+                for doc in query:
+                    found_files.append(doc.to_dict())
 
         # Générer la réponse
         if found_files:
@@ -3888,29 +4288,48 @@ class FirebaseManagement:
         # Si aucun client correspondant n'est trouvé, ou si le business_name n'existe pas sous ce client
         return False
 
-    def user_app_permission_token(self,user_id):
-        """Récupère le jeton d'autorisation de l'utilisateur pour accéder à l'API Google Drive."""
+    # ── Mapping service → document Firestore dédié ──
+    _SERVICE_TOKEN_DOCS = {
+        "drive": "google_drive_token",
+        "gmail": "google_gmail_token",
+        "chat":  "google_chat_token",
+    }
+
+    def user_app_permission_token(self, user_id, service=None):
+        """Récupère le jeton OAuth Google pour *service* (drive | gmail | chat).
+
+        Stratégie de lecture :
+        1. Si *service* est fourni → tente le document dédié, fallback sur legacy.
+        2. Sans *service* → lit le document legacy (backward compat).
+        """
         if user_id:
             base_path = f'clients/{user_id}/cred_tokens'
         else:
             base_path = 'klk_vision'
-        
-        doc_ref = self.db.collection(base_path).document('google_authcred_token')
-        doc = doc_ref.get()
-        if doc.exists:
-            data=doc.to_dict()
-            token_data = {
-                        "token": data.get('token'),
-                        "refresh_token": data.get('refresh_token'),
-                        "token_uri": data.get('token_uri'),
-                        "client_id": data.get('client_id'),
-                        "client_secret": data.get('client_secret'),
-                        "expiry": data.get('expiry'),
-                        
-                    }
-            return token_data
-        else:
+
+        def _read_token_doc(doc_name):
+            doc_ref = self.db.collection(base_path).document(doc_name)
+            doc = doc_ref.get()
+            if doc.exists:
+                data = doc.to_dict()
+                return {
+                    "token": data.get('token'),
+                    "refresh_token": data.get('refresh_token'),
+                    "token_uri": data.get('token_uri'),
+                    "client_id": data.get('client_id'),
+                    "client_secret": data.get('client_secret'),
+                    "expiry": data.get('expiry'),
+                }
             return None
+
+        # Avec service → document dédié puis fallback legacy
+        if service and service in self._SERVICE_TOKEN_DOCS:
+            result = _read_token_doc(self._SERVICE_TOKEN_DOCS[service])
+            if result:
+                return result
+
+        # Legacy / fallback
+        return _read_token_doc('google_authcred_token')
 
 
     def check_if_users_exist(self,mail_to_invite):
@@ -3928,86 +4347,72 @@ class FirebaseManagement:
             "APbookeeper": "APbookeeper",
             "HRmanager": "HRmanager",
             "Admanager": "Admanager",
-            "EXbookeeper": "EXbookeeper"
+            "EXbookeeper": "EXbookeeper",
+            "Bankbookeeper": "Bankbookeeper",
+            "Router": "Router",
         }
-        
+
         department = departments.get(department_index)
-        
+
         if not department:
             raise ValueError("Invalid department index provided")
-        
-        # Recherche du document correspondant dans la collection /klk_vision/
+
+        # Lecture depuis chat_config/{department}
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            doc_ref = self.db.collection('clients').document(str(user_id)).collection('chat_config').document(department)
         else:
-            base_path = 'klk_vision'
-        doc_ref = self.db.collection(base_path).where(filter=FieldFilter('departement', '==', department)).limit(1).get()
+            doc_ref = self.db.collection('chat_config').document(department)
 
-        if not doc_ref:
-            raise ValueError(f"No document found for department {department}")
-        
-        # Le document est le premier (et normalement unique) résultat
-        doc = doc_ref[0]
-        doc_data = doc.to_dict()
+        doc = doc_ref.get()
 
-        # Vérification du champ 'chat_threadkey'
-        if 'chat_threadkey' in doc_data:
-            return doc_data['chat_threadkey']
-        else:
-            
-            # Génération du chat_threadkey avec UUID
-            chat_threadkey = f"klk_{uuid.uuid4().hex}_{department}"
-            
-            # Mise à jour du document avec le nouveau chat_threadkey
-            doc_ref[0].reference.update({'chat_threadkey': chat_threadkey})
-            
-            return chat_threadkey
+        if doc.exists:
+            doc_data = doc.to_dict()
+            if 'chat_threadkey' in doc_data:
+                return doc_data['chat_threadkey']
+
+        # Génération du chat_threadkey avec UUID
+        chat_threadkey = f"klk_{uuid.uuid4().hex}_{department}"
+
+        # Création/mise à jour du document chat_config
+        doc_ref.set({'chat_threadkey': chat_threadkey, 'department': department}, merge=True)
+
+        return chat_threadkey
 
     def get_close_job_id(self,user_id,departement, space_id):
         """
         Recherche les job_id fermés correspondant aux critères spécifiés.
 
         Args:
-            space_id (str): L'ID de l'espace à rechercher dans le champ 'departement'.
-             departement_index=['Admanager','EXbookeeper','Router','Bankbookeeper','APbookeeper','HRmanager']
+            departement (int): Index dans departement_index.
+            space_id (str): Le mandat_id à filtrer.
         Returns:
             list: Une liste des job_id correspondant aux critères.
         """
         departement_index=['Admanager','EXbookeeper','Router','Bankbookeeper','APbookeeper','HRmanager']
-        
-        filtered_documents = [] 
-        
-        # Itération sur tous les documents de la collection 'klk_vision'
+
+        filtered_documents = []
+        chosen_departement = departement_index[departement]
+
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            base_path = f'clients/{user_id}/task_manager'
         else:
-            base_path = 'klk_vision'
-        klk_vision_docs = self.db.collection(base_path).stream()
-        
-        for doc in klk_vision_docs:
-            data = doc.to_dict()
-            
-            # Vérification si le document a le champ 'departement' égal à space_id
-            chosen_departement=departement_index[departement]
-            #print(chosen_departement)
-            if data.get('departement') == chosen_departement:
-                if chosen_departement=='APbookeeper':
-                    # Si c'est le cas, on cherche dans la collection 'journal' de ce document
-                    journal_docs = doc.reference.collection('journal').stream()
-                    #print(journal_docs)
-                    for journal_doc in journal_docs:
-                        journal_data = journal_doc.to_dict()
-                        #print(f"impression de journal data:{journal_data}\n\n")
-                        # Vérification des critères
-                        if (journal_data.get('status') == 'close' and
-                            journal_data.get('source') == 'documents/invoices/doc_booked' and
-                            journal_data.get('mandat_id')==space_id):
-                            # Ajout de l'ID du document à ses données
-                            journal_data['fb_doc_id'] = journal_doc.id
-                            
-                            # Ajout du document complet à la liste
-                            filtered_documents.append(journal_data)
-        
+            base_path = 'task_manager'
+        task_manager_ref = self.db.collection(base_path)
+
+        # Requête directe sur task_manager avec filtres department + status + mandat_id
+        query = task_manager_ref.where(filter=FieldFilter('department', '==', chosen_departement)) \
+                                .where(filter=FieldFilter('status', '==', 'close')) \
+                                .where(filter=FieldFilter('mandat_id', '==', space_id))
+
+        # Filtre source pour APbookeeper (comme dans l'ancienne version)
+        if chosen_departement == 'APbookeeper':
+            query = query.where(filter=FieldFilter('source', '==', 'documents/invoices/doc_booked'))
+
+        for doc in query.stream():
+            doc_data = doc.to_dict()
+            doc_data['fb_doc_id'] = doc.id
+            filtered_documents.append(doc_data)
+
         return filtered_documents
     
     def watch_transaction_status_changes(self,user_id, batch_id, initial_transaction_statuses, callback_function):
@@ -4172,45 +4577,33 @@ class FirebaseManagement:
         Recherche les job_id ouverts correspondant aux critères spécifiés.
 
         Args:
-            space_id (str): L'ID de l'espace à rechercher dans le champ 'departement'.
-
+            departement (int): Index dans departement_index.
+            space_id (str): Le mandat_id à filtrer.
         Returns:
             list: Une liste des job_id correspondant aux critères.
         """
         departement_index=['Admanager','EXbookeeper','Router','Bankbookeeper','APbookeeper','HRmanager']
-        
-        filtered_documents = [] 
+
+        filtered_documents = []
+        chosen_departement = departement_index[departement]
+
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            base_path = f'clients/{user_id}/task_manager'
         else:
-            base_path = 'klk_vision'
-        
-        # Itération sur tous les documents de la collection 'klk_vision'
-        klk_vision_docs = self.db.collection(base_path).stream()
-        
-        for doc in klk_vision_docs:
-            data = doc.to_dict()
-            
-            # Vérification si le document a le champ 'departement' égal à space_id
-            chosen_departement=departement_index[departement]
-            #print(chosen_departement)
-            if data.get('departement') == chosen_departement:
-                # Si c'est le cas, on cherche dans la collection 'journal' de ce document
-                journal_docs = doc.reference.collection('journal').stream()
-                #print(journal_docs)
-                for journal_doc in journal_docs:
-                    journal_data = journal_doc.to_dict()
-                    #print(f"impression de journal data:{journal_data}\n\n")
-                    # Vérification des critères
-                    if (journal_data.get('status') == 'to_process' and
-                        journal_data.get('source') == 'documents/accounting/invoices/doc_to_do' and
-                        journal_data.get('mandat_id')==space_id):
-                        # Ajout de l'ID du document à ses données
-                        journal_data['fb_doc_id'] = journal_doc.id
-                        
-                        # Ajout du document complet à la liste
-                        filtered_documents.append(journal_data)
-        
+            base_path = 'task_manager'
+        task_manager_ref = self.db.collection(base_path)
+
+        # Requête directe sur task_manager avec filtres department + status + source + mandat_id
+        query = task_manager_ref.where(filter=FieldFilter('department', '==', chosen_departement)) \
+                                .where(filter=FieldFilter('status', '==', 'to_process')) \
+                                .where(filter=FieldFilter('source', '==', 'documents/accounting/invoices/doc_to_do')) \
+                                .where(filter=FieldFilter('mandat_id', '==', space_id))
+
+        for doc in query.stream():
+            doc_data = doc.to_dict()
+            doc_data['fb_doc_id'] = doc.id
+            filtered_documents.append(doc_data)
+
         return filtered_documents
     
     def add_document_without_timestamp(self, collection_path, doc_id, data, merge=None):
@@ -4297,6 +4690,10 @@ class FirebaseManagement:
             else:
                 # Créer un nouveau document avec le file_id comme ID
                 doc_ref.set(job_data)
+            
+            # Publier notification si c'est dans le chemin notifications
+            if "notifications" in collection_path:
+                self._publish_notification_event(collection_path, job_data)
                 
             return file_id
                 
@@ -4364,7 +4761,9 @@ class FirebaseManagement:
 
     def _publish_notification_event(self, collection_path, job_data):
         """
-        Publie une notification sur Redis pour les events temps réel
+        Publie une notification sur Redis PubSub pour les events temps réel.
+        
+        Utilise le nouveau système PubSub Redis au lieu des listeners Firebase.
 
         Args:
             collection_path (str): Chemin de la collection
@@ -4376,29 +4775,64 @@ class FirebaseManagement:
             if len(path_parts) >= 2 and path_parts[0] == 'clients':
                 user_id = path_parts[1]
 
-                # Créer le payload pour la notification
-                notification_payload = {
-                    "type": "notif.job_updated",
-                    "uid": user_id,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "payload": {
-                        "job_id": job_data.get("job_id"),
-                        "batch_id": job_data.get("batch_id"),
-                        "function_name": job_data.get("function_name"),
-                        "status": job_data.get("status"),
-                        "collection_path": collection_path
-                    }
+                # Déterminer l'action (new ou update) selon si le document existe
+                doc_ref = self.db.collection(collection_path).document(job_data.get('job_id') or job_data.get('file_id') or job_data.get('batch_id'))
+                doc = doc_ref.get()
+                action = "update" if doc.exists else "new"
+
+                # Normalize functionName to match frontend enum: Router | APbookeeper | Bankbookeeper
+                _fn_normalize = {"router": "Router", "apbookeeper": "APbookeeper", "bankbookeeper": "Bankbookeeper", "onboarding": "Onboarding"}
+                raw_fn = job_data.get('function_name', 'Router')
+                normalized_fn = _fn_normalize.get(raw_fn.lower() if isinstance(raw_fn, str) else "", raw_fn)
+
+                file_name = job_data.get('file_name', '')
+                status = job_data.get('status', 'pending')
+                message = job_data.get('message', '')
+                if not message and file_name:
+                    message = f"{file_name} - {status}"
+
+                # Transformer job_data en format notification pour le frontend
+                notification_data = {
+                    "docId": job_data.get('job_id') or job_data.get('file_id') or job_data.get('batch_id'),
+                    "message": message,
+                    "fileName": file_name,
+                    "collectionId": job_data.get('collection_id', ''),
+                    "collectionName": job_data.get('collection_name', ''),
+                    "status": status,
+                    "read": job_data.get('read', False),
+                    "jobId": job_data.get('job_id', ''),
+                    "fileId": job_data.get('file_id', ''),
+                    "functionName": normalized_fn,
+                    "timestamp": job_data.get('timestamp', datetime.now(timezone.utc).isoformat()),
+                    "additionalInfo": job_data.get('additional_info', ''),
+                    "driveLink": job_data.get('drive_link', ''),
+                    "batchId": job_data.get('batch_id', ''),
                 }
 
-                print(f"[DEBUG] Publishing notification for user {user_id}: {notification_payload.get('type')}")
+                # Utiliser le nouveau système PubSub Redis
+                import asyncio
+                from app.realtime.pubsub_helper import publish_notification_event
+                
+                # Publier de manière asynchrone
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # Si la boucle est déjà en cours, créer une tâche
+                        asyncio.create_task(
+                            publish_notification_event(user_id, action, notification_data)
+                        )
+                    else:
+                        # Sinon, exécuter directement
+                        loop.run_until_complete(
+                            publish_notification_event(user_id, action, notification_data)
+                        )
+                except RuntimeError:
+                    # Si aucune boucle n'existe, en créer une nouvelle
+                    asyncio.run(
+                        publish_notification_event(user_id, action, notification_data)
+                    )
 
-                # Utiliser l'instance globale listeners_manager pour publier
-                from app.main import listeners_manager
-                if listeners_manager:
-                    listeners_manager.publish(user_id, notification_payload)
-                    print(f"[DEBUG] Notification published successfully for user {user_id}")
-                else:
-                    print(f"[WARNING] listeners_manager not available, cannot publish notification")
+                print(f"[DEBUG] Notification published via PubSub Redis for user {user_id}, action={action}")
 
         except Exception as e:
             print(f"[ERROR] Failed to publish notification: {e}")
@@ -4437,6 +4871,10 @@ class FirebaseManagement:
             else:
                 # Créer un nouveau document avec le job_id comme ID
                 doc_ref.set(job_data)
+            
+            # Publier notification si c'est dans le chemin notifications
+            if "notifications" in collection_path:
+                self._publish_notification_event(collection_path, job_data)
                 
             return job_id
                 
@@ -4544,51 +4982,44 @@ class FirebaseManagement:
 
     
     def add_timestamp_and_upload_to_firebase(self, log_entry):
-        # Générer un objet datetime pour le timestamp actuel
-
-
+        """Deprecated: alias vers add_timestamp_and_upload_to_task_manager."""
         log_entry['timestamp'] = datetime.now(timezone.utc).isoformat()
-   
-        # Appeler la fonction d'upload
-        self.upload_to_firebase(log_entry)
+        self.upload_to_task_manager(log_entry)
 
-    def upload_to_firebase(self,user_id, log_entry):
-        #print(f"État de firebase_admin._apps avant l'accès à Firestore: {firebase_admin._apps}")
-        pinnokio_func = log_entry['pinnokio_func']
-        #print(f"impression de pinnokio_func:{pinnokio_func}")
+    def add_timestamp_and_upload_to_task_manager(self, log_entry):
+        log_entry['timestamp'] = datetime.now(timezone.utc).isoformat()
+        self.upload_to_task_manager(log_entry)
 
-        # Trouver le document correspondant dans 'klk_vision'
-        matching_department_doc_id = self.find_matching_department(user_id,pinnokio_func)
+    def upload_to_firebase(self, user_id, log_entry):
+        """Deprecated: alias vers upload_to_task_manager."""
+        self.upload_to_task_manager(log_entry, user_id=user_id)
 
-        if matching_department_doc_id:
-            # Accéder à la sous-collection 'journal' du document trouvé
-            if user_id:
-                base_path = f'clients/{user_id}/klk_vision'
-            else:
-                base_path = 'klk_vision'
-            journal_ref = self.db.collection(base_path).document(matching_department_doc_id).collection('journal')
-            # Ajouter le log_entry comme nouveau document dans 'journal'
-            journal_ref.add(log_entry)
-            print(f"Log ajouté dans 'journal' pour le département '{pinnokio_func}' dans 'klk_vision'.")
-        else:
-            print(f"Aucun département correspondant à '{pinnokio_func}' trouvé dans 'klk_vision'.")
+    def upload_to_task_manager(self, log_entry, user_id=None):
+        pinnokio_func = log_entry.get('pinnokio_func')
+        job_id = log_entry.get('job_id')
 
-    
-    
-    def find_matching_department(self,user_id, pinnokio_func):
+        if not job_id:
+            print(f"[WARN] upload_to_task_manager: pas de job_id dans log_entry, skip.")
+            return None
+
+        # S'assurer que department est renseigné
+        data = log_entry.copy()
+        if pinnokio_func and 'department' not in data:
+            data['department'] = pinnokio_func
+
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            base_path = f'clients/{user_id}/task_manager'
         else:
-            base_path = 'klk_vision'
-        klk_vision_ref = self.db.collection(base_path)
-        departements = klk_vision_ref.stream()
+            base_path = 'task_manager'
 
-        for departement in departements:
-            doc_data = departement.to_dict()
-            if doc_data.get('departement') == pinnokio_func:
-                return departement.id  # Retourner l'ID du document correspondant
+        doc_ref = self.db.collection(base_path).document(job_id)
+        doc_ref.set(data, merge=True)
+        print(f"Log ajouté dans task_manager pour job_id '{job_id}' (department: '{pinnokio_func}').")
+        return doc_ref.path
 
-        return None  # Retourner None si aucune correspondance n'est trouvée
+    def find_matching_department(self, user_id, pinnokio_func):
+        """Deprecated: retourne directement pinnokio_func (plus besoin de chercher le doc_id klk_vision)."""
+        return pinnokio_func
     
     def fetch_documents_from_firestore(self,collection_path, mandat_id_value, max_docs=None):
        
@@ -4719,37 +5150,67 @@ class FirebaseManagement:
                     
                     if workflow_doc.exists:
                         workflow_data = workflow_doc.to_dict()
-                        
-                        # Extraire les paramètres pour Apbookeeper
-                        if "Apbookeeper_param" in workflow_data:
-                            ap_param = workflow_data.get("Apbookeeper_param", {})
-                            mandate["workflow_params"]["Apbookeeper_param"] = {
-                                "apbookeeper_approval_contact_creation": ap_param.get("apbookeeper_approval_contact_creation", False),
-                                "apbookeeper_approval_required": ap_param.get("apbookeeper_approval_required", False),
-                                "apbookeeper_communication_method": ap_param.get("apbookeeper_communication_method", "")
+
+                        # Pass through ALL fields from Firestore instead of whitelisting
+                        # This ensures new fields added via Settings save are not dropped
+                        for param_key in ("Apbookeeper_param", "Router_param", "Banker_param"):
+                            if param_key in workflow_data:
+                                mandate["workflow_params"][param_key] = workflow_data[param_key]
+
+                        # Extraire les paramètres de date comptable depuis Accounting_param
+                        if "Accounting_param" in workflow_data:
+                            accounting_param = workflow_data.get("Accounting_param", {})
+                            print(f"[FETCH_MANDATE] Found Accounting_param in Firestore: {accounting_param}")
+                            mandate["workflow_params"]["Accounting_param"] = accounting_param
+                            print(f"[FETCH_MANDATE] Built Accounting_param: {mandate['workflow_params']['Accounting_param']}")
+                        else:
+                            # Fallback: legacy format at root level
+                            print(f"[FETCH_MANDATE] No Accounting_param key, using legacy format. workflow_data keys: {list(workflow_data.keys())}")
+                            mandate["workflow_params"]["Accounting_param"] = {
+                                "accounting_date_definition": workflow_data.get("automated_accounting_date_definition", True),
+                                "accounting_date": workflow_data.get("accounting_date", ""),
+                                "custom_mode": workflow_data.get("accounting_date_custom_mode", False),
+                                "date_prompt": workflow_data.get("accounting_date_custom_prompt", ""),
                             }
-                        
-                        # Extraire les paramètres pour Router
-                        if "Router_param" in workflow_data:
-                            router_param = workflow_data.get("Router_param", {})
-                            mandate["workflow_params"]["Router_param"] = {
-                                "router_approval_required": router_param.get("router_approval_required", False),
-                                "router_automated_workflow": router_param.get("router_automated_workflow", False),
-                                "router_communication_method": router_param.get("router_communication_method", "")
-                            }
-                        
-                        # Extraire les paramètres pour Router
-                        if "Banker_param" in workflow_data:
-                            router_param = workflow_data.get("Banker_param", {})
-                            mandate["workflow_params"]["Banker_param"] = {
-                                "banker_approval_required": router_param.get("banker_approval_required", False),
-                                "banker_approval_thresholdworkflow": router_param.get("banker_approval_thresholdworkflow", 0),
-                                "banker_communication_method": router_param.get("banker_communication_method", "")
-                            }
+                            print(f"[FETCH_MANDATE] Built legacy Accounting_param: {mandate['workflow_params']['Accounting_param']}")
 
                     else:
                         print(f"Workflow params not found for path: {workflow_params_path}")
                         # Nous conservons la structure vide initialisée plus haut
+
+                    # Load Asset Management from separate document: setup/asset_model
+                    try:
+                        asset_model_path = f"{base_path}/{parent_doc_id}/mandates/{mandate_doc_id}/setup/asset_model"
+                        print(f"[FETCH_MANDATE] Loading Asset_param from: {asset_model_path}")
+                        asset_doc = self.db.document(asset_model_path).get()
+
+                        if asset_doc.exists:
+                            asset_data = asset_doc.to_dict()
+                            print(f"[FETCH_MANDATE] Found Asset_param in Firestore: {asset_data}")
+                            mandate["workflow_params"]["Asset_param"] = {
+                                "asset_management_activated": asset_data.get("asset_management_activated", False),
+                                "asset_automated_creation": asset_data.get("asset_automated_creation", True),
+                                "asset_default_method": asset_data.get("asset_default_method", "linear"),
+                                "asset_default_method_period": asset_data.get("asset_default_method_period", "12"),
+                            }
+                            print(f"[FETCH_MANDATE] Built Asset_param: {mandate['workflow_params']['Asset_param']}")
+                        else:
+                            # Default values if no asset_model document exists
+                            print(f"[FETCH_MANDATE] No asset_model document found, using defaults")
+                            mandate["workflow_params"]["Asset_param"] = {
+                                "asset_management_activated": False,
+                                "asset_automated_creation": True,
+                                "asset_default_method": "linear",
+                                "asset_default_method_period": "12",
+                            }
+                    except Exception as asset_err:
+                        print(f"[FETCH_MANDATE] Error fetching asset_model: {str(asset_err)}")
+                        mandate["workflow_params"]["Asset_param"] = {
+                            "asset_management_activated": False,
+                            "asset_automated_creation": True,
+                            "asset_default_method": "linear",
+                            "asset_default_method_period": "12",
+                        }
                 except Exception as e:
                     print(f"Error fetching workflow params: {str(e)}")
                     mandate["workflow_params"]["error"] = f"Error fetching workflow parameters: {str(e)}"
@@ -4970,7 +5431,19 @@ class FirebaseManagement:
                 raise ValueError(f"Mandat non trouvé au chemin: {mandate_path}")
             
             doc_data = mandate_doc.to_dict()
-            
+
+            # DEBUG: Log all keys in Firestore document
+            print(f"[fetch_single_mandate] Document keys: {list(doc_data.keys())}")
+            print(f"[fetch_single_mandate] Company info fields:")
+            print(f"  - legal_status: '{doc_data.get('legal_status', 'NOT_FOUND')}'")
+            print(f"  - country: '{doc_data.get('country', 'NOT_FOUND')}'")
+            print(f"  - address: '{doc_data.get('address', 'NOT_FOUND')}'")
+            print(f"  - phone_number: '{doc_data.get('phone_number', 'NOT_FOUND')}'")
+            print(f"  - email: '{doc_data.get('email', 'NOT_FOUND')}'")
+            print(f"  - website: '{doc_data.get('website', 'NOT_FOUND')}'")
+            print(f"  - language: '{doc_data.get('language', 'NOT_FOUND')}'")
+            print(f"  - has_vat: '{doc_data.get('has_vat', 'NOT_FOUND')}'")
+
             # Vérifier si le mandat est actif
             if not doc_data.get('isactive', True):
                 raise ValueError(f"Le mandat au chemin {mandate_path} n'est pas actif")
@@ -4978,6 +5451,7 @@ class FirebaseManagement:
             # Construire la structure de base du mandat
             mandate = {
                 "id": mandate_doc.id,
+                "mandate_path": mandate_path,
                 "contact_space_name": doc_data.get('contact_space_name', ""),
                 "contact_space_id": doc_data.get('contact_space_id', ""),
                 "bank_erp": doc_data.get('bank_erp', ""),
@@ -4993,7 +5467,36 @@ class FirebaseManagement:
                 "base_currency": doc_data.get('base_currency', ""),
                 "dms_type": doc_data.get('dms_type', ""),
                 "chat_type": doc_data.get('chat_type', ""),
-                "communication_log_type": doc_data.get('communication_log_type', "")
+                "communication_log_type": doc_data.get('communication_log_type', ""),
+                # Company info fields (added for Company Settings page)
+                "legal_status": doc_data.get('legal_status', ""),
+                "country": doc_data.get('country', ""),
+                "address": doc_data.get('address', ""),
+                "phone_number": doc_data.get('phone_number', ""),
+                "email": doc_data.get('email', ""),
+                "website": doc_data.get('website', ""),
+                "language": doc_data.get('language', ""),
+                "has_vat": doc_data.get('has_vat', False),
+                "vat_number": doc_data.get('vat_number', ""),
+                "ownership_type": doc_data.get('ownership_type', ""),
+                # Workflow parameters
+                "router_approval_required": doc_data.get('router_approval_required', False),
+                "router_automated_workflow": doc_data.get('router_automated_workflow', False),
+                "router_communication_method": doc_data.get('router_communication_method', "telegram"),
+                "apbookeeper_approval_required": doc_data.get('apbookeeper_approval_required', False),
+                "apbookeeper_approval_contact_creation": doc_data.get('apbookeeper_approval_contact_creation', False),
+                "apbookeeper_communication_method": doc_data.get('apbookeeper_communication_method', "telegram"),
+                "banker_approval_required": doc_data.get('banker_approval_required', False),
+                "banker_approval_threshold_workflow": doc_data.get('banker_approval_threshold_workflow', 0),
+                "banker_communication_method": doc_data.get('banker_communication_method', "telegram"),
+                # Context details for AI
+                "general_context": doc_data.get('general_context', ""),
+                "accounting_context": doc_data.get('accounting_context', ""),
+                "invoices_context": doc_data.get('invoices_context', ""),
+                "expenses_context": doc_data.get('expenses_context', ""),
+                "banks_cash_context": doc_data.get('banks_cash_context', ""),
+                "hr_context": doc_data.get('hr_context', ""),
+                "taxes_context": doc_data.get('taxes_context', ""),
             }
 
             # Récupérer les informations du document parent
@@ -5051,35 +5554,61 @@ class FirebaseManagement:
                 
                 if workflow_doc.exists:
                     workflow_data = workflow_doc.to_dict()
-                    
-                    # Extraire les paramètres pour Apbookeeper
-                    if "Apbookeeper_param" in workflow_data:
-                        ap_param = workflow_data.get("Apbookeeper_param", {})
-                        mandate["workflow_params"]["Apbookeeper_param"] = {
-                            "apbookeeper_approval_contact_creation": ap_param.get("apbookeeper_approval_contact_creation", False),
-                            "apbookeeper_approval_required": ap_param.get("apbookeeper_approval_required", False),
-                            "apbookeeper_communication_method": ap_param.get("apbookeeper_communication_method", "")
-                        }
-                    
-                    # Extraire les paramètres pour Router
-                    if "Router_param" in workflow_data:
-                        router_param = workflow_data.get("Router_param", {})
-                        mandate["workflow_params"]["Router_param"] = {
-                            "router_approval_required": router_param.get("router_approval_required", False),
-                            "router_automated_workflow": router_param.get("router_automated_workflow", False),
-                            "router_communication_method": router_param.get("router_communication_method", "")
-                        }
-                    
-                    # Extraire les paramètres pour Banker
-                    if "Banker_param" in workflow_data:
-                        banker_param = workflow_data.get("Banker_param", {})
-                        mandate["workflow_params"]["Banker_param"] = {
-                            "banker_approval_required": banker_param.get("banker_approval_required", False),
-                            "banker_approval_thresholdworkflow": banker_param.get("banker_approval_thresholdworkflow", 0),
-                            "banker_communication_method": banker_param.get("banker_communication_method", "")
+
+                    # Pass through ALL fields from Firestore instead of whitelisting
+                    # This ensures new fields added via Settings save are not dropped
+                    for param_key in ("Apbookeeper_param", "Router_param", "Banker_param"):
+                        if param_key in workflow_data:
+                            mandate["workflow_params"][param_key] = workflow_data[param_key]
+
+                    # Extraire les paramètres de date comptable (Accounting_param)
+                    if "Accounting_param" in workflow_data:
+                        accounting_param = workflow_data.get("Accounting_param", {})
+                        print(f"[fetch_single_mandate] Found Accounting_param: {accounting_param}")
+                        mandate["workflow_params"]["Accounting_param"] = accounting_param
+                    else:
+                        # Valeurs par défaut si Accounting_param n'existe pas
+                        print(f"[fetch_single_mandate] No Accounting_param found, using defaults")
+                        mandate["workflow_params"]["Accounting_param"] = {
+                            "accounting_date_definition": True,
+                            "accounting_date": "",
+                            "custom_mode": False,
+                            "date_prompt": "",
                         }
                 else:
                     print(f"Workflow params not found for path: {workflow_params_path}")
+
+                # Charger Asset_param depuis le document séparé setup/asset_model
+                try:
+                    asset_model_path = f"{mandate_path}/setup/asset_model"
+                    print(f"[fetch_single_mandate] Loading Asset_param from: {asset_model_path}")
+                    asset_doc = self.db.document(asset_model_path).get()
+
+                    if asset_doc.exists:
+                        asset_data = asset_doc.to_dict()
+                        print(f"[fetch_single_mandate] Found Asset_param: {asset_data}")
+                        mandate["workflow_params"]["Asset_param"] = {
+                            "asset_management_activated": asset_data.get("asset_management_activated", False),
+                            "asset_automated_creation": asset_data.get("asset_automated_creation", True),
+                            "asset_default_method": asset_data.get("asset_default_method", "linear"),
+                            "asset_default_method_period": asset_data.get("asset_default_method_period", "12"),
+                        }
+                    else:
+                        print(f"[fetch_single_mandate] No asset_model document found, using defaults")
+                        mandate["workflow_params"]["Asset_param"] = {
+                            "asset_management_activated": False,
+                            "asset_automated_creation": True,
+                            "asset_default_method": "linear",
+                            "asset_default_method_period": "12",
+                        }
+                except Exception as asset_err:
+                    print(f"[fetch_single_mandate] Error loading Asset_param: {asset_err}")
+                    mandate["workflow_params"]["Asset_param"] = {
+                        "asset_management_activated": False,
+                        "asset_automated_creation": True,
+                        "asset_default_method": "linear",
+                        "asset_default_method_period": "12",
+                    }
                     
             except Exception as e:
                 print(f"Error fetching workflow params: {str(e)}")
@@ -5106,10 +5635,13 @@ class FirebaseManagement:
             try:
                 mandate["context_details"] = {}
                 context_collection_path = f"{mandate_path}/context"
-                
-                context_docs = self.db.collection(context_collection_path).stream()
-                
+                print(f"[fetch_single_mandate] Loading contexts from: {context_collection_path}")
+
+                context_docs = list(self.db.collection(context_collection_path).stream())
+                print(f"[fetch_single_mandate] Found {len(context_docs)} context documents")
+
                 for context_doc in context_docs:
+                    print(f"[fetch_single_mandate] Processing context doc: {context_doc.id}")
                     context_data = context_doc.to_dict()
                     if context_doc.id == "accounting_context":
                         accounting_data = context_data.get('data', {}).get('accounting_context_0', {})
@@ -5135,6 +5667,11 @@ class FirebaseManagement:
                             
             except Exception as e:
                 mandate["context_details"]["error"] = f"Error fetching context documents: {str(e)}"
+                print(f"[fetch_single_mandate] Error loading contexts: {e}")
+
+            # DEBUG: Log context_details content
+            print(f"[fetch_single_mandate] context_details keys: {list(mandate.get('context_details', {}).keys())}")
+            print(f"[fetch_single_mandate] general_context present: {'general_context' in mandate.get('context_details', {})}")
 
             print(f"Mandat chargé avec succès: {mandate.get('legal_name', 'Nom non disponible')}")
             return mandate
@@ -5294,51 +5831,32 @@ class FirebaseManagement:
 
     def fetch_journal_entries_by_mandat_id_and_job_ids(self,user_id, mandat_id, source, departement, job_ids):
         """
-        Récupère les entrées du journal pour un mandat_id, une source et un département donnés,
-        puis filtre les résultats pour ne garder que ceux correspondant aux job_id demandés,
-        en produisant une liste principale avec des sous-listes.
+        Récupère les entrées task_manager pour un mandat_id, source et département donnés,
+        filtrées par job_ids.
+        Migration: remplace la requête sur klk_vision/{dept}/journal.
         """
-        # Initialiser la requête de base pour obtenir le document associé au département
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            base_path = f'clients/{user_id}/task_manager'
         else:
-            base_path = 'klk_vision'
-        router_query = self.db.collection(base_path).where(filter=FieldFilter('departement', '==', departement)).limit(1).get()
-        entries_with_paths = []  # Liste principale pour stocker les sous-listes des entrées
+            base_path = 'task_manager'
+        task_manager_ref = self.db.collection(base_path)
 
-        for doc in router_query:
-            router_doc = doc.to_dict()
-            router_doc_id = doc.id  # ID du document trouvé pour 'departement'
+        query = task_manager_ref.where(filter=FieldFilter('department', '==', departement)) \
+                                .where(filter=FieldFilter('mandat_id', '==', mandat_id)) \
+                                .where(filter=FieldFilter('source', '==', source)).stream()
 
-            # Accéder à la sous-collection 'journal' du document trouvé
-            journal_query = self.db.collection(base_path).document(router_doc_id).collection('journal')
-
-
-            # Appliquer les filtres sur la sous-collection 'journal'
-            journal_query = journal_query.where(filter=FieldFilter('mandat_id', '==', mandat_id)).where(filter=FieldFilter('source', '==', source))
-
-            # Exécuter la requête et itérer sur les résultats
-            journal_entries = journal_query.stream()
-
-            for entry in journal_entries:
-                entry_data = entry.to_dict()  # Convertir l'entrée en dictionnaire
-
-                # Vérifier si le statut de l'entrée est valide
-                if entry_data.get('status') not in ['rejection']:
-                    # Vérifier si le job_id de l'entrée est dans la liste des job_ids demandés
-                    if entry_data.get('job_id') in job_ids:
-                        document_path = f"{base_path}/{router_doc_id}/journal/{entry.id}"  # Construire le chemin d'accès
-                        firebase_doc_id = entry.id  # Extrait l'ID du document Firestore
-
-                        # Construire un dictionnaire pour l'entrée correspondante
-                        entry_with_path = {
-                            'data': entry_data,
-                            'path': document_path,
-                            'firebase_doc_id': firebase_doc_id
-                        }
-
-                        # Ajouter l'entrée sous forme de sous-liste dans la liste principale
-                        entries_with_paths.append(entry_with_path)
+        entries_with_paths = []
+        for entry in query:
+            entry_data = entry.to_dict()
+            if entry_data.get('status') not in ['rejection']:
+                if entry_data.get('job_id') in job_ids:
+                    document_path = f"{base_path}/{entry.id}"
+                    entry_with_path = {
+                        'data': entry_data,
+                        'path': document_path,
+                        'firebase_doc_id': entry.id
+                    }
+                    entries_with_paths.append(entry_with_path)
 
         return entries_with_paths
 
@@ -5369,52 +5887,33 @@ class FirebaseManagement:
 
     def fetch_journal_entries(self,user_id, mandat_id, departement, job_ids=None, status=None):
         """
-        Récupère les entrées de la collection 'journal' correspondant au mandat_id, au département donné,
-        et filtre les résultats selon job_ids et status (optionnels).
+        Récupère les entrées task_manager pour un mandat_id et département donnés,
+        avec filtres optionnels sur job_ids et status.
+        Migration: remplace la requête sur klk_vision/{dept}/journal.
         """
-        entries_with_paths = []  # Liste principale pour stocker les résultats
-
-        # Itérer au travers des documents dans la collection 'klk_vision'
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            base_path = f'clients/{user_id}/task_manager'
         else:
-            base_path = 'klk_vision'
-        router_query = self.db.collection(base_path).stream()
+            base_path = 'task_manager'
+        task_manager_ref = self.db.collection(base_path)
 
-        for doc in router_query:
-            router_doc = doc.to_dict()
+        query = task_manager_ref.where(filter=FieldFilter('department', '==', departement)) \
+                                .where(filter=FieldFilter('mandat_id', '==', mandat_id))
+        if status is not None:
+            query = query.where(filter=FieldFilter('status', '==', status))
 
-            # Vérifier si le champ 'departement' correspond à l'argument
-            if router_doc.get('departement') == departement:
-                router_doc_id = doc.id  # ID du document trouvé pour le département
-
-                # Accéder à la collection 'journal' sous le document correspondant
-                if user_id:
-                    base_path = f'clients/{user_id}/klk_vision'
-                else:
-                    base_path = 'klk_vision'
-                journal_query = self.db.collection(base_path).document(router_doc_id).collection('journal').stream()
-
-                for entry in journal_query:
-                    entry_data = entry.to_dict()  # Convertir l'entrée en dictionnaire
-
-                    # Filtrer selon mandat_id
-                    if entry_data.get('mandat_id') == mandat_id:
-                        job_id = entry_data.get('job_id')
-                        # Appliquer les filtres supplémentaires : job_ids et status
-                        if (job_ids is None or (isinstance(job_id, str) and job_id in job_ids)) and (status is None or entry_data.get('status') == status):
-                            document_path = f"klk_vision/{router_doc_id}/journal/{entry.id}"  # Construire le chemin d'accès
-                            firebase_doc_id = entry.id  # ID du document Firestore
-
-                            # Construire un dictionnaire pour l'entrée correspondante
-                            entry_with_path = {
-                                'data': entry_data,
-                                'path': document_path,
-                                'firebase_doc_id': firebase_doc_id
-                            }
-
-                            # Ajouter l'entrée dans la liste principale
-                            entries_with_paths.append(entry_with_path)
+        entries_with_paths = []
+        for entry in query.stream():
+            entry_data = entry.to_dict()
+            job_id = entry_data.get('job_id')
+            if job_ids is None or (isinstance(job_id, str) and job_id in job_ids):
+                document_path = f"{base_path}/{entry.id}"
+                entry_with_path = {
+                    'data': entry_data,
+                    'path': document_path,
+                    'firebase_doc_id': entry.id
+                }
+                entries_with_paths.append(entry_with_path)
 
         return entries_with_paths
 
@@ -5422,157 +5921,95 @@ class FirebaseManagement:
 
     def fetch_journal_entries_by_mandat_id_without_source(self,user_id, mandat_id, departement):
         """
-        Traitement de tout les id du département concerné a l'exclusion des id avec un 
-        statut 'rejection'
+        Récupère les entrées task_manager par mandat_id et département,
+        en excluant les statuts 'rejection' et 'pending'.
+        Migration: remplace la requête sur klk_vision/{dept}/journal.
         """
-        # Initialiser la requête de base pour obtenir le document associé au département
         try:
             if user_id:
-                base_path = f'clients/{user_id}/klk_vision'
+                base_path = f'clients/{user_id}/task_manager'
             else:
-                base_path = 'klk_vision'
-            router_query = self.db.collection(base_path).where(filter=FieldFilter('departement', '==', departement)).limit(1).get()
-            entries_with_paths = []  # Liste pour stocker les données des entrées et leurs chemins
+                base_path = 'task_manager'
+            task_manager_ref = self.db.collection(base_path)
 
-            for doc in router_query:
-                router_doc = doc.to_dict()
-                #print(f"Document trouvé: {router_doc}")
-                router_doc_id = doc.id  # ID du document trouvé pour 'departement'
+            query = task_manager_ref.where(filter=FieldFilter('department', '==', departement)) \
+                                    .where(filter=FieldFilter('mandat_id', '==', mandat_id)).stream()
 
-                # Accéder à la sous-collection 'journal' du document trouvé
-                if user_id:
-                    base_path = f'clients/{user_id}/klk_vision'
-                else:
-                    base_path = 'klk_vision'
-                journal_query = self.db.collection(base_path).document(router_doc_id).collection('journal')
-
-                # Appliquer les filtres sur la sous-collection 'journal'
-                journal_query = journal_query.where(filter=FieldFilter('mandat_id', '==', mandat_id))
-
-                # Exécuter la requête et itérer sur les résultats
-                journal_entries = journal_query.stream()
-
-                for entry in journal_entries:
-                    entry_data = entry.to_dict()  # Convertir l'entrée en dictionnaire
-
-                    # Vérifier si le status de l'entrée est 'rejection'
-                    if entry_data.get('status')  not in ['rejection', 'pending']:
-                        if user_id:
-                            document_path=f'clients/{user_id}/klk_vision//{router_doc_id}/journal/{entry.id}'
-                        else:
-                            document_path = f"klk_vision/{router_doc_id}/journal/{entry.id}"  # Construire le chemin d'accès
-                        
-                        firebase_doc_id = entry.id  # Extrait l'ID du document Firestore
-
-                        # Construire un dictionnaire pour chaque entrée, sans ceux ayant un status 'rejection'
-                        entry_with_path = {
-                            'data': entry_data,
-                            'path': document_path,
-                            'firebase_doc_id': firebase_doc_id
-                        }
-
-                        entries_with_paths.append(entry_with_path)
+            entries_with_paths = []
+            for entry in query:
+                entry_data = entry.to_dict()
+                if entry_data.get('status') not in ['rejection', 'pending']:
+                    document_path = f"{base_path}/{entry.id}"
+                    entry_with_path = {
+                        'data': entry_data,
+                        'path': document_path,
+                        'firebase_doc_id': entry.id
+                    }
+                    entries_with_paths.append(entry_with_path)
 
             print(f"Total documents récupérés: {len(entries_with_paths)}")
             return entries_with_paths
 
         except Exception as e:
-            print(f"erreur lors de la récupraation des items traité par le router depuis firebase:{e}")
+            print(f"erreur lors de la récupération des items traités depuis task_manager: {e}")
 
     def fetch_journal_entries_by_mandat_id(self,user_id, mandat_id, source, departement):
         """
-        Traitement de tout les id du département concerné a l'exclusion des id avec un 
-        statut 'rejection'
+        Récupère les entrées task_manager par mandat_id, source et département,
+        en excluant le statut 'rejection'.
+        Migration: remplace la requête sur klk_vision/{dept}/journal.
         """
-        # Initialiser la requête de base pour obtenir le document associé au département
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            base_path = f'clients/{user_id}/task_manager'
         else:
-            base_path = 'klk_vision'
-        router_query = self.db.collection(base_path).where(filter=FieldFilter('departement', '==', departement)).limit(1).get()
-        entries_with_paths = []  # Liste pour stocker les données des entrées et leurs chemins
+            base_path = 'task_manager'
+        task_manager_ref = self.db.collection(base_path)
 
-        for doc in router_query:
-            router_doc = doc.to_dict()
-            #print(f"Document trouvé: {router_doc}")
-            router_doc_id = doc.id  # ID du document trouvé pour 'departement'
+        query = task_manager_ref.where(filter=FieldFilter('department', '==', departement)) \
+                                .where(filter=FieldFilter('mandat_id', '==', mandat_id)) \
+                                .where(filter=FieldFilter('source', '==', source)).stream()
 
-            # Accéder à la sous-collection 'journal' du document trouvé
-            journal_query = self.db.collection(base_path).document(router_doc_id).collection('journal')
-
-            # Appliquer les filtres sur la sous-collection 'journal'
-            journal_query = journal_query.where(filter=FieldFilter('mandat_id', '==', mandat_id)).where(filter=FieldFilter('source', '==', source))
-
-            # Exécuter la requête et itérer sur les résultats
-            journal_entries = journal_query.stream()
-
-            for entry in journal_entries:
-                entry_data = entry.to_dict()  # Convertir l'entrée en dictionnaire
-
-                # Vérifier si le status de l'entrée est 'rejection'
-                if entry_data.get('status')  not in ['rejection']:
-                    document_path = f"klk_vision/{router_doc_id}/journal/{entry.id}"  # Construire le chemin d'accès
-                    firebase_doc_id = entry.id  # Extrait l'ID du document Firestore
-
-                    # Construire un dictionnaire pour chaque entrée, sans ceux ayant un status 'rejection'
-                    entry_with_path = {
-                        'data': entry_data,
-                        'path': document_path,
-                        'firebase_doc_id': firebase_doc_id
-                    }
-
-                    entries_with_paths.append(entry_with_path)
+        entries_with_paths = []
+        for entry in query:
+            entry_data = entry.to_dict()
+            if entry_data.get('status') not in ['rejection']:
+                document_path = f"{base_path}/{entry.id}"
+                entry_with_path = {
+                    'data': entry_data,
+                    'path': document_path,
+                    'firebase_doc_id': entry.id
+                }
+                entries_with_paths.append(entry_with_path)
 
         return entries_with_paths
 
     def fetch_pending_journal_entries_by_mandat_id(self,user_id, mandat_id, source, departement):
         """
-        Récupère uniquement les documents avec le statut 'pending' pour un département donné.
-        Cette méthode est spécifiquement créée pour l'onglet Pending.
+        Récupère uniquement les documents task_manager avec le statut 'pending'.
+        Migration: remplace la requête sur klk_vision/{dept}/journal.
         """
-        # Initialiser la requête de base pour obtenir le document associé au département
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            base_path = f'clients/{user_id}/task_manager'
         else:
-            base_path = 'klk_vision'
-        
-        router_query = self.db.collection(base_path).where(filter=FieldFilter('departement', '==', departement)).limit(1).get()
-        entries_with_paths = []  # Liste pour stocker les données des entrées et leurs chemins
+            base_path = 'task_manager'
+        task_manager_ref = self.db.collection(base_path)
 
-        for doc in router_query:
-            router_doc = doc.to_dict()
-            print(f"Document trouvé pour pending: {router_doc}")
-            router_doc_id = doc.id  # ID du document trouvé pour 'departement'
+        query = task_manager_ref.where(filter=FieldFilter('department', '==', departement)) \
+                                .where(filter=FieldFilter('mandat_id', '==', mandat_id)) \
+                                .where(filter=FieldFilter('source', '==', source)) \
+                                .where(filter=FieldFilter('status', '==', 'pending')).stream()
 
-            # Accéder à la sous-collection 'journal' du document trouvé
-            journal_query = self.db.collection(base_path).document(router_doc_id).collection('journal')
-
-            # Appliquer les filtres sur la sous-collection 'journal'
-            # Filtrer par mandat_id, source ET status 'pending'
-            journal_query = journal_query.where(filter=FieldFilter('mandat_id', '==', mandat_id))\
-                                    .where(filter=FieldFilter('source', '==', source))\
-                                    .where(filter=FieldFilter('status', '==', 'pending'))
-
-            # Exécuter la requête et itérer sur les résultats
-            journal_entries = journal_query.stream()
-
-            for entry in journal_entries:
-                entry_data = entry.to_dict()  # Convertir l'entrée en dictionnaire
-                
-                # Double vérification que le status est bien 'pending'
-                if entry_data.get('status') == 'pending':
-                    document_path = f"klk_vision/{router_doc_id}/journal/{entry.id}"  # Construire le chemin d'accès
-                    firebase_doc_id = entry.id  # Extrait l'ID du document Firestore
-
-                    # Construire un dictionnaire pour chaque entrée pending
-                    entry_with_path = {
-                        'data': entry_data,
-                        'path': document_path,
-                        'firebase_doc_id': firebase_doc_id
-                    }
-
-                    entries_with_paths.append(entry_with_path)
-                    print(f"Document pending trouvé: {entry_data.get('file_name', 'Unknown')} - Status: {entry_data.get('status')}")
+        entries_with_paths = []
+        for entry in query:
+            entry_data = entry.to_dict()
+            document_path = f"{base_path}/{entry.id}"
+            entry_with_path = {
+                'data': entry_data,
+                'path': document_path,
+                'firebase_doc_id': entry.id
+            }
+            entries_with_paths.append(entry_with_path)
+            print(f"Document pending trouvé: {entry_data.get('file_name', 'Unknown')} - Status: pending")
 
         print(f"Total documents pending récupérés: {len(entries_with_paths)}")
         return entries_with_paths
@@ -5627,10 +6064,11 @@ class FirebaseManagement:
 
     def delete_items_by_job_id(self, user_id, job_ids, mandate_path=None):
         """
-        Supprime les items par job_id dans task_manager, klk_vision et expenses_details.
-        
+        Supprime les items par job_id dans task_manager et expenses_details.
+
         ⚠️ IMPORTANT: côté task_manager, on fait un PURGE qui PRÉSERVE le champ `billing` si présent.
-        
+        Migration: klk_vision cleanup supprimé (migration vers task_manager terminée).
+
         Args:
             user_id: ID de l'utilisateur Firebase
             job_ids: Liste de job_ids à supprimer
@@ -5638,63 +6076,37 @@ class FirebaseManagement:
         """
         if not isinstance(job_ids, list):
             job_ids = [job_ids]
-        
+
         for job_id in job_ids:
-            exbookeeper_detected = False  # Flag pour détecter si EXbookeeper est concerné
-            klk_job_id = None  # Pour stocker le job_id original (format klk_xxx) si trouvé
-            
-            # Étape 1: PURGE task_manager (préserver billing)
+            exbookeeper_detected = False
+            klk_job_id = None
+
+            # Étape 1: Lire task_manager AVANT purge pour détecter EXbookeeper
+            try:
+                if user_id:
+                    tm_base = f'clients/{user_id}/task_manager'
+                else:
+                    tm_base = 'task_manager'
+                tm_doc_ref = self.db.collection(tm_base).document(job_id)
+                tm_doc = tm_doc_ref.get()
+                if tm_doc.exists:
+                    tm_data = tm_doc.to_dict()
+                    department = tm_data.get('department', '')
+                    if department == 'EXbookeeper':
+                        exbookeeper_detected = True
+                        original_job_id = tm_data.get('job_id', '')
+                        if original_job_id and original_job_id.startswith("klk"):
+                            klk_job_id = original_job_id
+            except Exception as e:
+                print(f"⚠️ Erreur lecture task_manager pour {job_id} (non bloquant): {e}")
+
+            # Étape 2: PURGE task_manager (préserver billing)
             print(f"[PURGE] task_manager pour le job_id: {job_id} (préserver billing si présent)")
             try:
                 self.delete_task_manager_document(user_id=user_id, document_id=job_id)
             except Exception as e:
                 print(f"⚠️ Erreur purge task_manager pour {job_id} (non bloquant): {e}")
-            
-            # Étape 2: Parcours et suppression dans klk_vision/journal
-            if user_id:
-                base_path = f'clients/{user_id}/klk_vision'
-            else:
-                base_path = 'klk_vision'
-            klk_vision_ref = self.db.collection(base_path)
-            docs = klk_vision_ref.stream()
-            
-            for doc in docs:
-                doc_data = doc.to_dict()
-                department = doc_data.get('departement', '') if doc_data else ''
-                
-                journal_ref = doc.reference.collection('journal')
-                
-                # Chercher par job_id OU drive_file_id
-                # 1. D'abord chercher par job_id
-                journal_docs_by_job_id = list(journal_ref.where(filter=FieldFilter('job_id', '==', job_id)).stream())
-                
-                # 2. Ensuite chercher par drive_file_id
-                journal_docs_by_drive_id = list(journal_ref.where(filter=FieldFilter('drive_file_id', '==', job_id)).stream())
-                
-                # Combiner les résultats (éviter les doublons par ID de document)
-                seen_doc_ids = set()
-                all_journal_docs = []
-                for jdoc in journal_docs_by_job_id + journal_docs_by_drive_id:
-                    if jdoc.id not in seen_doc_ids:
-                        seen_doc_ids.add(jdoc.id)
-                        all_journal_docs.append(jdoc)
-                
-                for jdoc in all_journal_docs:
-                    # Récupérer le job_id original du document avant suppression
-                    jdoc_data = jdoc.to_dict()
-                    original_job_id = jdoc_data.get('job_id', '') if jdoc_data else ''
-                    
-                    print(f"Suppression du document avec job_id/drive_file_id: {job_id} dans klk_vision/{doc.id}/journal")
-                    jdoc.reference.delete()
-                    
-                    # Détecter si EXbookeeper est concerné et sauvegarder le job_id original
-                    if department == 'EXbookeeper':
-                        exbookeeper_detected = True
-                        # Sauvegarder le job_id original s'il commence par "klk"
-                        if original_job_id and original_job_id.startswith("klk"):
-                            klk_job_id = original_job_id
-                            print(f"🔍 [EXPENSES] Job_id original récupéré: {klk_job_id}")
-            
+
             # Étape 3: Suppression dans expenses_details si EXbookeeper détecté et mandate_path fourni
             if mandate_path and exbookeeper_detected:
                 try:
@@ -6866,7 +7278,7 @@ class FirebaseManagement:
             current_data = job_doc.to_dict()
             print(f"Current document data before deletion: {list(current_data.keys())}")
             
-            # Suppression des champs APBookeeper_step_status, current_step et Document_information en une seule opération
+            # Suppression des champs dynamiques ajoutés pendant le traitement
             fields_to_delete = {}
             # Note: Le champ s'appelle APBookeeper avec un seul 'k', pas APBookkeeper
             if 'APBookeeper_step_status' in current_data:
@@ -6880,6 +7292,10 @@ class FirebaseManagement:
             if 'Document_information' in current_data:
                 fields_to_delete['Document_information'] = firestore.DELETE_FIELD
                 print(f"Marking Document_information for deletion")
+            
+            if 'status' in current_data:
+                fields_to_delete['status'] = 'to_process'
+                print(f"Resetting status to 'to_process' (was: {current_data.get('status')})")
             
             # Exécuter la suppression si des champs existent
             if fields_to_delete:
@@ -8143,33 +8559,11 @@ class FirebaseManagement:
                 
                 if workflow_doc.exists:
                     workflow_data = workflow_doc.to_dict()
-                    
-                    # Extraire les paramètres pour Apbookeeper
-                    if "Apbookeeper_param" in workflow_data:
-                        ap_param = workflow_data.get("Apbookeeper_param", {})
-                        workflow_params["Apbookeeper_param"] = {
-                            "apbookeeper_approval_contact_creation": ap_param.get("apbookeeper_approval_contact_creation", False),
-                            "apbookeeper_approval_required": ap_param.get("apbookeeper_approval_required", False),
-                            "apbookeeper_communication_method": ap_param.get("apbookeeper_communication_method", "")
-                        }
-                    
-                    # Extraire les paramètres pour Router
-                    if "Router_param" in workflow_data:
-                        router_param = workflow_data.get("Router_param", {})
-                        workflow_params["Router_param"] = {
-                            "router_approval_required": router_param.get("router_approval_required", False),
-                            "router_automated_workflow": router_param.get("router_automated_workflow", False),
-                            "router_communication_method": router_param.get("router_communication_method", "")
-                        }
-                    
-                    # Extraire les paramètres pour Banker
-                    if "Banker_param" in workflow_data:
-                        banker_param = workflow_data.get("Banker_param", {})
-                        workflow_params["Banker_param"] = {
-                            "banker_approval_required": banker_param.get("banker_approval_required", False),
-                            "banker_approval_thresholdworkflow": banker_param.get("banker_approval_thresholdworkflow", 0),
-                            "banker_communication_method": banker_param.get("banker_communication_method", "")
-                        }
+
+                    # Pass through ALL fields from Firestore instead of whitelisting
+                    for param_key in ("Apbookeeper_param", "Router_param", "Banker_param"):
+                        if param_key in workflow_data:
+                            workflow_params[param_key] = workflow_data[param_key]
             except Exception as e:
                 print(f"⚠️ Erreur récupération workflow_params: {str(e)} - Utilisation des valeurs par défaut")
             
@@ -8228,31 +8622,26 @@ class FirebaseManagement:
         return input_drive_doc_id, output_drive_doc_id, mandat_space_id, mandat_space_name, client_name, legal_name, uuid_id, gl_sheet_id, root_folder_id, doc_folder_id, odoo_erp_type, odoo_url, odoo_username, odoo_secret_manager, odoo_db,mandate_drive_space_parent_id,odoo_company_name,mandat_base_currency,gl_accounting_erp,ar_erp,ap_erp,bank_erp
 
     def fetch_job_journals_by_mandat_id(self,user_id, mandat_id):
-        # Collection principale
+        """
+        Récupère tous les documents task_manager pour un mandat_id donné.
+        Migration: remplace l'ancien scan de klk_vision/{dept}/journal.
+        """
         if user_id:
-            base_path = f'clients/{user_id}/klk_vision'
+            base_path = f'clients/{user_id}/task_manager'
         else:
-            base_path = 'klk_vision'
-        main_collection = self.db.collection(base_path)
-        
-        # Résultats à retourner
+            base_path = 'task_manager'
+        task_manager_ref = self.db.collection(base_path)
+
+        query = task_manager_ref.where(filter=FieldFilter('mandat_id', '==', mandat_id)).stream()
+
         filtered_journals = []
-        document_paths = []  # Liste pour stocker les chemins complets des documents
+        document_paths = []
+        for doc in query:
+            doc_data = doc.to_dict()
+            document_path = f"{base_path}/{doc.id}"
+            filtered_journals.append(doc_data)
+            document_paths.append(document_path)
 
-        # Itérer dans les collections sous 'departement'
-        departments = main_collection.list_documents()  # Cela liste les références de documents dans 'klk_vision'
-        for department_ref in departments:
-            # Accéder à la sous-collection 'journal' de chaque 'departement'
-            journals = department_ref.collection('journal').where(filter=FieldFilter('mandat_id', '==', mandat_id)).stream()
-
-            # Itérer sur les documents filtrés et les ajouter à la liste des résultats
-            for journal in journals:
-                journal_data = journal.to_dict()
-                # Construire le chemin complet du document
-                document_path = f"{department_ref.path}/journal/{journal.id}"
-                filtered_journals.append(journal_data)
-                document_paths.append(document_path)  # Ajouter le chemin complet du document à la liste
-        
         return filtered_journals, document_paths
 
     def delete_documents_by_full_paths(self, document_paths):
@@ -8939,7 +9328,9 @@ class FirebaseManagement:
         """
         try:
             mandate_path = self._normalize_mandate_path(mandate_path)
-            tasks_ref = self.db.collection(f"{mandate_path}/tasks")
+            collection_path = f"{mandate_path}/tasks"
+            logger.info(f"[TASKS] list_tasks_for_mandate: Querying collection '{collection_path}'")
+            tasks_ref = self.db.collection(collection_path)
 
             if status:
                 query = tasks_ref.where(filter=FieldFilter("status", "==", status))
@@ -9407,6 +9798,791 @@ class FirebaseManagement:
             logger.error(f"[TASKS] Erreur get_tasks_ready_for_execution_utc: {e}", exc_info=True)
             return []
 
+    # ========== Approval Pending List Management ==========
+
+    def save_approval_item_changes(
+        self,
+        mandate_path: str,
+        item_id: str,
+        changes: dict,
+        user_id: str = None
+    ) -> bool:
+        """
+        Sauvegarde les modifications locales d'un item d'approbation dans Firebase.
+        Utilisé pour persister les sélections utilisateur (service, année, instructions)
+        sans envoyer au jobbeur.
+
+        Args:
+            mandate_path: Chemin du mandat (ex: "bo_clients/xxx/mandates/yyy")
+            item_id: ID de l'item (ex: "router_abc123")
+            changes: Dict des modifications à appliquer
+                - selected_service: Service sélectionné
+                - selected_fiscal_year: Année fiscale sélectionnée
+                - instructions: Instructions additionnelles
+            user_id: ID de l'utilisateur (pour audit)
+
+        Returns:
+            bool: True si sauvegarde réussie
+        """
+        try:
+            # Construire le chemin du document
+            doc_path = f"{mandate_path}/approval_pendinglist/{item_id}"
+            logger.info(f"[APPROVAL] Saving changes to {doc_path}: {changes}")
+
+            doc_ref = self.db.document(doc_path)
+            doc = doc_ref.get()
+
+            if not doc.exists:
+                logger.warning(f"[APPROVAL] Item not found: {doc_path}")
+                return False
+
+            # Préparer les données à mettre à jour
+            update_data = {}
+
+            if "selected_service" in changes:
+                update_data["selected_service"] = changes["selected_service"]
+            if "selected_fiscal_year" in changes:
+                update_data["selected_fiscal_year"] = changes["selected_fiscal_year"]
+            if "instructions" in changes:
+                update_data["instructions"] = changes["instructions"]
+
+            # Ajouter métadonnées d'audit
+            update_data["last_modified_by"] = user_id
+            update_data["last_modified_at"] = firestore.SERVER_TIMESTAMP
+
+            # Mettre à jour le document
+            doc_ref.update(update_data)
+
+            logger.info(f"[APPROVAL] Changes saved successfully: {doc_path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[APPROVAL] Error saving changes: {e}", exc_info=True)
+            return False
+
+    def process_router_approval(
+        self,
+        mandate_path: str,
+        item_id: str,
+        selected_service: str,
+        selected_fiscal_year: str,
+        user_id: str,
+        instructions: str = None
+    ) -> bool:
+        """
+        Traite l'approbation d'un item Router.
+
+        1. Charge l'item depuis approval_pendinglist
+        2. Crée une notification avec approval_response_mode: true
+        3. Supprime l'item de approval_pendinglist
+        4. Publie sur Redis pour mise à jour temps réel
+
+        Args:
+            mandate_path: Chemin du mandat
+            item_id: ID de l'item (ex: "router_abc123")
+            selected_service: Service sélectionné par l'utilisateur
+            selected_fiscal_year: Année fiscale sélectionnée
+            user_id: ID de l'utilisateur Firebase
+            instructions: Instructions additionnelles (optionnel)
+
+        Returns:
+            bool: True si traitement réussi
+        """
+        import uuid
+        from datetime import datetime, timezone
+
+        try:
+            # 1. Charger l'item depuis approval_pendinglist
+            pending_path = f"{mandate_path}/approval_pendinglist/{item_id}"
+            logger.info(f"[APPROVAL] Processing router approval: {pending_path}")
+
+            doc_ref = self.db.document(pending_path)
+            doc = doc_ref.get()
+
+            if not doc.exists:
+                logger.error(f"[APPROVAL] Item not found: {pending_path}")
+                return False
+
+            item_data = doc.to_dict()
+            context_payload = item_data.get("context_payload", {})
+
+            # Extraire les informations nécessaires
+            drive_file_id = context_payload.get("drive_file_id", "")
+            file_name = context_payload.get("file_name", "") or item_data.get("file_name", "")
+
+            # Extraire company_id depuis mandate_path (format: bo_clients/{client}/mandates/{company})
+            path_parts = mandate_path.split("/")
+            company_id = path_parts[-1] if len(path_parts) >= 4 else ""
+            client_uuid = path_parts[1] if len(path_parts) >= 2 else ""
+
+            # 2. Créer la notification avec approval_response_mode
+            batch_id = f"approval_batch_{uuid.uuid4().hex[:10]}"
+            notification_path = f"clients/{user_id}/notifications"
+
+            notification_data = {
+                "job_id": item_id,
+                "file_id": drive_file_id,
+                "file_name": file_name,
+                "function_name": "Router",
+                "status": "in_queue",
+                "read": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "collection_id": company_id,
+                "collection_name": company_id,
+                "batch_id": batch_id,
+                "approval_response_mode": True,  # ← Clé importante pour le jobbeur
+                "approval_status": "approved",
+                "selected_service": selected_service,
+                "selected_fiscal_year": selected_fiscal_year,
+                "instructions": instructions or "",
+                "user_id": user_id,
+                "client_uuid": client_uuid,
+                "mandates_path": mandate_path,
+            }
+
+            # Ajouter la notification
+            notifications_ref = self.db.collection(notification_path)
+            notifications_ref.document(item_id).set(notification_data)
+            logger.info(f"[APPROVAL] Notification created: {notification_path}/{item_id}")
+
+            # 3. Supprimer l'item de approval_pendinglist
+            doc_ref.delete()
+            logger.info(f"[APPROVAL] Item deleted from pendinglist: {pending_path}")
+
+            # 4. Supprimer aussi le contexte d'approbation s'il existe
+            context_path = f"{mandate_path}/approval_context/{item_id}"
+            try:
+                context_ref = self.db.document(context_path)
+                if context_ref.get().exists:
+                    context_ref.delete()
+                    logger.info(f"[APPROVAL] Context deleted: {context_path}")
+            except Exception:
+                pass  # Le contexte peut ne pas exister
+
+            # 5. Publier sur Redis pour mise à jour temps réel (action: remove)
+            self._publish_pending_approval_redis(
+                user_id=user_id,
+                company_id=company_id,
+                item_id=item_id,
+                action="remove"
+            )
+
+            logger.info(f"[APPROVAL] Router approval processed successfully: {item_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[APPROVAL] Error processing router approval: {e}", exc_info=True)
+            return False
+
+    def process_router_rejection(
+        self,
+        mandate_path: str,
+        item_id: str,
+        rejection_reason: str,
+        instructions: str = None,
+        close: bool = False,
+        user_id: str = None
+    ) -> bool:
+        """
+        Traite le rejet d'un item Router.
+
+        Si close=True: Supprime l'item (ferme définitivement)
+        Si close=False: Met à jour le statut en "rejected" (peut être réouvert)
+
+        Args:
+            mandate_path: Chemin du mandat
+            item_id: ID de l'item
+            rejection_reason: Raison du rejet
+            instructions: Instructions additionnelles
+            close: Si True, supprime l'item définitivement
+            user_id: ID de l'utilisateur
+
+        Returns:
+            bool: True si traitement réussi
+        """
+        from datetime import datetime, timezone
+
+        try:
+            pending_path = f"{mandate_path}/approval_pendinglist/{item_id}"
+            logger.info(f"[APPROVAL] Processing router rejection: {pending_path}, close={close}")
+
+            doc_ref = self.db.document(pending_path)
+            doc = doc_ref.get()
+
+            if not doc.exists:
+                logger.error(f"[APPROVAL] Item not found: {pending_path}")
+                return False
+
+            item_data = doc.to_dict()
+
+            # Extraire company_id
+            path_parts = mandate_path.split("/")
+            company_id = path_parts[-1] if len(path_parts) >= 4 else ""
+
+            if close:
+                # Supprimer définitivement
+                doc_ref.delete()
+                logger.info(f"[APPROVAL] Item deleted (closed): {pending_path}")
+
+                # Supprimer aussi le contexte
+                context_path = f"{mandate_path}/approval_context/{item_id}"
+                try:
+                    context_ref = self.db.document(context_path)
+                    if context_ref.get().exists:
+                        context_ref.delete()
+                except Exception:
+                    pass
+
+                # Publier sur Redis (action: remove)
+                self._publish_pending_approval_redis(
+                    user_id=user_id,
+                    company_id=company_id,
+                    item_id=item_id,
+                    action="remove"
+                )
+            else:
+                # Mettre à jour le statut
+                update_data = {
+                    "status": "rejected",
+                    "rejection_reason": rejection_reason,
+                    "instructions": instructions or "",
+                    "rejected_by": user_id,
+                    "rejected_at": datetime.now(timezone.utc).isoformat(),
+                }
+                doc_ref.update(update_data)
+                logger.info(f"[APPROVAL] Item marked as rejected: {pending_path}")
+
+                # Publier sur Redis (action: update)
+                self._publish_pending_approval_redis(
+                    user_id=user_id,
+                    company_id=company_id,
+                    item_id=item_id,
+                    action="update",
+                    data={"status": "rejected", "rejection_reason": rejection_reason}
+                )
+
+            logger.info(f"[APPROVAL] Router rejection processed successfully: {item_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[APPROVAL] Error processing router rejection: {e}", exc_info=True)
+            return False
+
+    def _publish_pending_approval_redis(
+        self,
+        user_id: str,
+        company_id: str,
+        item_id: str,
+        action: str,
+        data: dict = None,
+        department: str = "routing"
+    ):
+        """
+        Publie une mise à jour pending_approval sur Redis.
+
+        Args:
+            user_id: ID utilisateur Firebase
+            company_id: ID de la société
+            item_id: ID de l'item
+            action: "add" | "update" | "remove"
+            data: Données additionnelles (optionnel)
+            department: Département source ("routing", "bank", "invoices")
+        """
+        try:
+            import json
+            from .redis_client import get_redis
+
+            redis = get_redis()
+            channel = f"user:{user_id}/pending_approval"
+
+            from datetime import datetime, timezone as tz
+
+            payload = {
+                "type": f"pending_approval_{'deleted' if action == 'remove' else 'updated' if action == 'update' else 'created'}",
+                "action": action,
+                "department": department,
+                "job_id": item_id,
+                "company_id": company_id,
+                "data": data or {"id": item_id},
+                "timestamp": datetime.now(tz.utc).isoformat(),
+            }
+
+            redis.publish(channel, json.dumps(payload, default=str))
+            logger.info(f"[REDIS] Published pending_approval to {channel}: action={action}, dept={department}")
+
+        except Exception as e:
+            logger.warning(f"[REDIS] Error publishing pending_approval: {e}")
+
+    # ─────────────────────────────────────────────────────────────
+    # BANKER APPROVAL / REJECTION
+    # ─────────────────────────────────────────────────────────────
+
+    def process_banker_approval(
+        self,
+        mandate_path: str,
+        item_id: str,
+        user_id: str,
+        instructions: str = None,
+        **extra_fields
+    ) -> bool:
+        """
+        Traite l'approbation d'un item Banker.
+
+        1. Charge l'item depuis approval_pendinglist
+        2. Crée une notification avec approval_response_mode: true
+        3. Supprime l'item de approval_pendinglist
+        4. Publie sur Redis pour mise à jour temps réel
+        """
+        import uuid as uuid_mod
+        from datetime import datetime, timezone
+
+        try:
+            pending_path = f"{mandate_path}/approval_pendinglist/{item_id}"
+            logger.info(f"[APPROVAL] Processing banker approval: {pending_path}")
+
+            doc_ref = self.db.document(pending_path)
+            doc = doc_ref.get()
+
+            if not doc.exists:
+                logger.error(f"[APPROVAL] Item not found: {pending_path}")
+                return False
+
+            item_data = doc.to_dict()
+
+            # Extraire company_id depuis mandate_path
+            path_parts = mandate_path.split("/")
+            company_id = path_parts[-1] if len(path_parts) >= 4 else ""
+            client_uuid = path_parts[1] if len(path_parts) >= 2 else ""
+
+            # 2. Créer la notification avec approval_response_mode
+            notification_data = {
+                "job_id": item_id,
+                "file_id": item_data.get("transaction_id", item_id),
+                "file_name": item_data.get("file_name", item_data.get("transaction_name", "")),
+                "function_name": "Bankbookeeper",
+                "status": "in_queue",
+                "read": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "collection_id": company_id,
+                "collection_name": company_id,
+                "batch_id": item_data.get("batch_id", f"approval_batch_{uuid_mod.uuid4().hex[:10]}"),
+                "approval_response_mode": True,
+                "approval_status": "approved",
+                "instructions": instructions or "",
+                "user_id": user_id,
+                "client_uuid": client_uuid,
+                "mandates_path": mandate_path,
+            }
+
+            notification_path = f"clients/{user_id}/notifications"
+            self.db.collection(notification_path).document(item_id).set(notification_data)
+            logger.info(f"[APPROVAL] Banker notification created: {notification_path}/{item_id}")
+
+            # 3. Supprimer l'item de approval_pendinglist
+            doc_ref.delete()
+            logger.info(f"[APPROVAL] Item deleted from pendinglist: {pending_path}")
+
+            # 4. Cleanup approval_context
+            try:
+                ctx_ref = self.db.document(f"{mandate_path}/approval_context/{item_id}")
+                if ctx_ref.get().exists:
+                    ctx_ref.delete()
+            except Exception:
+                pass
+
+            # 5. Publish Redis (action: remove)
+            self._publish_pending_approval_redis(
+                user_id=user_id,
+                company_id=company_id,
+                item_id=item_id,
+                action="remove",
+                department="bank"
+            )
+
+            logger.info(f"[APPROVAL] Banker approval processed successfully: {item_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[APPROVAL] Error processing banker approval: {e}", exc_info=True)
+            return False
+
+    def process_banker_rejection(
+        self,
+        mandate_path: str,
+        item_id: str,
+        rejection_reason: str,
+        instructions: str = None,
+        close: bool = False,
+        user_id: str = None
+    ) -> bool:
+        """
+        Traite le rejet d'un item Banker.
+
+        Si close=True: Supprime l'item définitivement
+        Si close=False: Met à jour le statut en "rejected"
+        """
+        from datetime import datetime, timezone
+
+        try:
+            pending_path = f"{mandate_path}/approval_pendinglist/{item_id}"
+            logger.info(f"[APPROVAL] Processing banker rejection: {pending_path}, close={close}")
+
+            doc_ref = self.db.document(pending_path)
+            doc = doc_ref.get()
+
+            if not doc.exists:
+                logger.error(f"[APPROVAL] Item not found: {pending_path}")
+                return False
+
+            path_parts = mandate_path.split("/")
+            company_id = path_parts[-1] if len(path_parts) >= 4 else ""
+
+            if close:
+                doc_ref.delete()
+                try:
+                    ctx_ref = self.db.document(f"{mandate_path}/approval_context/{item_id}")
+                    if ctx_ref.get().exists:
+                        ctx_ref.delete()
+                except Exception:
+                    pass
+
+                self._publish_pending_approval_redis(
+                    user_id=user_id, company_id=company_id,
+                    item_id=item_id, action="remove", department="bank"
+                )
+            else:
+                update_data = {
+                    "status": "rejected",
+                    "rejection_reason": rejection_reason,
+                    "instructions": instructions or "",
+                    "rejected_by": user_id,
+                    "rejected_at": datetime.now(timezone.utc).isoformat(),
+                }
+                doc_ref.update(update_data)
+
+                self._publish_pending_approval_redis(
+                    user_id=user_id, company_id=company_id,
+                    item_id=item_id, action="update", department="bank",
+                    data={"status": "rejected", "rejection_reason": rejection_reason}
+                )
+
+            logger.info(f"[APPROVAL] Banker rejection processed: {item_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[APPROVAL] Error processing banker rejection: {e}", exc_info=True)
+            return False
+
+    # ─────────────────────────────────────────────────────────────
+    # APBOOKEEPER APPROVAL / REJECTION
+    # ─────────────────────────────────────────────────────────────
+
+    def process_apbookeeper_approval(
+        self,
+        mandate_path: str,
+        item_id: str,
+        user_id: str,
+        instructions: str = None,
+        updated_data: dict = None,
+        approval_type: str = "invoice",
+        **extra_fields
+    ) -> bool:
+        """
+        Traite l'approbation d'un item APBookkeeper.
+
+        1. Charge l'item depuis approval_pendinglist
+        2. Merge updated_data dans context_payload (mode PATCH)
+        3. Crée une notification avec approval_response_mode: true
+        4. Dispatch vers le worker via Redis queue
+        5. Supprime l'item de approval_pendinglist
+        6. Publie un delta PENDING_APPROVAL_UPDATE action=remove
+        """
+        import json as json_mod
+        import uuid as uuid_mod
+        from datetime import datetime, timezone
+
+        try:
+            pending_path = f"{mandate_path}/approval_pendinglist/{item_id}"
+            logger.info(f"[APPROVAL] Processing apbookeeper approval: {pending_path}")
+
+            doc_ref = self.db.document(pending_path)
+            doc = doc_ref.get()
+
+            if not doc.exists:
+                logger.error(f"[APPROVAL] Item not found: {pending_path}")
+                return False
+
+            item_data = doc.to_dict()
+
+            path_parts = mandate_path.split("/")
+            company_id = path_parts[-1] if len(path_parts) >= 4 else ""
+            client_uuid = path_parts[1] if len(path_parts) >= 2 else ""
+
+            # 2. Merge updated_data into context_payload (PATCH mode)
+            if updated_data:
+                ctx = item_data.get("context_payload", {})
+                # Merge invoice_details fields
+                if "invoice_details" in ctx and isinstance(updated_data, dict):
+                    invoice_edits = {
+                        k: v for k, v in updated_data.items()
+                        if k != "accounting_lines"
+                    }
+                    if invoice_edits:
+                        ctx["invoice_details"] = {**ctx.get("invoice_details", {}), **invoice_edits}
+                # Merge accounting_lines (full replace)
+                if "accounting_lines" in updated_data:
+                    ctx["accounting_lines"] = updated_data["accounting_lines"]
+                item_data["context_payload"] = ctx
+                logger.info(f"[APPROVAL] Merged updated_data into context_payload for {item_id}")
+
+            # 3. Créer la notification avec approval_response_mode
+            notification_data = {
+                "job_id": item_id,
+                "file_id": item_data.get("file_id", item_data.get("drive_file_id", item_id)),
+                "file_name": item_data.get("file_name", ""),
+                "function_name": "APbookeeper",
+                "status": "in_queue",
+                "read": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "collection_id": company_id,
+                "collection_name": company_id,
+                "batch_id": item_data.get("batch_id", f"approval_batch_{uuid_mod.uuid4().hex[:10]}"),
+                "approval_response_mode": True,
+                "approval_status": "approved",
+                "approval_type": approval_type,
+                "instructions": instructions or "",
+                "user_id": user_id,
+                "client_uuid": client_uuid,
+                "mandates_path": mandate_path,
+            }
+
+            # Include the merged context_payload so the worker has updated data
+            if updated_data:
+                notification_data["context_payload"] = item_data.get("context_payload", {})
+
+            notification_path = f"clients/{user_id}/notifications"
+            self.db.collection(notification_path).document(item_id).set(notification_data)
+            logger.info(f"[APPROVAL] APBookkeeper notification created: {notification_path}/{item_id}")
+
+            # 4. Dispatch to worker via Redis queue
+            try:
+                redis_client = self._get_redis()
+                if redis_client:
+                    dispatch_payload = {
+                        "job_id": item_id,
+                        "function_name": "APbookeeper",
+                        "mandate_path": mandate_path,
+                        "collection_id": company_id,
+                        "user_id": user_id,
+                        "client_uuid": client_uuid,
+                        "approval_response_mode": True,
+                        "approval_type": approval_type,
+                        "file_id": item_data.get("file_id", ""),
+                        "file_name": item_data.get("file_name", ""),
+                        "batch_id": notification_data["batch_id"],
+                        "context_payload": item_data.get("context_payload", {}),
+                        "instructions": instructions or "",
+                    }
+                    redis_client.lpush(
+                        "queue:agentic_dispatch",
+                        json_mod.dumps(dispatch_payload, default=str)
+                    )
+                    logger.info(f"[APPROVAL] Dispatched to queue:agentic_dispatch for {item_id}")
+            except Exception as redis_err:
+                logger.warning(f"[APPROVAL] Redis dispatch failed (notification still created): {redis_err}")
+
+            # 5. Supprimer l'item de approval_pendinglist
+            doc_ref.delete()
+            logger.info(f"[APPROVAL] Item deleted from pendinglist: {pending_path}")
+
+            # 6. Cleanup approval_context
+            try:
+                ctx_ref = self.db.document(f"{mandate_path}/approval_context/{item_id}")
+                if ctx_ref.get().exists:
+                    ctx_ref.delete()
+            except Exception:
+                pass
+
+            # 7. Publish Redis (action: remove)
+            self._publish_pending_approval_redis(
+                user_id=user_id,
+                company_id=company_id,
+                item_id=item_id,
+                action="remove",
+                department="invoices"
+            )
+
+            logger.info(f"[APPROVAL] APBookkeeper approval processed successfully: {item_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[APPROVAL] Error processing apbookeeper approval: {e}", exc_info=True)
+            return False
+
+    def process_apbookeeper_rejection(
+        self,
+        mandate_path: str,
+        item_id: str,
+        rejection_reason: str,
+        instructions: str = None,
+        close: bool = False,
+        user_id: str = None
+    ) -> bool:
+        """
+        Traite le rejet d'un item APBookkeeper.
+
+        Si close=True: Supprime l'item définitivement
+        Si close=False: Met à jour le statut en "rejected"
+        """
+        from datetime import datetime, timezone
+
+        try:
+            pending_path = f"{mandate_path}/approval_pendinglist/{item_id}"
+            logger.info(f"[APPROVAL] Processing apbookeeper rejection: {pending_path}, close={close}")
+
+            doc_ref = self.db.document(pending_path)
+            doc = doc_ref.get()
+
+            if not doc.exists:
+                logger.error(f"[APPROVAL] Item not found: {pending_path}")
+                return False
+
+            path_parts = mandate_path.split("/")
+            company_id = path_parts[-1] if len(path_parts) >= 4 else ""
+
+            if close:
+                doc_ref.delete()
+                try:
+                    ctx_ref = self.db.document(f"{mandate_path}/approval_context/{item_id}")
+                    if ctx_ref.get().exists:
+                        ctx_ref.delete()
+                except Exception:
+                    pass
+
+                self._publish_pending_approval_redis(
+                    user_id=user_id, company_id=company_id,
+                    item_id=item_id, action="remove", department="invoices"
+                )
+            else:
+                update_data = {
+                    "status": "rejected",
+                    "rejection_reason": rejection_reason,
+                    "instructions": instructions or "",
+                    "rejected_by": user_id,
+                    "rejected_at": datetime.now(timezone.utc).isoformat(),
+                }
+                doc_ref.update(update_data)
+
+                self._publish_pending_approval_redis(
+                    user_id=user_id, company_id=company_id,
+                    item_id=item_id, action="update", department="invoices",
+                    data={"status": "rejected", "rejection_reason": rejection_reason}
+                )
+
+            logger.info(f"[APPROVAL] APBookkeeper rejection processed: {item_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[APPROVAL] Error processing apbookeeper rejection: {e}", exc_info=True)
+            return False
+
+    # ════════════════════════════════════════════════════════════
+    # Instruction Templates CRUD
+    # Path: {mandate_path}/working_doc/instruction_templates/{page_name}/{template_id}
+    # ════════════════════════════════════════════════════════════
+
+    def fetch_instruction_templates(self, mandate_path: str, page_name: str) -> List[Dict]:
+        """
+        Retourne tous les instruction templates pour une page donnée.
+
+        Args:
+            mandate_path: Chemin du mandat
+            page_name: "routing" | "invoices" | "banking"
+
+        Returns:
+            Liste de dicts [{id, title, content, created_at}, ...]
+        """
+        try:
+            collection_path = f"{mandate_path}/working_doc/instruction_templates/{page_name}"
+            docs = self.db.collection(collection_path).stream()
+            templates = [{"id": doc.id, **doc.to_dict()} for doc in docs]
+            print(f"✅ [FIREBASE] Fetched {len(templates)} instruction templates for {page_name}")
+            return templates
+        except Exception as e:
+            print(f"❌ [FIREBASE] Error fetching instruction templates for {page_name}: {e}")
+            return []
+
+    def create_instruction_template(self, mandate_path: str, page_name: str, template_data: Dict) -> Dict:
+        """
+        Crée un nouveau instruction template. Génère l'ID côté serveur.
+
+        Args:
+            mandate_path: Chemin du mandat
+            page_name: "routing" | "invoices" | "banking"
+            template_data: {title, content, created_at}
+
+        Returns:
+            {id, title, content, created_at} ou {} en cas d'erreur
+        """
+        try:
+            collection_path = f"{mandate_path}/working_doc/instruction_templates/{page_name}"
+            logger.info(f"[FIREBASE] create_instruction_template: path={collection_path} data={template_data}")
+            doc_ref = self.db.collection(collection_path).document()
+            logger.info(f"[FIREBASE] create_instruction_template: doc_ref.id={doc_ref.id}, calling set()...")
+            doc_ref.set(template_data)
+            result = {"id": doc_ref.id, **template_data}
+            logger.info(f"[FIREBASE] Created instruction template {doc_ref.id} for {page_name}")
+            return result
+        except Exception as e:
+            logger.error(f"[FIREBASE] Error creating instruction template for {page_name}: {e}", exc_info=True)
+            return {}
+
+    def update_instruction_template(self, mandate_path: str, page_name: str, template_id: str, update_data: Dict) -> bool:
+        """
+        Met à jour un instruction template existant.
+
+        Args:
+            mandate_path: Chemin du mandat
+            page_name: "routing" | "invoices" | "banking"
+            template_id: ID du template
+            update_data: Champs à mettre à jour {title?, content?}
+
+        Returns:
+            True si succès, False sinon
+        """
+        try:
+            collection_path = f"{mandate_path}/working_doc/instruction_templates/{page_name}"
+            doc_ref = self.db.collection(collection_path).document(template_id)
+            doc_ref.update(update_data)
+            print(f"✅ [FIREBASE] Updated instruction template {template_id} for {page_name}")
+            return True
+        except Exception as e:
+            print(f"❌ [FIREBASE] Error updating instruction template {template_id} for {page_name}: {e}")
+            return False
+
+    def delete_instruction_template(self, mandate_path: str, page_name: str, template_id: str) -> bool:
+        """
+        Supprime un instruction template par ID.
+
+        Args:
+            mandate_path: Chemin du mandat
+            page_name: "routing" | "invoices" | "banking"
+            template_id: ID du template
+
+        Returns:
+            True si succès, False sinon
+        """
+        try:
+            collection_path = f"{mandate_path}/working_doc/instruction_templates/{page_name}"
+            doc_ref = self.db.collection(collection_path).document(template_id)
+            doc_ref.delete()
+            print(f"✅ [FIREBASE] Deleted instruction template {template_id} for {page_name}")
+            return True
+        except Exception as e:
+            print(f"❌ [FIREBASE] Error deleting instruction template {template_id} for {page_name}: {e}")
+            return False
+
+
 class FirebaseRealtimeChat:
     """
     Gestionnaire Firebase Realtime basé sur un singleton thread-safe.
@@ -9657,6 +10833,51 @@ class FirebaseRealtimeChat:
             message_id = new_message_ref.key
             
             logger.info(f"✅ Message direct envoyé à {recipient_id} - message_id={message_id}")
+            
+            # Publier sur Redis PubSub pour mise à jour temps réel
+            try:
+                import asyncio
+                from app.realtime.pubsub_helper import publish_messenger_new
+                
+                # Transformer message_data en format pour le frontend
+                messenger_data = {
+                    "docId": message_id,
+                    "message": message_data.get('message', ''),
+                    "fileName": message_data.get('file_name', ''),
+                    "collectionId": message_data.get('collection_id', ''),
+                    "collectionName": message_data.get('collection_name', ''),
+                    "status": message_data.get('status', ''),
+                    "jobId": message_data.get('job_id', ''),
+                    "fileId": message_data.get('file_id', ''),
+                    "functionName": message_data.get('function_name', 'Chat'),
+                    "timestamp": message_data.get('timestamp', datetime.now(timezone.utc).isoformat()),
+                    "additionalInfo": message_data.get('additional_info', ''),
+                    "chatMode": message_data.get('chat_mode', ''),
+                    "threadKey": message_data.get('thread_key', ''),
+                    "driveLink": message_data.get('drive_link', ''),
+                    "batchId": message_data.get('batch_id', ''),
+                }
+                
+                # Publier de manière asynchrone
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(
+                            publish_messenger_new(recipient_id, messenger_data)
+                        )
+                    else:
+                        loop.run_until_complete(
+                            publish_messenger_new(recipient_id, messenger_data)
+                        )
+                except RuntimeError:
+                    asyncio.run(
+                        publish_messenger_new(recipient_id, messenger_data)
+                    )
+                
+                logger.info(f"✅ Message published via PubSub Redis for user {recipient_id}")
+            except Exception as pubsub_error:
+                logger.warning(f"⚠️ Failed to publish message via PubSub: {pubsub_error}")
+            
             return message_id
             
         except Exception as e:
@@ -9836,17 +11057,18 @@ class FirebaseRealtimeChat:
     def create_chat(self,user_id: str, space_code: str, thread_name: str, mode: str = 'chats', chat_mode: str = 'general_chat',thread_key:str=None) -> dict:
         """
         Crée un nouveau thread de chat dans Firebase Realtime Database.
-        
+        Si le thread existe déjà, met à jour les metadata sans écraser les messages.
+
         Args:
             space_code (str): Code de l'espace (typiquement le companies_search_id)
             thread_name (str): Nom du nouveau thread/chat
             mode (str): Mode de groupement ('job_chats' ou 'chats')
             chat_mode (str): Mode de fonctionnement du chat ('general_chat', 'onboarding_chat', etc.)
-            
+
         Returns:
             dict: Informations sur le thread créé (thread_key, success, etc.)
         """
-        
+
         try:
             if thread_key:
                 # Utiliser le thread_key existant (pour le cas "renommer" un chat vierge)
@@ -9857,19 +11079,31 @@ class FirebaseRealtimeChat:
                 print(f"📝 Génération d'un nouveau thread_key: {thread_key}")
             # Construire le chemin complet pour le nouveau thread
             path = f"{space_code}/{mode}/{thread_key}"
-            
-            # Créer la structure initiale du thread
-            thread_data = {
-                "thread_name": thread_name,
-                "thread_key": thread_key,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "created_by": user_id,
-                "chat_mode": chat_mode,  # Ajouter le chat_mode dans les données du thread
-                "messages": {}  # Messages vides au départ
+
+            # Check if thread already exists (avoid overwriting messages)
+            existing = self.db.child(path).get()
+
+            if existing and isinstance(existing, dict) and existing.get("messages"):
+                # Thread exists with messages — update metadata only, preserve messages
+                print(f"📝 Thread existant avec messages, mise à jour metadata uniquement: {thread_key}")
+                metadata = {
+                    "thread_name": thread_name,
+                    "thread_key": thread_key,
+                    "chat_mode": chat_mode,
+                    "created_by": user_id,
                 }
-            
-            # Enregistrer le thread dans Firebase
-            result = self.db.child(path).set(thread_data)
+                result = self.db.child(path).update(metadata)
+            else:
+                # New thread or empty thread — create with full structure
+                thread_data = {
+                    "thread_name": thread_name,
+                    "thread_key": thread_key,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "created_by": user_id,
+                    "chat_mode": chat_mode,
+                    "messages": {}
+                }
+                result = self.db.child(path).set(thread_data)
             
             # Vérifier si l'opération a réussi (Firebase renvoie None en cas de succès)
             success = result is None
@@ -10064,13 +11298,63 @@ class FirebaseRealtimeChat:
             print("  Traceback:")
             print(traceback.format_exc())
             return {}
+    def get_thread_messages(self, space_code: str, thread_key: str, mode: str = 'chats', limit: int = 100) -> List[Dict]:
+        """
+        Récupère les messages d'un thread spécifique.
+
+        Args:
+            space_code (str): Code de l'espace (typiquement le companies_search_id)
+            thread_key (str): Clé du thread
+            mode (str): Mode de groupement ('job_chats' ou 'chats')
+            limit (int): Nombre maximum de messages à récupérer
+
+        Returns:
+            List[Dict]: Liste des messages triés par timestamp
+        """
+        try:
+            print(f"📨 Récupération des messages pour thread: {thread_key}, mode: {mode}")
+
+            # Construire le chemin du thread
+            thread_path = self._get_thread_path(space_code, thread_key, mode)
+            messages_ref = self.db.child(f'{thread_path}/messages')
+
+            # Récupérer les messages
+            messages_data = messages_ref.get()
+
+            if not messages_data:
+                print("ℹ️ Aucun message trouvé dans ce thread")
+                return []
+
+            # Convertir en liste avec les IDs
+            messages_list = []
+            for msg_id, msg_data in messages_data.items():
+                if isinstance(msg_data, dict):
+                    msg_data['message_id'] = msg_id
+                    messages_list.append(msg_data)
+
+            # Trier par timestamp (plus ancien en premier)
+            messages_list.sort(key=lambda x: x.get('timestamp', ''))
+
+            # Limiter le nombre de messages
+            if limit and len(messages_list) > limit:
+                messages_list = messages_list[-limit:]  # Garder les plus récents
+
+            print(f"✅ {len(messages_list)} messages récupérés")
+            return messages_list
+
+        except Exception as e:
+            print(f"❌ Erreur lors de la récupération des messages: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
     def _get_last_activity(self, messages: Dict) -> str:
         """
         Détermine la dernière activité d'un thread en fonction des timestamps des messages.
-        
+
         Args:
             messages (Dict): Dictionnaire des messages
-            
+
         Returns:
             str: Timestamp de la dernière activité au format ISO
         """

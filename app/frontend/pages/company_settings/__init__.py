@@ -1,0 +1,91 @@
+"""
+Company Settings Page Handlers
+==============================
+
+Backend handlers for the Company Settings page in Next.js frontend.
+
+NAMESPACE: COMPANY_SETTINGS
+
+This module provides:
+- Orchestration for initial page load
+- Company info CRUD operations
+- Workflow parameters management (APbookeeper, Banker, Router)
+- Context management
+- Telegram room registration (CRITICAL)
+- Asset management
+- ERP connections
+- User sharing (company access)
+- Company deletion
+
+Architecture:
+    Frontend (Next.js) -> wsClient.send({type: "company_settings.*", ...})
+                       -> WebSocket Hub
+                       -> handlers.py
+                       -> Redis Cache | Firebase
+
+Note: user_id and company_id are injected automatically from WebSocket context.
+"""
+
+from .handlers import (
+    CompanySettingsHandlers,
+    get_company_settings_handlers,
+)
+from .orchestration import (
+    handle_orchestrate_init,
+    handle_fetch_additional,
+    handle_save_company_info,
+    handle_save_settings,
+    handle_save_workflow,
+    handle_save_context,
+    handle_create_fiscal_folders,
+    handle_save_asset_config,
+    handle_list_asset_models,
+    handle_create_asset_model,
+    handle_update_asset_model,
+    handle_delete_asset_model,
+    handle_load_asset_accounts,
+    handle_delete_company,
+    handle_save_email_settings,
+    handle_email_approve_draft,
+    handle_save_email_type,
+    handle_initiate_email_auth,
+)
+from .telegram_handler import (
+    handle_telegram_start_registration,
+    handle_telegram_remove_user,
+    handle_telegram_reset_room,
+)
+
+__all__ = [
+    # Handlers
+    "CompanySettingsHandlers",
+    "get_company_settings_handlers",
+    # Orchestration
+    "handle_orchestrate_init",
+    "handle_fetch_additional",
+    "handle_save_company_info",
+    "handle_save_settings",
+    "handle_save_workflow",
+    "handle_save_context",
+    # DMS Operations
+    "handle_create_fiscal_folders",
+    # Asset Management
+    "handle_save_asset_config",
+    "handle_list_asset_models",
+    "handle_create_asset_model",
+    "handle_update_asset_model",
+    "handle_delete_asset_model",
+    "handle_load_asset_accounts",
+    # Company Deletion
+    "handle_delete_company",
+    # Email Settings
+    "handle_save_email_settings",
+    "handle_email_approve_draft",
+    # Email Provider Type
+    "handle_save_email_type",
+    "handle_initiate_email_auth",
+    # Telegram
+    "handle_telegram_start_registration",
+    "handle_telegram_remove_user",
+    "handle_telegram_reset_room",
+]

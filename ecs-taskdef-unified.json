@@ -39,13 +39,16 @@
         {"name": "STRIPE_CANCEL_URL", "value": "https://app.pinnokio.com/payment-canceled"},
         {"name": "UNIFIED_REGISTRY_ENABLED", "value": "false"},
         {"name": "REGISTRY_DEBUG", "value": "false"},
-        {"name": "CHROMA_HOST", "value": "35.180.247.70"},
+        {"name": "CHROMA_HOST", "value": "15.237.231.19"},
         {"name": "CHROMA_PORT", "value": "8000"},
         {"name": "CHROMA_SSL", "value": "False"},
         {"name": "OPENAI_PINNOKIO_SECRET", "value": "openai_pinnokio"},
         {"name": "PINNOKIO_ENVIRONMENT", "value": "PROD"},
         {"name": "PINNOKIO_AWS_URL", "value": "http://klk-load-balancer-http-https-435479360.us-east-1.elb.amazonaws.com"},
-        {"name": "PINNOKIO_SOURCE", "value": "aws"}
+        {"name": "PINNOKIO_SOURCE", "value": "aws"},
+        {"name": "COLLECT_TELEGRAM_ENABLED", "value": "true"},
+        {"name": "DISPATCH_TELEGRAM_ENABLED", "value": "true"},
+        {"name": "PUBSUB_TRANSPORT", "value": "pubsub"}
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
@@ -85,7 +88,7 @@
         {"name": "USE_LOCAL_REDIS", "value": "false"},
         {"name": "UNIFIED_REGISTRY_ENABLED", "value": "false"},
         {"name": "REGISTRY_DEBUG", "value": "false"},
-        {"name": "CHROMA_HOST", "value": "35.180.247.70"},
+        {"name": "CHROMA_HOST", "value": "15.237.231.19"},
         {"name": "CHROMA_PORT", "value": "8000"},
         {"name": "CHROMA_SSL", "value": "False"},
         {"name": "OPENAI_PINNOKIO_SECRET", "value": "openai_pinnokio"},

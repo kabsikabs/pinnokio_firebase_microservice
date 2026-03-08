@@ -12,6 +12,14 @@ echo "Registre unifié: ${UNIFIED_REGISTRY_ENABLED:-false}"
 # Configuration par défaut
 export PYTHONPATH="/app:$PYTHONPATH"
 
+# Decode GCP service account from B64 env var (ECS injection)
+if [ -n "${GOOGLE_SERVICE_ACCOUNT_JSON_B64}" ]; then
+    echo "🔑 Decoding GCP service account from B64..."
+    echo "${GOOGLE_SERVICE_ACCOUNT_JSON_B64}" | base64 -d > /tmp/service_account.json
+    export GOOGLE_APPLICATION_CREDENTIALS="/tmp/service_account.json"
+    echo "✅ GOOGLE_APPLICATION_CREDENTIALS set to /tmp/service_account.json"
+fi
+
 case "${CONTAINER_TYPE:-api}" in
     "worker")
         echo "🔧 Démarrage Celery Worker..."
