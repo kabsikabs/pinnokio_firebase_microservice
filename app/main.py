@@ -121,6 +121,15 @@ async def on_startup():
     except Exception as e:
         logger.error("agentic_dispatch_listener status=error error=%s", repr(e))
 
+    # Démarrer le listener pour les job_chat dispatch (workers → backend)
+    # Queue Redis BRPOP: pas de doublons multi-instance, pas de perte si 0 subscriber
+    try:
+        from .wrappers.job_chat_dispatch_listener import start_job_chat_dispatch_listener
+        await start_job_chat_dispatch_listener()
+        logger.info("job_chat_dispatch_listener status=started")
+    except Exception as e:
+        logger.error("job_chat_dispatch_listener status=error error=%s", repr(e))
+
     # Démarrer le CommunicationResponseCollector (canaux externes)
     try:
         from .realtime.communication_response_collector import get_response_collector
@@ -175,6 +184,14 @@ async def on_shutdown():
         logger.info("agentic_dispatch_listener status=stopped")
     except Exception as e:
         logger.error("agentic_dispatch_listener_stop status=error error=%s", repr(e))
+
+    # Arrêter le listener job_chat dispatch
+    try:
+        from .wrappers.job_chat_dispatch_listener import stop_job_chat_dispatch_listener
+        await stop_job_chat_dispatch_listener()
+        logger.info("job_chat_dispatch_listener status=stopped")
+    except Exception as e:
+        logger.error("job_chat_dispatch_listener_stop status=error error=%s", repr(e))
 
     # Arrêter le CommunicationResponseCollector (canaux externes + PubSub)
     try:
@@ -1573,11 +1590,17 @@ async def _refresh_company_after_onboarding(uid: str, company_id: str, mandate_p
         # 2. Run company orchestration (refresh caches + broadcast company.details)
         from .wrappers.dashboard_orchestration_handlers import run_company_orchestration
 
+        # 2b. Purge existing LLM session so run_company_orchestration
+        #     re-creates it from scratch (same as post-auth flow)
+        from .llm_service.session_state_manager import SessionStateManager
+        SessionStateManager().delete_session_state(uid, company_id)
+        logger.info(f"[ONBOARDING] LLM session purged for fresh reload: uid={uid} company={company_id}")
+
         await run_company_orchestration(
             uid=uid,
             company_id=company_id,
             full_mandate=full_mandate,
-            broadcast_list=False,  # Don't re-broadcast the full company list
+            broadcast_list=False,
         )
         logger.info(f"[ONBOARDING] Company orchestration completed for {company_id}")
 
@@ -2544,12 +2567,26 @@ async def websocket_endpoint(ws: WebSocket):
                                 thread_key=thread_key,
                             )
 
+                            # Send cold_start init_step so frontend shows appropriate UX
+                            worker_status = result.get("worker_status", "unknown")
+                            if worker_status in ("starting", "provisioning"):
+                                await hub.broadcast(uid, {
+                                    "type": WS_EVENTS.CHAT.INIT_STEP,
+                                    "payload": {
+                                        "thread_key": thread_key,
+                                        "step": "cold_start",
+                                        "progress": 0.05,
+                                        "message": "Services en cours de demarrage...",
+                                        "worker_status": worker_status,
+                                    }
+                                })
+
                             # Broadcast onboarding_started event
                             await hub.broadcast(uid, {
                                 "type": WS_EVENTS.CHAT.ONBOARDING_STARTED,
                                 "payload": result
                             })
-                            logger.info(f"[WS] Chat start_onboarding completed - uid={uid} success={result.get('success')}")
+                            logger.info(f"[WS] Chat start_onboarding completed - uid={uid} success={result.get('success')} worker={worker_status}")
 
                         except Exception as e:
                             logger.error(f"[WS] Chat start_onboarding error: {e}")
@@ -3184,6 +3221,15 @@ async def websocket_endpoint(ws: WebSocket):
                         )
                         logger.info(f"[WS] Banking delete handled - uid={uid}")
 
+                    elif msg_type == "banking.dismiss_match":
+                        from .frontend.pages.banking import handle_banking_dismiss_match
+                        await handle_banking_dismiss_match(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Banking dismiss_match handled - uid={uid}")
+
                     # ============================================
                     # INSTRUCTION TEMPLATES CRUD (shared handler, 3 pages)
                     # ============================================
@@ -3314,13 +3360,37 @@ async def websocket_endpoint(ws: WebSocket):
                         await ws.send_text(_json.dumps(response))
                         logger.info(f"[WS] Cockpit list_widgets handled - uid={uid}")
 
-                    elif msg_type == "cockpit.pin_widget":
-                        from .frontend.pages.cockpit import handle_cockpit_pin_widget
-                        response = await handle_cockpit_pin_widget(
+                    elif msg_type == "cockpit.create_session":
+                        from .frontend.pages.cockpit import handle_cockpit_create_session
+                        response = await handle_cockpit_create_session(
                             uid=uid, session_id=session_id, payload=msg_payload
                         )
                         await ws.send_text(_json.dumps(response))
-                        logger.info(f"[WS] Cockpit pin_widget handled - uid={uid}")
+                        logger.info(f"[WS] Cockpit create_session handled - uid={uid}")
+
+                    elif msg_type == "cockpit.list_sessions":
+                        from .frontend.pages.cockpit import handle_cockpit_list_sessions
+                        response = await handle_cockpit_list_sessions(
+                            uid=uid, session_id=session_id, payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Cockpit list_sessions handled - uid={uid}")
+
+                    elif msg_type == "cockpit.delete_session":
+                        from .frontend.pages.cockpit import handle_cockpit_delete_session
+                        response = await handle_cockpit_delete_session(
+                            uid=uid, session_id=session_id, payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Cockpit delete_session handled - uid={uid}")
+
+                    elif msg_type == "cockpit.rename_session":
+                        from .frontend.pages.cockpit import handle_cockpit_rename_session
+                        response = await handle_cockpit_rename_session(
+                            uid=uid, session_id=session_id, payload=msg_payload
+                        )
+                        await ws.send_text(_json.dumps(response))
+                        logger.info(f"[WS] Cockpit rename_session handled - uid={uid}")
 
                     elif msg_type == "cockpit.delete_widget":
                         from .frontend.pages.cockpit import handle_cockpit_delete_widget
@@ -3796,8 +3866,9 @@ async def websocket_endpoint(ws: WebSocket):
                     exc_info=True
                 )
                 # Vérifier si c'est une erreur de connexion fermée
-                if "disconnect" in str(msg_err).lower() or "closed" in str(msg_err).lower():
-                    logger.info(f"[WS] Connection closed, exiting loop - uid={uid}")
+                err_str = str(msg_err).lower()
+                if "disconnect" in err_str or "closed" in err_str or "not connected" in err_str:
+                    logger.info(f"[WS] Connection lost, exiting loop - uid={uid}")
                     break
     except WebSocketDisconnect as e:
         disconnect_reason = "unknown"
