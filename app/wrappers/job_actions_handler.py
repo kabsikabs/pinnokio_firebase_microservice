@@ -73,7 +73,7 @@ JOB_TYPE_CONFIG = {
         "local_port": 8081,
         "department": "APbookeeper",
         "domain": "invoices",
-        "approval_prefix": "ap_",
+        "approval_prefix": "apbookeeper_",
     },
     "bankbookeeper": {
         "process_endpoint": "/banker-event-trigger",
@@ -81,7 +81,7 @@ JOB_TYPE_CONFIG = {
         "local_port": 8082,
         "department": "Bankbookeeper",
         "domain": "bank",
-        "approval_prefix": "bank_",
+        "approval_prefix": "banker_",
     },
     "exbookeeper": {
         "process_endpoint": None,
@@ -128,7 +128,11 @@ LOCAL_URL_BASE = "http://127.0.0.1"
 def _get_base_url(source: Optional[str] = None, job_type: str = "router") -> str:
     """Get the base URL for HTTP requests based on source environment."""
     if source is None:
-        source = os.environ.get("PINNOKIO_SOURCE", "aws")
+        source = os.environ.get("PINNOKIO_SOURCE")
+        if source is None:
+            # Derive from PINNOKIO_ENVIRONMENT for consistency
+            env = os.environ.get("PINNOKIO_ENVIRONMENT", "LOCAL").upper()
+            source = "local" if env == "LOCAL" else "aws"
 
     config = JOB_TYPE_CONFIG.get(job_type, JOB_TYPE_CONFIG["router"])
 
@@ -584,6 +588,11 @@ async def handle_job_process(
             jobbeur_payload["journal_name"] = payload.get("journal_name", "")
             jobbeur_payload["proxy"] = payload.get("proxy", False)
 
+        # Forward approval_response_mode flag to worker if present
+        # (approval dispatch from pending approval list)
+        if payload.get("approval_response_mode"):
+            jobbeur_payload["approval_response_mode"] = True
+
         # Inject traceability if present (agentic source, non-onboarding)
         if traceability and job_type != "onboarding":
             jobbeur_payload["traceability"] = traceability
@@ -654,7 +663,7 @@ async def handle_job_process(
         # ═══════════════════════════════════════════════════════════════════
         ecs_starting = False
         try:
-            environment = os.environ.get("PINNOKIO_ENVIRONMENT", "PROD").upper()
+            environment = os.environ.get("PINNOKIO_ENVIRONMENT", "LOCAL").upper()
             if environment == "LOCAL":
                 from ..local_worker_manager import LocalWorkerManager
                 worker_status = LocalWorkerManager.ensure_worker_running(job_type)
@@ -664,7 +673,7 @@ async def handle_job_process(
 
             logger.info(f"[JOB_ACTIONS] → Step 1.6: Worker status={worker_status.get('status')} (env={environment})")
 
-            if worker_status.get("status") in ("starting", "provisioning"):
+            if worker_status.get("status") in ("starting", "provisioning") and environment != "LOCAL":
                 ecs_starting = True
         except Exception as ecs_err:
             logger.warning(f"[JOB_ACTIONS] → Step 1.6: Worker check failed: {ecs_err}")
@@ -878,55 +887,63 @@ async def handle_job_stop(
         }
 
     try:
-        # Write stop_requested directly in active_jobs (no HTTP to worker needed)
+        # Write stop signals directly in active_jobs (no HTTP to worker needed)
         active_job_type = ACTIVE_JOB_TYPE_MAP.get(job_type, job_type)
         transaction_ids = payload.get("transaction_ids")
-        job_ids_to_stop = payload.get("job_ids_to_stop")
 
         logger.info(
-            f"[JOB_ACTIONS] → Step 1: Writing stop_requested to active_jobs "
+            f"[JOB_ACTIONS] → Step 1: Writing stop signals to active_jobs "
             f"(type={active_job_type}, {len(job_ids)} jobs)"
         )
 
-        stop_results = []
-        for jid in job_ids:
-            stop_result = ActiveJobManager.request_stop(
-                mandate_path=mandate_path,
-                job_type=active_job_type,
-                job_key=jid,
-                job_ids_to_stop=job_ids_to_stop,
-                transaction_ids=transaction_ids,
-            )
-            stop_results.append(stop_result)
+        # Single call with all job_ids — request_stop scans active_jobs docs
+        stop_result = ActiveJobManager.request_stop(
+            mandate_path=mandate_path,
+            job_type=active_job_type,
+            job_ids=job_ids,
+            transaction_ids=transaction_ids,
+        )
 
-        success_count = sum(1 for r in stop_results if r.get("success"))
+        # Step 1b: For on_process jobs, update task_manager status to "stopping"
+        for jid in stop_result.get("stopped_on_process", []):
+            try:
+                await _update_task_manager_status(
+                    uid=uid, job_id=jid, status="stopping",
+                    mandate_path=mandate_path, company_data=company_data,
+                    job_type=job_type,
+                )
+            except Exception as tm_err:
+                logger.warning(
+                    f"[JOB_ACTIONS] task_manager stopping update failed for {jid}: {tm_err}"
+                )
 
-        # Step 2: Send synthetic stopped notifications for pending jobs removed directly
+        # Step 2: For pending jobs (synthetic stops), update task_manager → to_process
         synthetic_count = 0
-        for stop_result in stop_results:
-            for stopped_job_id in stop_result.get("synthetic_stops", []):
-                try:
-                    await _send_synthetic_stopped_notification(
-                        uid=uid,
-                        job_type=job_type,
-                        job_id=stopped_job_id,
-                        mandate_path=mandate_path,
-                        company_data=company_data,
-                    )
-                    synthetic_count += 1
-                except Exception as synth_err:
-                    logger.warning(
-                        f"[JOB_ACTIONS] Synthetic stop notification failed for {stopped_job_id}: {synth_err}"
-                    )
+        for stopped_job_id in stop_result.get("synthetic_stops", []):
+            try:
+                await _send_synthetic_stopped_notification(
+                    uid=uid,
+                    job_type=job_type,
+                    job_id=stopped_job_id,
+                    mandate_path=mandate_path,
+                    company_data=company_data,
+                )
+                synthetic_count += 1
+            except Exception as synth_err:
+                logger.warning(
+                    f"[JOB_ACTIONS] Synthetic stop notification failed for {stopped_job_id}: {synth_err}"
+                )
 
         if synthetic_count > 0:
             logger.info(
-                f"[JOB_ACTIONS] → Step 2: Sent {synthetic_count} synthetic stopped notifications"
+                f"[JOB_ACTIONS] → Step 2: Sent {synthetic_count} synthetic stop → to_process notifications"
             )
 
+        total_stopped = len(stop_result.get("stopped_on_process", [])) + synthetic_count
         logger.info(
             f"[JOB_ACTIONS] handle_job_stop SUCCESS - "
-            f"stopped={success_count}/{len(job_ids)} synthetic={synthetic_count}"
+            f"on_process={len(stop_result.get('stopped_on_process', []))} "
+            f"synthetic={synthetic_count} total={total_stopped}/{len(job_ids)}"
         )
         logger.info(
             f"[JOB_ACTIONS] ═══════════════════════════════════════════════════════════"
@@ -936,7 +953,7 @@ async def handle_job_stop(
             "success": True,
             "stopped_jobs": job_ids,
             "synthetic_stops": synthetic_count,
-            "message": f"Stop requested for {success_count}/{len(job_ids)} jobs via active_jobs",
+            "message": f"Stop requested for {total_stopped}/{len(job_ids)} jobs via active_jobs",
         }
 
     except Exception as e:
@@ -2002,7 +2019,59 @@ async def _dispatch_rag_delete(mandate_path: str, job_id: str) -> None:
 
 
 # ============================================
-# SYNTHETIC STOP NOTIFICATION
+# TASK_MANAGER STATUS UPDATE (for on_process → stopping)
+# ============================================
+
+
+async def _update_task_manager_status(
+    uid: str,
+    job_id: str,
+    status: str,
+    mandate_path: str,
+    company_data: Dict[str, Any],
+    job_type: str,
+) -> None:
+    """
+    Update task_manager + publish Redis delta for a status change.
+    Used to set 'stopping' on on_process jobs so frontend shows the badge.
+    """
+    firebase = get_firebase_management()
+    company_id = company_data.get("company_id", "")
+    config = JOB_TYPE_CONFIG.get(job_type, JOB_TYPE_CONFIG["router"])
+    now = datetime.now(timezone.utc).isoformat()
+
+    # 1. Update task_manager
+    task_mgr_path = f"clients/{uid}/task_manager"
+    try:
+        await asyncio.to_thread(
+            firebase.add_or_update_job_by_job_id,
+            task_mgr_path,
+            {"job_id": job_id, "status": status},
+        )
+    except Exception as e:
+        logger.warning(f"[JOB_ACTIONS] task_manager {status} update failed for {job_id}: {e}")
+
+    # 2. Publish Redis delta → frontend cache + badge update
+    try:
+        redis = get_redis()
+        redis_payload = json.dumps({
+            "type": "task_manager_update",
+            "job_id": job_id,
+            "status": status,
+            "department": config["department"],
+            "collection_id": company_id,
+            "mandate_path": mandate_path,
+            "data": {"status": status},
+            "timestamp": now,
+        })
+        redis.publish(f"user:{uid}/task_manager", redis_payload)
+        logger.info(f"[JOB_ACTIONS] task_manager {status} published for {job_id}")
+    except Exception as e:
+        logger.warning(f"[JOB_ACTIONS] task_manager {status} Redis publish failed for {job_id}: {e}")
+
+
+# ============================================
+# SYNTHETIC STOP NOTIFICATION (pending → to_process)
 # ============================================
 
 
@@ -2014,18 +2083,19 @@ async def _send_synthetic_stopped_notification(
     company_data: Dict[str, Any],
 ) -> None:
     """
-    Send a synthetic "stopped" notification for jobs removed directly from pending.
+    Send a synthetic notification for jobs removed directly from pending.
 
     These jobs never reached the worker, so no worker notification will come.
-    We simulate the notification cascade:
-    1. Update task_manager → status: "stopped"
-    2. Update notifications → status: "stopped"
-    3. Publish Redis → triggers normal cascade (cache update, WS push)
+    Since they were pending (not yet started), they return to to_process:
+    1. Update task_manager → status: "to_process"
+    2. Update notifications → status: "to_process"
+    3. Publish Redis → triggers normal cascade (cache update → to_process tab, WS push)
     """
     firebase = get_firebase_management()
     company_id = company_data.get("company_id", "")
+    now = datetime.now(timezone.utc).isoformat()
 
-    # 1. Update task_manager
+    # 1. Update task_manager → to_process (job goes back to available list)
     task_mgr_path = f"clients/{uid}/task_manager"
     try:
         await asyncio.to_thread(
@@ -2033,8 +2103,8 @@ async def _send_synthetic_stopped_notification(
             task_mgr_path,
             {
                 "job_id": job_id,
-                "status": "stopped",
-                "stopped_at": datetime.now(timezone.utc).isoformat(),
+                "status": "to_process",
+                "stopped_at": now,
                 "stopped_by": "user_pending_cancel",
             },
         )
@@ -2049,31 +2119,31 @@ async def _send_synthetic_stopped_notification(
             notifications_path,
             {
                 "job_id": job_id,
-                "status": "stopped",
+                "status": "to_process",
             },
         )
     except Exception as e:
         logger.warning(f"[JOB_ACTIONS] Synthetic stop: notification update failed for {job_id}: {e}")
 
-    # 3. Publish to Redis → triggers normal cascade (cache + WS)
+    # 3. Publish to Redis → triggers normal cascade (cache → to_process tab + WS)
     config = JOB_TYPE_CONFIG.get(job_type, JOB_TYPE_CONFIG["router"])
     try:
         redis = get_redis()
         redis_payload = json.dumps({
             "type": "task_manager_update",
             "job_id": job_id,
-            "status": "stopped",
+            "status": "to_process",
             "department": config["department"],
             "collection_id": company_id,
             "mandate_path": mandate_path,
             "data": {
-                "status": "stopped",
+                "status": "to_process",
                 "stopped_by": "user_pending_cancel",
             },
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": now,
         })
         redis.publish(f"user:{uid}/task_manager", redis_payload)
-        logger.info(f"[JOB_ACTIONS] Synthetic stop published for {job_id}")
+        logger.info(f"[JOB_ACTIONS] Synthetic stop → to_process published for {job_id}")
     except Exception as e:
         logger.warning(f"[JOB_ACTIONS] Synthetic stop: Redis publish failed for {job_id}: {e}")
 
@@ -2926,10 +2996,20 @@ async def handle_reverse_recon_scoring_backend(
         cached = await cache.get_cached_data(uid, collection_name, "bank", "transactions")
 
         if not cached or not cached.get("to_process"):
-            # Try loading from ERP
-            logger.info("[RECON_BACKEND] No bank cache — loading from ERP")
+            # Resolve bank_erp and client_uuid from company context cache
+            from ..frontend.pages.banking.orchestration import _get_company_context
+            company_ctx = _get_company_context(uid, collection_name)
+            resolved_bank_erp = company_ctx.get("bank_erp", "")
+            resolved_client_uuid = client_uuid or company_ctx.get("client_uuid", "")
+
+            logger.info(
+                f"[RECON_BACKEND] No bank cache — loading from ERP "
+                f"(bank_erp={resolved_bank_erp}, client_uuid={bool(resolved_client_uuid)})"
+            )
             bank_result = await handlers.get_bank_transactions(
                 user_id=uid, company_id=collection_name,
+                client_uuid=resolved_client_uuid,
+                bank_erp=resolved_bank_erp,
                 mandate_path=mandate_path, skip_suggestions=True,
             )
             cached = bank_result.get("data", {})

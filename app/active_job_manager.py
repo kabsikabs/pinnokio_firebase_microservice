@@ -323,187 +323,112 @@ class ActiveJobManager:
     def request_stop(
         mandate_path: str,
         job_type: str,
-        job_key: str,
-        job_ids_to_stop: Optional[List[str]] = None,
+        job_ids: List[str],
         transaction_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
-        Request stop for a job. Differentiates between on_process and pending:
-        - on_process: set stop_requested or mark individual jobs as "stopping"
-        - pending: remove jobs directly (synthetic stop) or delete the document
+        Request stop for individual job(s). Aligns with how jobs are registered:
+        scans active_jobs docs to find the batch containing the job_ids.
+
+        - on_process: mark individual jobs as "stopping" in jobs_status
+          (worker checkpoints will detect this and stop gracefully)
+        - pending: delete the entire document (job hasn't started yet)
+          → synthetic stops returned so caller can update task_manager → to_process
 
         Args:
             mandate_path: Firebase mandate path
             job_type: "router" | "apbookeeper" | "banker" | "onboarding"
-            job_key: Job/batch identifier
-            job_ids_to_stop: Optional list of specific job IDs to stop
-            transaction_ids: Optional list of specific transaction IDs to stop (banker)
+            job_ids: List of individual job IDs to stop
+            transaction_ids: Optional list of transaction IDs to stop (banker)
 
         Returns:
-            {success, job_key, location, synthetic_stops}
+            {success, location, stopped_on_process: [], synthetic_stops: []}
         """
         db = get_firestore()
-        encoded = ActiveJobManager._encode_mandate_path(mandate_path)
-        doc_id = f"{encoded}_{job_key}"
         now = datetime.now(timezone.utc).isoformat()
+        job_ids_set = set(str(jid) for jid in job_ids)
+
+        result = {
+            "success": False,
+            "location": "not_found",
+            "stopped_on_process": [],
+            "synthetic_stops": [],
+            "message": "",
+        }
 
         try:
-            # 1. Try on_process first
-            on_process_ref = db.document(f"active_jobs/{job_type}/on_process/{doc_id}")
-            on_process_doc = on_process_ref.get()
+            # Scan on_process and pending to find docs containing these job_ids
+            for subcollection in ("on_process", "pending"):
+                col = db.collection(f"active_jobs/{job_type}/{subcollection}")
+                query = col.where(filter=FieldFilter("mandate_path", "==", mandate_path))
+                docs = list(query.stream())
 
-            if on_process_doc.exists:
-                return ActiveJobManager._stop_on_process(
-                    on_process_ref, on_process_doc, job_key, job_ids_to_stop, transaction_ids, now
-                )
+                for doc in docs:
+                    data = doc.to_dict()
+                    jobs_status = data.get("jobs_status", {})
+                    matching_ids = job_ids_set & set(jobs_status.keys())
 
-            # 2. Try pending
-            pending_ref = db.document(f"active_jobs/{job_type}/pending/{doc_id}")
-            pending_doc = pending_ref.get()
+                    if not matching_ids:
+                        continue
 
-            if pending_doc.exists:
-                return ActiveJobManager._stop_pending(
-                    pending_ref, pending_doc, job_key, job_ids_to_stop, now
-                )
-
-            # 3. job_key not found as batch_id — scan for it as an individual job_id
-            result = ActiveJobManager._stop_by_scanning(
-                db, job_type, mandate_path, job_key, job_ids_to_stop, transaction_ids, now
-            )
-            if result:
-                return result
-
-            logger.warning(
-                f"[ACTIVE_JOBS] Job {job_key} not found in on_process or pending "
-                f"for {job_type}"
-            )
-            return {
-                "success": False,
-                "job_key": job_key,
-                "location": "not_found",
-                "synthetic_stops": [],
-                "message": f"Job {job_key} not found in active_jobs",
-            }
-
-        except Exception as e:
-            logger.error(f"[ACTIVE_JOBS] Error requesting stop for {job_key}: {e}")
-            return {
-                "success": False,
-                "job_key": job_key,
-                "location": "error",
-                "synthetic_stops": [],
-                "message": str(e),
-            }
-
-    @staticmethod
-    def _stop_on_process(doc_ref, doc_snapshot, job_key, job_ids_to_stop, transaction_ids, now):
-        """Handle stop for a job currently in on_process."""
-        data = doc_snapshot.to_dict()
-        jobs_status = data.get("jobs_status", {})
-
-        if job_ids_to_stop:
-            # Mark specific jobs as "stopping"
-            updates = {"last_updated": now}
-            for jid in job_ids_to_stop:
-                if jid in jobs_status:
-                    updates[f"jobs_status.{jid}"] = "stopping"
-            doc_ref.update(updates)
-            logger.info(f"[ACTIVE_JOBS] Marked {len(job_ids_to_stop)} jobs as stopping in {job_key}")
-        elif transaction_ids:
-            # Banker: stop specific transactions
-            doc_ref.update({
-                "stop_requested_transactions": firestore.ArrayUnion(transaction_ids),
-                "stop_requested_at": now,
-                "last_updated": now,
-            })
-            logger.info(f"[ACTIVE_JOBS] Stop requested for {len(transaction_ids)} transactions in {job_key}")
-        else:
-            # Full batch stop
-            doc_ref.update({
-                "stop_requested": True,
-                "stop_requested_at": now,
-                "last_updated": now,
-            })
-            logger.info(f"[ACTIVE_JOBS] Full stop requested for job {job_key}")
-
-        return {
-            "success": True,
-            "job_key": job_key,
-            "location": "on_process",
-            "synthetic_stops": [],
-            "message": f"Stop requested for {job_key} (on_process)",
-        }
-
-    @staticmethod
-    def _stop_pending(doc_ref, doc_snapshot, job_key, job_ids_to_stop, now):
-        """Handle stop for a job in pending — direct removal (synthetic stop)."""
-        data = doc_snapshot.to_dict()
-        jobs_status = data.get("jobs_status", {})
-        synthetic_stops = []
-
-        if job_ids_to_stop:
-            # Remove specific jobs from jobs_status
-            for jid in job_ids_to_stop:
-                if jid in jobs_status:
-                    synthetic_stops.append(jid)
-                    del jobs_status[jid]
-
-            if not jobs_status:
-                # All jobs removed — delete the document
-                doc_ref.delete()
-                logger.info(f"[ACTIVE_JOBS] Pending doc {job_key} deleted (all jobs stopped)")
-            else:
-                # Update with remaining jobs
-                doc_ref.update({
-                    "jobs_status": jobs_status,
-                    "last_updated": now,
-                })
-                logger.info(
-                    f"[ACTIVE_JOBS] Removed {len(synthetic_stops)} jobs from pending {job_key}, "
-                    f"{len(jobs_status)} remaining"
-                )
-        else:
-            # Full batch stop — collect all job IDs and delete
-            synthetic_stops = list(jobs_status.keys())
-            doc_ref.delete()
-            logger.info(f"[ACTIVE_JOBS] Pending doc {job_key} deleted (full batch stop)")
-
-        return {
-            "success": True,
-            "job_key": job_key,
-            "location": "pending",
-            "synthetic_stops": synthetic_stops,
-            "message": f"Stopped {len(synthetic_stops)} jobs from pending",
-        }
-
-    @staticmethod
-    def _stop_by_scanning(db, job_type, mandate_path, job_id, job_ids_to_stop, transaction_ids, now):
-        """
-        Scan on_process/ and pending/ to find a document containing job_id in its jobs_status.
-        Used when the frontend sends an individual job_id rather than a batch_id.
-        """
-        for subcollection in ("on_process", "pending"):
-            col = db.collection(f"active_jobs/{job_type}/{subcollection}")
-            query = col.where(filter=FieldFilter("mandate_path", "==", mandate_path))
-            docs = list(query.stream())
-
-            for doc in docs:
-                data = doc.to_dict()
-                jobs_status = data.get("jobs_status", {})
-                if job_id in jobs_status:
-                    actual_job_key = data.get("job_key", doc.id)
-                    ids_to_stop = job_ids_to_stop or [job_id]
+                    batch_key = data.get("job_key") or data.get("batch_id") or doc.id
 
                     if subcollection == "on_process":
-                        return ActiveJobManager._stop_on_process(
-                            doc.reference, doc, actual_job_key, ids_to_stop, transaction_ids, now
-                        )
-                    else:
-                        return ActiveJobManager._stop_pending(
-                            doc.reference, doc, actual_job_key, ids_to_stop, now
+                        # Mark matching jobs as "stopping" in jobs_status
+                        for jid in matching_ids:
+                            jobs_status[jid] = "stopping"
+                        doc.reference.update({
+                            "jobs_status": jobs_status,
+                            "last_updated": now,
+                        })
+                        result["stopped_on_process"].extend(matching_ids)
+                        result["success"] = True
+                        result["location"] = "on_process"
+                        logger.info(
+                            f"[ACTIVE_JOBS] Marked {len(matching_ids)} jobs as stopping "
+                            f"in on_process batch {batch_key}"
                         )
 
-        return None
+                    else:  # pending
+                        # Job hasn't started → delete the entire document
+                        synthetic_ids = list(jobs_status.keys())
+                        doc.reference.delete()
+                        result["synthetic_stops"].extend(synthetic_ids)
+                        result["success"] = True
+                        result["location"] = "pending"
+                        logger.info(
+                            f"[ACTIVE_JOBS] Deleted pending batch {batch_key} "
+                            f"({len(synthetic_ids)} jobs → synthetic stop)"
+                        )
+
+                    # Remove matched IDs so we don't process them again
+                    job_ids_set -= matching_ids
+
+                # Stop searching if all job_ids have been found
+                if not job_ids_set:
+                    break
+
+            if not result["stopped_on_process"] and not result["synthetic_stops"]:
+                logger.warning(
+                    f"[ACTIVE_JOBS] Jobs {job_ids} not found in on_process or pending "
+                    f"for {job_type}"
+                )
+                result["message"] = f"Jobs {job_ids} not found in active_jobs"
+            else:
+                result["message"] = (
+                    f"on_process={len(result['stopped_on_process'])} "
+                    f"synthetic={len(result['synthetic_stops'])}"
+                )
+
+            return result
+
+        except Exception as e:
+            logger.error(f"[ACTIVE_JOBS] Error requesting stop for {job_ids}: {e}")
+            result["message"] = str(e)
+            return result
+
+    # (Old _stop_on_process, _stop_pending, _stop_by_scanning removed —
+    #  logic consolidated into request_stop above)
 
     # ─────────────────────────────────────────────
     # JOB STATUS UPDATE (called from notification cascade)

@@ -116,7 +116,7 @@ async def resolve_erp_ids(
     if not company_id:
         raise ValueError(f"Company not found for mandate_path: {mandate_path}")
 
-    pool = await manager._get_pool()
+    pool = await manager.get_pool()
 
     # 1. Resolve journal_code → erp_journal_id
     journal_code = entry.get("journal_code", "")

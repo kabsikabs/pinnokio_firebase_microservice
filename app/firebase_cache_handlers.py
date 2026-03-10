@@ -188,8 +188,11 @@ class FirebaseCacheHandlers:
         mandate_path: str = None
     ) -> Dict[str, Any]:
         """
-        Récupère les dépenses depuis task_manager (source unique de vérité) avec cache.
-        Fallback vers l'ancienne collection mandates/{company_id}/expenses si task_manager vide.
+        Récupère les dépenses via expenses/handlers.py (source unique de vérité).
+
+        Délègue à expenses.handlers.list_expenses() qui gère le cache Redis
+        au format dict pré-catégorisé {to_process, in_process, pending, processed}.
+        Extrait les items en liste plate pour compatibilité avec les appelants legacy.
 
         RPC: FIREBASE_CACHE.get_expenses
 
@@ -199,94 +202,38 @@ class FirebaseCacheHandlers:
             mandate_path (str, optional): Chemin du mandat pour filtre task_manager
 
         Returns:
-            {"data": [...], "source": "cache"|"firebase"|"task_manager"}
+            {"data": [...], "source": "cache"|"expenses_handler"}
         """
         try:
-            # 1. Tentative cache
-            cache = get_firebase_cache_manager()
-            cached = await cache.get_cached_data(
-                user_id,
-                company_id,
-                "expenses",
-                "details",
-                ttl_seconds=TTL_EXPENSES
+            from .frontend.pages.expenses.handlers import get_expenses_handlers
+
+            handlers = get_expenses_handlers()
+            result = await handlers.list_expenses(
+                user_id=user_id,
+                company_id=company_id,
+                mandate_path=mandate_path or "",
+                force_refresh=False,
             )
 
-            if cached and cached.get("data"):
+            if result.get("success") and result.get("data"):
+                categorized = result["data"]
+                # Extraire tous les items en liste plate pour compatibilité legacy
+                all_items = []
+                for cat_key in ("to_process", "in_process", "pending", "processed"):
+                    all_items.extend(categorized.get(cat_key, []))
+
+                source = "cache" if result.get("from_cache") else "expenses_handler"
                 logger.info(
                     f"FIREBASE_CACHE.get_expenses company_id={company_id} "
-                    f"count={len(cached['data']) if isinstance(cached['data'], list) else 0} "
-                    f"source=cache"
+                    f"count={len(all_items)} source={source}"
                 )
-                return {
-                    "data": cached["data"],
-                    "source": "cache"
-                }
+                return {"data": all_items, "source": source}
 
-            # 2. Source: task_manager (EXbookeeper)
-            db = get_firestore()
-            expenses = []
-
-            try:
-                task_mgr_ref = db.collection(f"clients/{user_id}/task_manager")
-                query = task_mgr_ref.where("department", "in", ["EXbookeeper", "exbookeeper"])
-                if mandate_path:
-                    clean_path = mandate_path[1:] if mandate_path.startswith("/") else mandate_path
-                    query = query.where("mandate_path", "==", clean_path)
-
-                for doc in query.stream():
-                    data = doc.to_dict() or {}
-                    dept_data = data.get("department_data", {})
-                    expense_entry = dept_data.get("EXbookeeper", {}) or dept_data.get("exbookeeper", {})
-                    expense_entry["id"] = doc.id
-                    expense_entry["job_id"] = data.get("job_id", doc.id)
-                    expense_entry["status"] = data.get("status", "")
-                    expense_entry["file_name"] = data.get("file_name", expense_entry.get("file_name", ""))
-                    expense_entry["mandate_path"] = data.get("mandate_path", "")
-                    expenses.append(_convert_timestamps(expense_entry))
-
-                if expenses:
-                    logger.info(
-                        f"FIREBASE_CACHE.get_expenses company_id={company_id} "
-                        f"count={len(expenses)} source=task_manager"
-                    )
-                    await cache.set_cached_data(
-                        user_id, company_id, "expenses", "details",
-                        expenses, ttl_seconds=TTL_EXPENSES
-                    )
-                    return {"data": expenses, "source": "task_manager"}
-            except Exception as e:
-                logger.warning(f"FIREBASE_CACHE.get_expenses task_manager fallback: {e}")
-
-            # 3. Fallback: ancienne collection mandates/{company_id}/expenses
-            expenses_ref = db.collection("mandates").document(company_id).collection("expenses")
-            expenses_docs = expenses_ref.stream()
-
-            for doc in expenses_docs:
-                expense_data = doc.to_dict()
-                expense_data["id"] = doc.id
-                expenses.append(_convert_timestamps(expense_data))
-
-            logger.info(
+            logger.warning(
                 f"FIREBASE_CACHE.get_expenses company_id={company_id} "
-                f"count={len(expenses)} source=firebase"
+                f"no data from expenses handler"
             )
-
-            # 4. Sync vers Redis
-            if expenses:
-                await cache.set_cached_data(
-                    user_id,
-                    company_id,
-                    "expenses",
-                    "details",
-                    expenses,
-                    ttl_seconds=TTL_EXPENSES
-                )
-
-            return {
-                "data": expenses,
-                "source": "firebase"
-            }
+            return {"data": [], "source": "empty"}
 
         except Exception as e:
             logger.error(f"FIREBASE_CACHE.get_expenses error={e}")

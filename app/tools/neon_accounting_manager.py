@@ -184,18 +184,23 @@ class NeonAccountingManager:
         self, mandate_path: str
     ) -> Optional[UUID]:
         """Recupere le company_id PostgreSQL depuis un mandate_path Firebase."""
-        if mandate_path in self._company_cache:
-            return self._company_cache[mandate_path]
+        # Normalize: strip leading/trailing slashes for consistent matching
+        normalized = mandate_path.strip("/")
+
+        if normalized in self._company_cache:
+            return self._company_cache[normalized]
 
         pool = await self.get_pool()
         async with pool.acquire() as conn:
+            # Try exact match first, then normalized (handles /clients/... vs clients/...)
             row = await conn.fetchrow(
-                "SELECT id FROM core.companies WHERE firebase_mandate_path = $1",
+                "SELECT id FROM core.companies WHERE firebase_mandate_path = $1 OR firebase_mandate_path = $2",
+                normalized,
                 mandate_path,
             )
             if row:
                 company_id = row["id"]
-                self._company_cache[mandate_path] = company_id
+                self._company_cache[normalized] = company_id
                 return company_id
             return None
 
@@ -271,6 +276,8 @@ class NeonAccountingManager:
                             erp_source = EXCLUDED.erp_source,
                             is_active = EXCLUDED.is_active
                         WHERE core.chart_of_accounts.sync_hash IS DISTINCT FROM EXCLUDED.sync_hash
+                           OR (core.chart_of_accounts.erp_account_id IS NULL OR core.chart_of_accounts.erp_account_id = '')
+                              AND EXCLUDED.erp_account_id != ''
                         """,
                         company_id,
                         account_number,
@@ -280,7 +287,7 @@ class NeonAccountingManager:
                         item.get("account_function") or item.get("klk_account_function"),
                         item.get("parent_account_number") or item.get("parent_code"),
                         str(item.get("firebase_account_id", "")) or None,
-                        str(item.get("erp_account_id") or item.get("erp_id") or ""),
+                        str(item.get("erp_account_id") or item.get("erp_id") or item.get("account_id") or ""),
                         account_class,
                         sync_hash,
                         erp_source,

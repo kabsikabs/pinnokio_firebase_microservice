@@ -368,6 +368,9 @@ class ChatEvents:
     ONBOARDING_JOB_STOP = "chat.onboarding_job_stop"     # Stop onboarding job from sidebar
     ONBOARDING_JOB_STATUS = "chat.onboarding_job_status" # Status update for onboarding job
 
+    # Init progress (skeleton/progress bar during first load or cold start)
+    INIT_STEP = "chat.init_step"                   # Init step progress update
+
     # Error
     ERROR = "chat.error"                           # Chat-specific error
 
@@ -752,6 +755,8 @@ class BankingEvents:
     PROCESSED = "banking.processed"
     STOP = "banking.stop"
     STOPPED = "banking.stopped"
+    RESTART = "banking.restart"
+    RESTARTED = "banking.restarted"
     DELETE = "banking.delete"
     DELETED = "banking.deleted"
     REFRESH = "banking.refresh"
@@ -769,6 +774,10 @@ class BankingEvents:
     TEMPLATES_UPDATED = "banking.templates_updated"
     TEMPLATES_DELETE = "banking.templates_delete"
     TEMPLATES_DELETED = "banking.templates_deleted"
+
+    # Match suggestion management
+    DISMISS_MATCH = "banking.dismiss_match"          # Frontend→Backend: dismiss a match suggestion
+    MATCH_DISMISSED = "banking.match_dismissed"      # Backend→Frontend: confirm dismissal
 
     # Incremental updates (optimistic/pessimistic status changes)
     ITEM_UPDATE = "banking.item_update"             # Items moved between lists based on status
@@ -970,6 +979,83 @@ class OnboardingEvents:
     ERROR = "onboarding.error"
 
 
+class FixedAssetsEvents:
+    """
+    Evenements pour la page Fixed Assets (Immobilisations).
+
+    Gere:
+    - Orchestration de page
+    - CRUD immobilisations (PostgreSQL Neon)
+    - Amortissements (calcul et planification)
+    - Modeles d'amortissement
+    - Comptes eligibles
+    - Generation PDF
+
+    NOTE Fixed Assets Specificites:
+    - Donnees stockees dans PostgreSQL (Neon) via fixed_asset_rpc_handlers
+    - Synchronisation avec Firebase pour le mandate_path
+    - Etats: draft → running → close / disposed
+    """
+    # Orchestration
+    ORCHESTRATE_INIT = "fixed_assets.orchestrate_init"
+    FULL_DATA = "fixed_assets.full_data"
+
+    # Asset operations
+    ASSETS_LIST = "fixed_assets.assets_list"
+    ASSETS_LOADED = "fixed_assets.assets_loaded"
+    ASSET_GET = "fixed_assets.asset_get"
+    ASSET_LOADED = "fixed_assets.asset_loaded"
+    ASSET_CREATE = "fixed_assets.asset_create"
+    ASSET_CREATED = "fixed_assets.asset_created"
+    ASSET_UPDATE = "fixed_assets.asset_update"
+    ASSET_UPDATED = "fixed_assets.asset_updated"
+    ASSET_DELETE = "fixed_assets.asset_delete"
+    ASSET_DELETED = "fixed_assets.asset_deleted"
+    ASSET_CONFIRM = "fixed_assets.asset_confirm"
+    ASSET_CONFIRMED = "fixed_assets.asset_confirmed"
+    ASSET_RESET_DRAFT = "fixed_assets.asset_reset_draft"
+    ASSET_RESET_DRAFT_DONE = "fixed_assets.asset_reset_draft_done"
+    ASSET_DISPOSE = "fixed_assets.asset_dispose"
+    ASSET_DISPOSED = "fixed_assets.asset_disposed"
+
+    # Depreciation
+    DEPRECIATION_SCHEDULE = "fixed_assets.depreciation_schedule"
+    DEPRECIATION_LOADED = "fixed_assets.depreciation_loaded"
+    RUN_DEPRECIATION = "fixed_assets.run_depreciation"
+    DEPRECIATION_RESULT = "fixed_assets.depreciation_result"
+    REVERSE_DEPRECIATION = "fixed_assets.reverse_depreciation"
+    REVERSAL_RESULT = "fixed_assets.reversal_result"
+
+    # Models
+    MODELS_LIST = "fixed_assets.models_list"
+    MODELS_LOADED = "fixed_assets.models_loaded"
+
+    # Model CRUD
+    MODEL_CREATE = "fixed_assets.model_create"
+    MODEL_CREATED = "fixed_assets.model_created"
+    MODEL_UPDATE = "fixed_assets.model_update"
+    MODEL_UPDATED = "fixed_assets.model_updated"
+    MODEL_DELETE = "fixed_assets.model_delete"
+    MODEL_DELETED = "fixed_assets.model_deleted"
+
+    # Eligible accounts
+    ELIGIBLE_ACCOUNTS = "fixed_assets.eligible_accounts"
+    ELIGIBLE_ACCOUNTS_LOADED = "fixed_assets.eligible_accounts_loaded"
+
+    # PDF
+    GENERATE_PDF = "fixed_assets.generate_pdf"
+    PDF_GENERATED = "fixed_assets.pdf_generated"
+
+    # Report
+    ASSET_REPORT = "fixed_assets.asset_report"
+    ASSET_REPORT_DATA = "fixed_assets.asset_report_data"
+
+    # Refresh + Error
+    REFRESH = "fixed_assets.refresh"
+    REFRESHED = "fixed_assets.refreshed"
+    ERROR = "fixed_assets.error"
+
+
 class CockpitEvents:
     """
     Evenements pour le Cockpit Dashboard (AI Reporter).
@@ -985,8 +1071,10 @@ class CockpitEvents:
     3. WIDGET_READY: Widget genere (via worker broadcast)
 
     Flow CRUD (synchrone):
+    - CREATE_SESSION / SESSION_CREATED
+    - LIST_SESSIONS / SESSIONS_LOADED
+    - DELETE_SESSION / SESSION_DELETED
     - LIST_WIDGETS / WIDGETS_LOADED
-    - PIN_WIDGET / WIDGET_PINNED
     - DELETE_WIDGET / WIDGET_DELETED
     - REFRESH_WIDGET / WIDGET_REFRESHED
     - UPDATE_LAYOUT / LAYOUT_UPDATED
@@ -996,11 +1084,19 @@ class CockpitEvents:
     GENERATE_QUEUED = "cockpit.generate_queued"
     WIDGET_READY = "cockpit.widget_ready"
 
+    # Session management
+    CREATE_SESSION = "cockpit.create_session"
+    SESSION_CREATED = "cockpit.session_created"
+    LIST_SESSIONS = "cockpit.list_sessions"
+    SESSIONS_LOADED = "cockpit.sessions_loaded"
+    DELETE_SESSION = "cockpit.delete_session"
+    SESSION_DELETED = "cockpit.session_deleted"
+    RENAME_SESSION = "cockpit.rename_session"
+    SESSION_RENAMED = "cockpit.session_renamed"
+
     # CRUD widgets (synchrone)
     LIST_WIDGETS = "cockpit.list_widgets"
     WIDGETS_LOADED = "cockpit.widgets_loaded"
-    PIN_WIDGET = "cockpit.pin_widget"
-    WIDGET_PINNED = "cockpit.widget_pinned"
     DELETE_WIDGET = "cockpit.delete_widget"
     WIDGET_DELETED = "cockpit.widget_deleted"
     REFRESH_WIDGET = "cockpit.refresh_widget"
@@ -1059,6 +1155,7 @@ class WS_EVENTS:
     METRICS = MetricsEvents           # NEW: Shared metrics stores
     ONBOARDING = OnboardingEvents     # NEW: Company onboarding and setup
     HR = HREvents                     # NEW: Human Resources (PostgreSQL Neon)
+    FIXED_ASSETS = FixedAssetsEvents   # NEW: Fixed Assets (Immobilisations - PostgreSQL Neon)
     COCKPIT = CockpitEvents           # NEW: AI Reporter Cockpit Dashboard
 
 

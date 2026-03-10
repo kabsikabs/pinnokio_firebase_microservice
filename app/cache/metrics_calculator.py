@@ -374,6 +374,15 @@ class MetricsCalculator:
         if not data:
             return ExpenseMetrics()
 
+        # Guard: si le cache contient une liste plate (legacy), compter par status
+        if isinstance(data, list):
+            counts = self._count_by_status(data)
+            return ExpenseMetrics(
+                open_count=counts["toProcess"] + counts["inProcess"] + counts["pending"],
+                closed_count=counts["processed"],
+                pending_approval=counts["pending"],
+            )
+
         # Compter les items dans les 4 listes catégorisées (source de vérité)
         to_process = data.get("to_process", [])
         in_process = data.get("in_process", [])
@@ -592,6 +601,15 @@ class AsyncMetricsCalculator:
 
         if not data:
             return ExpenseMetrics()
+
+        # Guard: si le cache contient une liste plate (legacy), compter par status
+        if isinstance(data, list):
+            counts = self._count_by_status(data)
+            return ExpenseMetrics(
+                open_count=counts["toProcess"] + counts["inProcess"] + counts["pending"],
+                closed_count=counts["processed"],
+                pending_approval=counts["pending"],
+            )
 
         to_process = data.get("to_process", [])
         in_process = data.get("in_process", [])

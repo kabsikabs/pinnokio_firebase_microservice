@@ -1516,6 +1516,7 @@ class ChatHandlers:
                 "message": "Onboarding chat enqueued",
                 "status": "queued",
                 "job_id": queue_result.get("job_id"),
+                "worker_status": queue_result.get("worker_status", "unknown"),
             }
 
         except Exception as e:

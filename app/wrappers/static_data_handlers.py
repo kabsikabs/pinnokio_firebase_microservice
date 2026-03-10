@@ -312,7 +312,7 @@ class StaticDataHandlers:
                     "name": erp.get("erp_displayname", erp.get("name", erp.get("erp_name", "")))
                 }
                 for erp in erps
-                if isinstance(erp, dict)
+                if isinstance(erp, dict) and erp.get("active", True)
             ]
         except Exception as e:
             logger.warning(f"[STATIC_DATA] Error loading ERPs: {e}")
@@ -338,7 +338,7 @@ class StaticDataHandlers:
                     "name": item.get("dms_displayname", item.get("name", item.get("dms_name", "")))
                 }
                 for item in dms
-                if isinstance(item, dict)
+                if isinstance(item, dict) and item.get("active", True)
             ]
         except Exception as e:
             logger.warning(f"[STATIC_DATA] Error loading DMS: {e}")

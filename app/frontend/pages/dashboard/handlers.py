@@ -628,13 +628,35 @@ class DashboardHandlers:
                         cached_expenses if isinstance(cached_expenses, str)
                         else cached_expenses.decode()
                     )
-                    cached_metrics = expenses_data.get("metrics", {})
 
-                    # Map to dashboard metrics format
-                    # Note: business cache has totalToProcess, totalInProcess, totalPending, totalProcessed
-                    # Dashboard metrics use: open, closed, pendingApproval
-                    open_count = cached_metrics.get("totalToProcess", 0) + cached_metrics.get("totalInProcess", 0) + cached_metrics.get("totalPending", 0)
-                    closed_count = cached_metrics.get("totalProcessed", 0)
+                    # Unwrap unified_cache_manager format si présent
+                    if isinstance(expenses_data, dict) and "cache_version" in expenses_data and "data" in expenses_data:
+                        expenses_data = expenses_data["data"]
+
+                    # Priorité 1: metrics pré-calculées (format expenses/handlers.py)
+                    cached_metrics = expenses_data.get("metrics", {}) if isinstance(expenses_data, dict) else {}
+
+                    if cached_metrics:
+                        # Map to dashboard metrics format
+                        # Note: business cache has totalToProcess, totalInProcess, totalPending, totalProcessed
+                        # Dashboard metrics use: open, closed, pendingApproval
+                        open_count = cached_metrics.get("totalToProcess", 0) + cached_metrics.get("totalInProcess", 0) + cached_metrics.get("totalPending", 0)
+                        closed_count = cached_metrics.get("totalProcessed", 0)
+                    elif isinstance(expenses_data, dict):
+                        # Priorité 2: recompter depuis les listes catégorisées
+                        tp = len(expenses_data.get("to_process", []))
+                        ip = len(expenses_data.get("in_process", []))
+                        pd = len(expenses_data.get("pending", []))
+                        pr = len(expenses_data.get("processed", []))
+                        open_count = tp + ip + pd
+                        closed_count = pr
+                    elif isinstance(expenses_data, list):
+                        # Priorité 3: liste plate legacy — compter par status
+                        open_count = sum(1 for e in expenses_data if isinstance(e, dict) and e.get("status", "").lower() not in ("close", "closed", "completed", "processed"))
+                        closed_count = sum(1 for e in expenses_data if isinstance(e, dict) and e.get("status", "").lower() in ("close", "closed", "completed", "processed"))
+                    else:
+                        open_count = 0
+                        closed_count = 0
 
                     metrics["expenses"]["open"] = open_count
                     metrics["expenses"]["closed"] = closed_count
@@ -1045,8 +1067,8 @@ class DashboardHandlers:
                     department = "APBookkeeper"
                 elif dept_lower == "router":
                     department = "Router"
-                elif dept_lower in ("banker", "bank"):
-                    department = "Banker"
+                elif dept_lower in ("banker", "bank", "bankbookeeper"):
+                    department = "Bankbookeeper"
                 elif dept_lower in ("chat", "chat_usage", "chat_daily"):
                     department = "Chat"
                 else:
@@ -1130,9 +1152,39 @@ class DashboardHandlers:
                     "routeDestination": router_data.get("destination", ""),
                     "routeConfidence": float(router_data.get("confidence", 0) or 0),
                     # Banker specific
-                    "bankAccount": banker_data.get("bank_account", ""),
+                    "bankAccount": banker_data.get("bank_account_name", "") or banker_data.get("bank_account", ""),
                     "transactionType": banker_data.get("transaction_type", ""),
+                    "txnAmount": float(banker_data.get("txn_amount", 0) or 0),
+                    "txnCurrency": banker_data.get("txn_currency", ""),
+                    "transactionDate": banker_data.get("transaction_date", ""),
+                    "txnDescription": banker_data.get("description", ""),
+                    "partnerName": banker_data.get("partner_name", "") or ap_data.get("supplier_name", ""),
+                    "paymentRef": banker_data.get("payment_ref", ""),
+                    "resultCode": banker_data.get("result_code", ""),
                 }
+
+                # Enrichir depuis reconciliation_details si disponible
+                recon = banker_data.get("reconciliation_details")
+                if isinstance(recon, dict):
+                    expense_item["reconciliationDetails"] = recon
+                    method = recon.get("method", "")
+                    if method == "invoice":
+                        if recon.get("partner_name"):
+                            expense_item["partnerName"] = recon["partner_name"]
+                        if recon.get("invoice_ref"):
+                            expense_item["invoiceRef"] = recon["invoice_ref"]
+                        if recon.get("reconciliation_type"):
+                            expense_item["reconciliationType"] = recon["reconciliation_type"]
+                    elif method == "gl_entry":
+                        if recon.get("account_name"):
+                            expense_item["glAccountName"] = recon["account_name"]
+                        if recon.get("account_number"):
+                            expense_item["glAccountNumber"] = recon["account_number"]
+                    elif method == "expense_entry":
+                        if recon.get("expense_supplier"):
+                            expense_item["partnerName"] = recon["expense_supplier"]
+                        if recon.get("expense_concern"):
+                            expense_item["expenseConcern"] = recon["expense_concern"]
 
                 all_expenses.append(expense_item)
 

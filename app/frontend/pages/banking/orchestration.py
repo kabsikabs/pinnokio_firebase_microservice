@@ -659,7 +659,7 @@ async def handle_banking_stop(
 
         result = await handle_job_stop(
             uid=uid,
-            job_type="banker",
+            job_type="bankbookeeper",
             payload={
                 "job_ids": job_ids,
                 "transaction_ids": transaction_ids if transaction_ids else None,
@@ -684,6 +684,76 @@ async def handle_banking_stop(
             "payload": {
                 "error": str(e),
                 "code": "STOP_ERROR"
+            }
+        })
+
+
+async def handle_banking_restart(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """
+    Handle banking.restart WebSocket event.
+
+    Restarts a transaction that is stuck or needs to be re-processed using centralized job_actions_handler.
+    """
+    job_id = payload.get("job_id")
+    company_id = payload.get("company_id")
+
+    logger.info(f"[BANKING] Restart requested for job={job_id}")
+
+    if not job_id:
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.BANKING.ERROR,
+            "payload": {
+                "error": "No job_id provided",
+                "code": "MISSING_JOB_ID"
+            }
+        })
+        return
+
+    try:
+        context = _get_company_context(uid, company_id)
+
+        from app.wrappers.job_actions_handler import handle_job_restart
+
+        result = await handle_job_restart(
+            uid=uid,
+            job_type="bankbookeeper",
+            payload=payload,
+            company_data={
+                "company_id": company_id,
+                "mandate_path": context.get("mandate_path", ""),
+            }
+        )
+
+        if result.get("success"):
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.BANKING.RESTARTED,
+                "payload": {
+                    "success": True,
+                    "job_id": job_id,
+                    "message": result.get("message", f"Transaction {job_id} has been successfully reset"),
+                    "_optimistic_update_id": payload.get("_optimistic_update_id"),
+                }
+            })
+        else:
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.BANKING.ERROR,
+                "payload": {
+                    "error": result.get("error", "Restart failed"),
+                    "code": result.get("code", "RESTART_ERROR")
+                }
+            })
+
+    except Exception as e:
+        logger.error(f"[BANKING] Restart failed: {e}", exc_info=True)
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.BANKING.ERROR,
+            "payload": {
+                "error": str(e),
+                "code": "RESTART_ERROR"
             }
         })
 
@@ -726,6 +796,167 @@ async def handle_banking_delete(
             "payload": {
                 "error": str(e),
                 "code": "DELETE_ERROR"
+            }
+        })
+
+
+# ============================================
+# DISMISS MATCH SUGGESTION
+# ============================================
+
+async def handle_banking_dismiss_match(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """
+    Handle banking.dismiss_match WebSocket event.
+
+    Removes a match suggestion from a transaction so it is no longer
+    displayed or auto-dispatched. The dismissed candidate is recorded
+    in the transaction's match_suggestions.dismissed list and will be
+    excluded from future re-scoring.
+
+    Payload:
+        {
+            "company_id": str,
+            "transaction_id": str,
+            "match_id": str,          # _internal_id or suggestion id
+            "match_type": str,        # "invoice" | "ar_invoice" | "expense"
+            "dismiss_all": bool,      # Optional: dismiss all suggestions
+            "dismiss_transfer": bool, # Optional: dismiss transfer match
+        }
+    """
+    company_id = payload.get("company_id")
+    transaction_id = str(payload.get("transaction_id", ""))
+    match_id = str(payload.get("match_id", ""))
+    match_type = payload.get("match_type", "")
+    dismiss_all = payload.get("dismiss_all", False)
+    dismiss_transfer = payload.get("dismiss_transfer", False)
+
+    logger.info(
+        f"[BANKING] Dismiss match: tx={transaction_id} "
+        f"match_id={match_id} type={match_type} "
+        f"dismiss_all={dismiss_all} dismiss_transfer={dismiss_transfer}"
+    )
+
+    if not transaction_id or (not match_id and not dismiss_all and not dismiss_transfer):
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.BANKING.ERROR,
+            "payload": {
+                "error": "transaction_id and (match_id or dismiss_all or dismiss_transfer) required",
+                "code": "INVALID_DISMISS_PAYLOAD",
+            }
+        })
+        return
+
+    try:
+        # 1. Load bank TX cache
+        redis_client = get_redis()
+        cache_key = f"business:{uid}:{company_id}:bank"
+        cached_raw = redis_client.get(cache_key)
+
+        if not cached_raw:
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.BANKING.ERROR,
+                "payload": {
+                    "error": "No bank cache available — please refresh the page",
+                    "code": "NO_CACHE",
+                }
+            })
+            return
+
+        cached = json.loads(cached_raw if isinstance(cached_raw, str) else cached_raw.decode())
+        documents = cached.get("data", cached)
+
+        # 2. Find the transaction in to_process
+        target_tx = None
+        for tx in documents.get("to_process", []):
+            if str(tx.get("id", "")) == transaction_id:
+                target_tx = tx
+                break
+
+        if not target_tx:
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.BANKING.ERROR,
+                "payload": {
+                    "error": f"Transaction {transaction_id} not found in to_process",
+                    "code": "TX_NOT_FOUND",
+                }
+            })
+            return
+
+        # 3. Update match_suggestions
+        suggestions = target_tx.get("match_suggestions") or {
+            "top_matches": [], "transfer_match": None, "dismissed": [], "scored_at": None,
+        }
+        dismissed: List[str] = list(suggestions.get("dismissed") or [])
+        top_matches: List[Dict] = list(suggestions.get("top_matches") or [])
+        dismissed_items = []
+
+        if dismiss_all:
+            # Dismiss all current top_matches
+            for m in top_matches:
+                cand_key = f"{m.get('type', '')}:{m.get('_internal_id') or m.get('id', '')}"
+                if cand_key not in dismissed:
+                    dismissed.append(cand_key)
+                    dismissed_items.append({"match_id": m.get("_internal_id") or m.get("id"), "type": m.get("type")})
+            top_matches = []
+        elif match_id:
+            # Dismiss a specific match
+            cand_key = f"{match_type}:{match_id}" if match_type else None
+            new_top = []
+            for m in top_matches:
+                m_key = f"{m.get('type', '')}:{m.get('_internal_id') or m.get('id', '')}"
+                # Match by cand_key or by raw match_id
+                if (cand_key and m_key == cand_key) or str(m.get("_internal_id") or m.get("id", "")) == match_id:
+                    if m_key not in dismissed:
+                        dismissed.append(m_key)
+                    dismissed_items.append({"match_id": m.get("_internal_id") or m.get("id"), "type": m.get("type")})
+                else:
+                    new_top.append(m)
+            top_matches = new_top
+
+        if dismiss_transfer:
+            suggestions["transfer_match"] = None
+
+        suggestions["top_matches"] = top_matches
+        suggestions["dismissed"] = dismissed
+        target_tx["match_suggestions"] = suggestions
+
+        # 4. Persist updated cache
+        ttl = redis_client.ttl(cache_key)
+        if ttl and ttl > 0:
+            redis_client.setex(cache_key, ttl, json.dumps(cached))
+        else:
+            redis_client.setex(cache_key, 2400, json.dumps(cached))
+
+        logger.info(
+            f"[BANKING] Match dismissed: tx={transaction_id} "
+            f"dismissed={dismissed_items} total_dismissed={len(dismissed)}"
+        )
+
+        # 5. Broadcast confirmation
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.BANKING.MATCH_DISMISSED,
+            "payload": {
+                "success": True,
+                "transaction_id": transaction_id,
+                "dismissed_items": dismissed_items,
+                "dismissed_keys": dismissed,
+                "remaining_matches": top_matches,
+                "transfer_match": suggestions.get("transfer_match"),
+                "total_dismissed": len(dismissed),
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"[BANKING] Dismiss match failed: {e}", exc_info=True)
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.BANKING.ERROR,
+            "payload": {
+                "error": str(e),
+                "code": "DISMISS_ERROR",
             }
         })
 

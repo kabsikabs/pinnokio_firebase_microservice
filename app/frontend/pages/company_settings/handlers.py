@@ -25,6 +25,8 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 from app.cache.unified_cache_manager import get_firebase_cache_manager
 from app.firebase_providers import get_firebase_management
 from app.ws_events import WS_EVENTS
@@ -1198,19 +1200,26 @@ class CompanySettingsHandlers:
             existing_doc = self._firebase.get_raw_document(erp_doc_path) or {}
             old_secret_name = existing_doc.get("secret_manager", "")
 
-            # Prepare data to save (Odoo-specific field mapping)
+            # Prepare data to save
             data_to_save = {
                 "erp_type": erp_type,
                 "updated_at": datetime.utcnow().isoformat(),
             }
 
             if erp_type == "odoo":
-                data_to_save.update({
-                    "odoo_company_name": connection_data.get("companyName", ""),
-                    "odoo_db": connection_data.get("database", ""),
-                    "odoo_url": connection_data.get("url", ""),
-                    "odoo_username": connection_data.get("username", ""),
-                })
+                # If connection already exists, only update editable fields (username)
+                # companyName, database, url are set during onboarding and remain read-only
+                if existing_doc.get("odoo_url"):
+                    # Existing connection — only update username
+                    data_to_save["odoo_username"] = connection_data.get("username", "")
+                else:
+                    # First-time setup — save all fields
+                    data_to_save.update({
+                        "odoo_company_name": connection_data.get("companyName", ""),
+                        "odoo_db": connection_data.get("database", ""),
+                        "odoo_url": connection_data.get("url", ""),
+                        "odoo_username": connection_data.get("username", ""),
+                    })
 
             # Handle API key - only process if a new key is provided
             new_api_key = (connection_data.get("apiKey") or "").strip()
@@ -1263,6 +1272,7 @@ class CompanySettingsHandlers:
         company_id: str,
         erp_type: str,
         connection_data: Dict[str, Any],
+        mandate_path: str = "",
     ) -> Dict[str, Any]:
         """
         Test ERP connection.
@@ -1274,6 +1284,7 @@ class CompanySettingsHandlers:
             company_id: Company/Mandate ID
             erp_type: ERP type (odoo, banana, etc.)
             connection_data: Connection configuration data
+            mandate_path: Firestore mandate path (used to retrieve stored API key)
 
         Returns:
             {
@@ -1292,11 +1303,10 @@ class CompanySettingsHandlers:
             )
 
             if erp_type == "odoo":
-                return await self._test_odoo_connection(connection_data, start_time)
+                return await self._test_odoo_connection(connection_data, mandate_path, erp_type, start_time)
             elif erp_type == "banana":
                 return await self._test_banana_connection(connection_data, start_time)
             else:
-                # Placeholder for other ERP types
                 return {
                     "success": True,
                     "connected": False,
@@ -1315,6 +1325,8 @@ class CompanySettingsHandlers:
     async def _test_odoo_connection(
         self,
         connection_data: Dict[str, Any],
+        mandate_path: str,
+        erp_type: str,
         start_time: datetime
     ) -> Dict[str, Any]:
         """Test Odoo connection using XML-RPC."""
@@ -1322,6 +1334,25 @@ class CompanySettingsHandlers:
         database = connection_data.get("database", "")
         username = connection_data.get("username", "")
         api_key = connection_data.get("apiKey", "")
+
+        # If apiKey not provided but hasSecret, retrieve from Secret Manager
+        if not api_key and connection_data.get("hasSecret") and mandate_path:
+            try:
+                erp_doc_path = f"{mandate_path}/erp/{erp_type}"
+                erp_doc = self._firebase.get_raw_document(erp_doc_path)
+                secret_name = (erp_doc or {}).get("secret_manager", "")
+                if secret_name:
+                    from app.tools.g_cred import get_secret
+                    api_key = get_secret(secret_name)
+                    logger.info(f"Retrieved API key from Secret Manager for test")
+            except Exception as e:
+                logger.error(f"Failed to retrieve API key from Secret Manager: {e}")
+                return {
+                    "success": True,
+                    "connected": False,
+                    "message": f"Could not retrieve stored API key: {e}",
+                    "durationMs": self._elapsed_ms(start_time)
+                }
 
         if not all([url, database, username, api_key]):
             return {
@@ -1331,44 +1362,54 @@ class CompanySettingsHandlers:
                 "durationMs": self._elapsed_ms(start_time)
             }
 
-        # TODO: Implement actual Odoo XML-RPC connection test
-        # When ERP service singleton is configured, use:
-        #
-        # from app.erp_manager import ERPManager
-        #
-        # erp_manager = ERPManager()
-        # result = await erp_manager.test_odoo_connection(
-        #     url=url,
-        #     database=database,
-        #     username=username,
-        #     api_key=api_key
-        # )
-        #
-        # return {
-        #     "success": True,
-        #     "connected": result.get("connected", False),
-        #     "message": result.get("message", ""),
-        #     "details": result.get("details", {}),
-        #     "durationMs": self._elapsed_ms(start_time)
-        # }
+        # Real Odoo XML-RPC connection test
+        import xmlrpc.client
 
-        # PLACEHOLDER: Simulate connection test
-        logger.warning(
-            f"COMPANY_SETTINGS.test_erp_connection PLACEHOLDER - "
-            f"ERP service singleton not yet configured"
-        )
+        try:
+            common_url = f"{url.rstrip('/')}/xmlrpc/2/common"
+            common = xmlrpc.client.ServerProxy(common_url, allow_none=True)
+            uid = common.authenticate(database, username, api_key, {})
 
-        return {
-            "success": True,
-            "connected": True,
-            "message": "[PLACEHOLDER] Odoo connection test - Service integration pending",
-            "details": {
-                "url": url,
-                "database": database,
-                "username": username,
-            },
-            "durationMs": self._elapsed_ms(start_time)
-        }
+            if uid:
+                return {
+                    "success": True,
+                    "connected": True,
+                    "message": f"Successfully connected to Odoo (uid={uid})",
+                    "details": {
+                        "url": url,
+                        "database": database,
+                        "username": username,
+                        "odoo_uid": uid,
+                    },
+                    "durationMs": self._elapsed_ms(start_time)
+                }
+            else:
+                return {
+                    "success": True,
+                    "connected": False,
+                    "message": "Authentication failed — check credentials",
+                    "details": {
+                        "url": url,
+                        "database": database,
+                        "username": username,
+                    },
+                    "durationMs": self._elapsed_ms(start_time)
+                }
+
+        except xmlrpc.client.Fault as e:
+            return {
+                "success": True,
+                "connected": False,
+                "message": f"Odoo error: {e.faultString}",
+                "durationMs": self._elapsed_ms(start_time)
+            }
+        except Exception as e:
+            return {
+                "success": True,
+                "connected": False,
+                "message": f"Connection failed: {e}",
+                "durationMs": self._elapsed_ms(start_time)
+            }
 
     async def _test_banana_connection(
         self,
@@ -1393,91 +1434,52 @@ class CompanySettingsHandlers:
         user_id: str,
         company_id: str,
         erp_type: str,
+        mandate_path: str = "",
     ) -> Dict[str, Any]:
         """
-        Fetch asset models from ERP.
+        Fetch asset models from Neon (internalized fixed assets).
 
         RPC: COMPANY_SETTINGS.list_asset_models
-
-        Uses erp_type argument to allow future integration of multiple ERPs.
-        Currently supports: odoo
 
         Args:
             user_id: Firebase UID
             company_id: Company/Mandate ID
-            erp_type: ERP type (odoo, banana, etc.)
+            erp_type: ERP type (ignored — always uses Neon)
+            mandate_path: Firebase mandate path for company resolution
 
         Returns:
-            {
-                "success": True,
-                "models": [...],  # List of asset models
-                "erp_type": "odoo"
-            }
+            {"success": True, "models": [...]}
         """
         try:
             logger.info(
                 f"COMPANY_SETTINGS.list_asset_models "
-                f"company_id={company_id} erp_type={erp_type}"
+                f"company_id={company_id}"
             )
 
-            erp_type = erp_type.lower().strip()
+            from app.tools.neon_fixed_asset_manager import get_fixed_asset_manager
 
-            if erp_type == "odoo":
-                return await self._list_asset_models_odoo(user_id, company_id)
-            else:
-                return {
-                    "success": False,
-                    "error": f"Asset models not supported for ERP type: {erp_type}",
-                    "models": [],
-                    "erp_type": erp_type,
-                }
+            mgr = get_fixed_asset_manager()
+            neon_company_id = await mgr._resolve_company(mandate_path) if mandate_path else None
+
+            if not neon_company_id:
+                return {"success": False, "error": "Could not resolve company", "models": []}
+
+            models = await mgr.list_asset_models(neon_company_id)
+
+            # Serialize UUIDs/Decimals for JSON
+            from app.fixed_asset_rpc_handlers import _serialize
+            serialized = _serialize(models)
+
+            logger.info(f"Fetched {len(serialized)} asset models from Neon")
+
+            return {
+                "success": True,
+                "models": serialized,
+            }
 
         except Exception as e:
             logger.error(f"COMPANY_SETTINGS.list_asset_models error: {e}")
             return {"success": False, "error": str(e), "models": []}
-
-    async def _list_asset_models_odoo(
-        self,
-        user_id: str,
-        company_id: str,
-    ) -> Dict[str, Any]:
-        """
-        Fetch asset models from Odoo ERP.
-
-        Returns models with structure:
-        - id: int (Odoo model ID)
-        - name: str (Model name)
-        - method: str (linear/degressive)
-        - method_period: int (1, 3, 6, 12)
-        - method_number: int (number of periods)
-        - account_asset_id: int
-        - account_depreciation_id: int
-        - account_depreciation_expense_id: int
-        """
-        try:
-            from app.erp_service import ERPService
-
-            models = ERPService.list_asset_models(
-                user_id=user_id,
-                company_id=company_id
-            )
-
-            logger.info(f"Fetched {len(models)} asset models from Odoo")
-
-            return {
-                "success": True,
-                "models": models,
-                "erp_type": "odoo",
-            }
-
-        except Exception as e:
-            logger.error(f"Error fetching Odoo asset models: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "models": [],
-                "erp_type": "odoo",
-            }
 
     async def save_asset_config(
         self,
@@ -1538,30 +1540,30 @@ class CompanySettingsHandlers:
         user_id: str,
         company_id: str,
         name: str,
-        account_asset_id: int,
-        account_depreciation_id: int,
-        account_depreciation_expense_id: int,
+        account_asset_id: str,
+        account_depreciation_id: str,
+        account_depreciation_expense_id: str,
         method: str,
         method_period: int,
         duration_years: int,
+        mandate_path: str = "",
     ) -> Dict[str, Any]:
         """
-        Create a new asset model in the ERP.
+        Create a new asset model in Neon (internalized fixed assets).
 
         RPC: COMPANY_SETTINGS.create_asset_model
-
-        Creates both an asset journal and asset model in Odoo.
 
         Args:
             user_id: Firebase UID
             company_id: Company/Mandate ID
             name: Model name
-            account_asset_id: Asset account ID from COA
-            account_depreciation_id: Depreciation account ID from COA
-            account_depreciation_expense_id: Expense account ID from COA
+            account_asset_id: Asset account number from COA
+            account_depreciation_id: Depreciation account number from COA
+            account_depreciation_expense_id: Expense account number from COA
             method: Depreciation method ('linear' or 'degressive')
             method_period: Period in months (1, 3, 6, 12)
             duration_years: Total duration in years
+            mandate_path: Firebase mandate path for company resolution
 
         Returns:
             {"success": True, "model": {...}} or {"success": False, "error": "..."}
@@ -1572,45 +1574,35 @@ class CompanySettingsHandlers:
                 f"company_id={company_id} name={name}"
             )
 
-            from app.erp_service import ERPService
+            from app.tools.neon_fixed_asset_manager import get_fixed_asset_manager
+            from app.fixed_asset_rpc_handlers import _serialize
+
+            mgr = get_fixed_asset_manager()
+            neon_company_id = await mgr._resolve_company(mandate_path) if mandate_path else None
+
+            if not neon_company_id:
+                return {"success": False, "error": "Could not resolve company"}
 
             # Calculate method_number: (duration_years * 12) / method_period
             method_number = (duration_years * 12) // method_period
 
-            result = ERPService.create_asset_model_with_journal(
-                user_id=user_id,
-                company_id=company_id,
-                name=name,
-                account_asset_id=account_asset_id,
-                account_depreciation_id=account_depreciation_id,
-                account_depreciation_expense_id=account_depreciation_expense_id,
-                depreciation_method=method,
-                method_number=method_number,
-                method_period=method_period,
-                is_model=True
-            )
+            data = {
+                "name": name,
+                "account_asset_number": str(account_asset_id),
+                "account_depreciation_number": str(account_depreciation_id),
+                "account_expense_number": str(account_depreciation_expense_id),
+                "method": method,
+                "method_number": method_number,
+                "method_period": method_period,
+            }
 
-            if result.get("success"):
-                logger.info(f"Asset model '{name}' created successfully")
-                return {
-                    "success": True,
-                    "model": {
-                        "id": result.get("model_id"),
-                        "name": name,
-                        "method": method,
-                        "methodPeriod": method_period,
-                        "methodNumber": method_number,
-                        "accountAssetId": account_asset_id,
-                        "accountDepreciationId": account_depreciation_id,
-                        "accountDepreciationExpenseId": account_depreciation_expense_id,
-                    },
-                    "journal_id": result.get("journal_id"),
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": result.get("error", "Failed to create asset model")
-                }
+            result = await mgr.create_asset_model(neon_company_id, data)
+
+            logger.info(f"Asset model '{name}' created successfully in Neon")
+            return {
+                "success": True,
+                "model": _serialize(result),
+            }
 
         except Exception as e:
             logger.error(f"COMPANY_SETTINGS.create_asset_model error: {e}")
@@ -1620,27 +1612,27 @@ class CompanySettingsHandlers:
         self,
         user_id: str,
         company_id: str,
-        model_id: int,
+        model_id: str,
         name: Optional[str] = None,
         method: Optional[str] = None,
         method_period: Optional[int] = None,
         duration_years: Optional[int] = None,
+        mandate_path: str = "",
     ) -> Dict[str, Any]:
         """
-        Update an existing asset model in the ERP.
+        Update an existing asset model in Neon.
 
         RPC: COMPANY_SETTINGS.update_asset_model
-
-        Note: Account mappings cannot be changed after creation.
 
         Args:
             user_id: Firebase UID
             company_id: Company/Mandate ID
-            model_id: ERP model ID to update
+            model_id: Neon UUID of the asset model
             name: New model name (optional)
             method: New depreciation method (optional)
             method_period: New period in months (optional)
             duration_years: New duration in years (optional)
+            mandate_path: Firebase mandate path for company resolution
 
         Returns:
             {"success": True} or {"success": False, "error": "..."}
@@ -1651,40 +1643,36 @@ class CompanySettingsHandlers:
                 f"company_id={company_id} model_id={model_id}"
             )
 
-            from app.erp_service import ERPService
+            from uuid import UUID as _UUID
+            from app.tools.neon_fixed_asset_manager import get_fixed_asset_manager
+
+            mgr = get_fixed_asset_manager()
+            neon_company_id = await mgr._resolve_company(mandate_path) if mandate_path else None
+
+            if not neon_company_id:
+                return {"success": False, "error": "Could not resolve company"}
 
             # Build values dict with only provided fields
             values: Dict[str, Any] = {}
 
             if name is not None:
                 values["name"] = name
-
             if method is not None:
                 values["method"] = method
-
             if method_period is not None:
                 values["method_period"] = method_period
-
             if duration_years is not None and method_period is not None:
-                # Calculate method_number
                 values["method_number"] = (duration_years * 12) // method_period
             elif duration_years is not None:
-                # Need to get current method_period to calculate
-                # Default to 12 if not provided
                 values["method_number"] = duration_years
 
             if not values:
                 return {"success": True, "message": "No changes to update"}
 
-            result = ERPService.update_asset_model(
-                user_id=user_id,
-                company_id=company_id,
-                model_id=model_id,
-                values=values
-            )
+            result = await mgr.update_asset_model(neon_company_id, _UUID(str(model_id)), values)
 
             if result.get("success"):
-                logger.info(f"Asset model {model_id} updated successfully")
+                logger.info(f"Asset model {model_id} updated successfully in Neon")
                 return {"success": True}
             else:
                 return {
@@ -1700,10 +1688,11 @@ class CompanySettingsHandlers:
         self,
         user_id: str,
         company_id: str,
-        model_id: int,
+        model_id: str,
+        mandate_path: str = "",
     ) -> Dict[str, Any]:
         """
-        Delete an asset model from the ERP.
+        Delete an asset model from Neon.
 
         RPC: COMPANY_SETTINGS.delete_asset_model
 
@@ -1713,7 +1702,8 @@ class CompanySettingsHandlers:
         Args:
             user_id: Firebase UID
             company_id: Company/Mandate ID
-            model_id: ERP model ID to delete
+            model_id: Neon UUID of the asset model
+            mandate_path: Firebase mandate path for company resolution
 
         Returns:
             {"success": True} or {"success": False, "error": "..."}
@@ -1724,16 +1714,20 @@ class CompanySettingsHandlers:
                 f"company_id={company_id} model_id={model_id}"
             )
 
-            from app.erp_service import ERPService
+            from uuid import UUID as _UUID
+            from app.tools.neon_fixed_asset_manager import get_fixed_asset_manager
+            from app.fixed_asset_rpc_handlers import _serialize
 
-            result = ERPService.delete_asset_model(
-                user_id=user_id,
-                company_id=company_id,
-                model_id=model_id
-            )
+            mgr = get_fixed_asset_manager()
+            neon_company_id = await mgr._resolve_company(mandate_path) if mandate_path else None
+
+            if not neon_company_id:
+                return {"success": False, "error": "Could not resolve company"}
+
+            result = await mgr.delete_asset_model(neon_company_id, _UUID(str(model_id)))
 
             if result.get("success"):
-                logger.info(f"Asset model {model_id} deleted successfully")
+                logger.info(f"Asset model {model_id} deleted successfully from Neon")
                 return {"success": True}
             else:
                 return {
@@ -1752,14 +1746,10 @@ class CompanySettingsHandlers:
         mandate_path: str,
     ) -> Dict[str, Any]:
         """
-        Load COA accounts filtered for asset model account mapping.
+        Load COA accounts eligible for asset model mapping from Neon.
 
-        RPC: COMPANY_SETTINGS.load_asset_accounts
-
-        Returns accounts grouped by function type:
-        - asset_fixed: Fixed asset accounts
-        - cumulated_depreciation: Accumulated depreciation accounts
-        - expense_depreciation: Depreciation expense accounts
+        Uses the fixed_assets.eligible_accounts view which filters by
+        account_function (asset_fixed, cumulated_depreciation, expense_depreciation).
 
         Args:
             user_id: Firebase UID
@@ -1782,53 +1772,39 @@ class CompanySettingsHandlers:
                 f"company_id={company_id}"
             )
 
-            # Use COA handlers to load accounts
-            from app.frontend.pages.coa.handlers import get_coa_handlers
+            from app.tools.neon_fixed_asset_manager import get_fixed_asset_manager
 
-            coa_handlers = get_coa_handlers()
-            result = await coa_handlers.load_accounts(
-                uid=user_id,
-                company_id=company_id,
-                mandate_path=mandate_path,
-                force_refresh=False
-            )
+            mgr = get_fixed_asset_manager()
+            neon_company_id = await mgr._resolve_company(mandate_path) if mandate_path else None
 
-            if not result.get("success"):
-                return {
-                    "success": False,
-                    "error": result.get("error", {}).get("message", "Failed to load accounts")
-                }
+            if not neon_company_id:
+                return {"success": False, "error": "Could not resolve company"}
 
-            accounts = result.get("data", {}).get("accounts", [])
+            accounts = await mgr.get_eligible_accounts(neon_company_id)
 
-            # Filter accounts by function type
-            # Asset accounts: function contains 'asset_fixed' or 'fixed_asset'
+            # Group by role (already computed by the SQL view)
             asset_accounts = []
             depreciation_accounts = []
             expense_accounts = []
 
             for acc in accounts:
-                if not acc.get("isactive", True):
-                    continue
-
-                func = (acc.get("account_function") or "").lower()
                 account_data = {
-                    "id": acc.get("account_id"),
+                    "id": acc.get("account_number"),
                     "number": acc.get("account_number", ""),
                     "name": acc.get("account_name", ""),
                     "function": acc.get("account_function", ""),
                 }
 
-                # Categorize by function
-                if "asset_fixed" in func or "fixed_asset" in func or "immobilisation" in func:
+                role = acc.get("role", "")
+                if role == "asset":
                     asset_accounts.append(account_data)
-                elif "cumulated_depreciation" in func or "accumulated_depreciation" in func or "amortissement_cumul" in func:
+                elif role == "depreciation":
                     depreciation_accounts.append(account_data)
-                elif "expense_depreciation" in func or "depreciation_expense" in func or "charge_amortissement" in func or "dotation" in func:
+                elif role == "expense":
                     expense_accounts.append(account_data)
 
             logger.info(
-                f"Loaded asset accounts: {len(asset_accounts)} asset, "
+                f"Loaded asset accounts from Neon: {len(asset_accounts)} asset, "
                 f"{len(depreciation_accounts)} depreciation, {len(expense_accounts)} expense"
             )
 
@@ -1879,7 +1855,7 @@ class CompanySettingsHandlers:
         import asyncio
 
         report: List[Dict[str, str]] = []
-        total_steps = 13
+        total_steps = 15
 
         def _report(name: str, status: str, reason: str = ""):
             report.append({"name": name, "status": status, "reason": reason})
@@ -2071,8 +2047,64 @@ class CompanySettingsHandlers:
                 logger.warning(f"delete_company: GCS cleanup failed: {e}")
                 _report("File Storage", "failed", str(e))
 
-            # ── Step 12: Delete Firestore (CRITICAL) ────────
-            _notify("Removing company database", 12)
+            # ── Step 12: Delete working_doc collection ────────
+            _notify("Removing working documents", 12)
+            try:
+                working_doc_path = f"{mandate_path}/working_doc"
+                working_doc_col = self._firebase.db.collection(working_doc_path)
+                working_docs = list(working_doc_col.limit(500).stream())
+                total_wd_deleted = 0
+                while working_docs:
+                    batch = self._firebase.db.batch()
+                    for doc in working_docs:
+                        # Delete subcollections of each working_doc document
+                        for sub in doc.reference.collections():
+                            self._firebase._delete_collection_recursive(sub)
+                        batch.delete(doc.reference)
+                    batch.commit()
+                    total_wd_deleted += len(working_docs)
+                    if len(working_docs) < 500:
+                        break
+                    working_docs = list(working_doc_col.limit(500).stream())
+                _report("Working Documents", "success", f"Deleted {total_wd_deleted} working_doc documents")
+            except Exception as e:
+                logger.warning(f"delete_company: working_doc cleanup failed: {e}")
+                _report("Working Documents", "failed", str(e))
+
+            # ── Step 13: Clean task_manager documents ─────
+            _notify("Cleaning task manager data", 13)
+            try:
+                # Extract user_id from mandate_path: clients/{uid}/bo_clients/...
+                task_manager_path = f"clients/{user_id}/task_manager"
+                task_col = self._firebase.db.collection(task_manager_path)
+                # Query documents where mandate_path matches
+                matching_docs = task_col.where(
+                    filter=FieldFilter("mandate_path", "==", mandate_path)
+                ).stream()
+                total_tm_deleted = 0
+                batch = self._firebase.db.batch()
+                batch_count = 0
+                for doc in matching_docs:
+                    # Delete subcollections first
+                    for sub in doc.reference.collections():
+                        self._firebase._delete_collection_recursive(sub)
+                    batch.delete(doc.reference)
+                    batch_count += 1
+                    total_tm_deleted += 1
+                    # Firestore batch limit is 500
+                    if batch_count >= 500:
+                        batch.commit()
+                        batch = self._firebase.db.batch()
+                        batch_count = 0
+                if batch_count > 0:
+                    batch.commit()
+                _report("Task Manager", "success", f"Deleted {total_tm_deleted} task_manager documents")
+            except Exception as e:
+                logger.warning(f"delete_company: task_manager cleanup failed: {e}")
+                _report("Task Manager", "failed", str(e))
+
+            # ── Step 14: Delete Firestore (CRITICAL) ────────
+            _notify("Removing company database", 14)
             try:
                 result = self._firebase.delete_document_recursive(mandate_path)
                 if result:
@@ -2089,8 +2121,8 @@ class CompanySettingsHandlers:
                     "report": report,
                 }
 
-            # ── Step 13: Delete RTDB Space ──────────────────
-            _notify("Cleaning real-time services", 13)
+            # ── Step 15: Delete RTDB Space ──────────────────
+            _notify("Cleaning real-time services", 15)
             try:
                 if contact_space_id:
                     from app.firebase_providers import get_firebase_realtime

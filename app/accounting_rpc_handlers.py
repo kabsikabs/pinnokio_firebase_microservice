@@ -35,6 +35,7 @@ Endpoints disponibles:
     - ACCOUNTING.validate_accounts    -> Validation batch comptes (existence, actif, mapping ERP)
 """
 
+import asyncio
 import logging
 from datetime import date, datetime
 from decimal import Decimal
@@ -1118,6 +1119,70 @@ class AccountingRPCHandlers:
             }
         except Exception as e:
             logger.error("check_journals_freshness error: %s", e)
+            return {"success": False, "error": str(e)}
+
+
+    # ------------------------------------------------------------------
+    # execute_query (read-only SQL for Cockpit agent)
+    # ------------------------------------------------------------------
+    async def execute_query(
+        self,
+        mandate_path: str,
+        sql: str,
+        row_limit: int = 500,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Execute une requete SQL read-only sur les schemas accounting/core.
+
+        Securite:
+        - Seuls SELECT sont autorises (pas INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE)
+        - Timeout de 10 secondes
+        - Limite de lignes configurable (max 1000)
+        - Le company_id est injecte automatiquement comme parametre $1
+        """
+        try:
+            manager = get_neon_accounting_manager()
+            company_id = await manager.get_company_id_from_mandate_path(mandate_path)
+            if not company_id:
+                return {"success": False, "error": "Company not found"}
+
+            # Validation securite: uniquement SELECT
+            sql_stripped = sql.strip().upper()
+            forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "GRANT", "REVOKE"]
+            first_keyword = sql_stripped.split()[0] if sql_stripped.split() else ""
+            if first_keyword not in ("SELECT", "WITH", "EXPLAIN"):
+                return {"success": False, "error": f"Seules les requetes SELECT/WITH sont autorisees (recu: {first_keyword})"}
+            for word in forbidden:
+                # Check for forbidden keywords not inside quotes
+                if f" {word} " in f" {sql_stripped} ":
+                    return {"success": False, "error": f"Mot-cle interdit detecte: {word}"}
+
+            row_limit = min(row_limit, 1000)
+
+            pool = await manager.get_pool()
+            async with pool.acquire() as conn:
+                # Inject company_id as $1, add LIMIT if not present
+                query_sql = sql.strip().rstrip(";")
+                if "LIMIT" not in sql_stripped:
+                    query_sql += f" LIMIT {row_limit}"
+
+                rows = await asyncio.wait_for(
+                    conn.fetch(query_sql, company_id),
+                    timeout=10.0,
+                )
+
+                result_rows = [_serialize(dict(r)) for r in rows]
+
+            return {
+                "success": True,
+                "rows": result_rows,
+                "row_count": len(result_rows),
+                "truncated": len(result_rows) >= row_limit,
+            }
+        except asyncio.TimeoutError:
+            return {"success": False, "error": "Requete timeout (>10s). Simplifiez la requete."}
+        except Exception as e:
+            logger.error("execute_query error: %s", e)
             return {"success": False, "error": str(e)}
 
 

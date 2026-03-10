@@ -31,7 +31,9 @@ from .orchestration import (
     handle_banking_refresh,
     handle_banking_process,
     handle_banking_stop,
+    handle_banking_restart,
     handle_banking_delete,
+    handle_banking_dismiss_match,
 )
 
 __all__ = [
@@ -41,5 +43,7 @@ __all__ = [
     "handle_banking_refresh",
     "handle_banking_process",
     "handle_banking_stop",
+    "handle_banking_restart",
     "handle_banking_delete",
+    "handle_banking_dismiss_match",
 ]

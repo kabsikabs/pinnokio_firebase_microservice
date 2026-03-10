@@ -11,6 +11,77 @@ from .firebase_client import get_firestore
 
 logger = logging.getLogger("maintenance_tasks")
 
+@celery_app.task(name='app.maintenance_tasks.cleanup_unverified_users')
+def cleanup_unverified_users(max_age_hours: int = 1):
+    """
+    Supprime les utilisateurs Firebase dont l'email n'est pas vérifié
+    et dont le compte a été créé il y a plus de `max_age_hours` heures.
+
+    Exécutée toutes les 15 minutes par Celery Beat.
+    """
+    try:
+        from firebase_admin import auth as firebase_auth
+        from .firebase_client import get_firebase_app
+
+        app = get_firebase_app()
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+        deleted_count = 0
+        checked_count = 0
+
+        # Iterate through all Firebase Auth users
+        page = firebase_auth.list_users(max_results=1000, app=app)
+        while page:
+            for user in page.users:
+                checked_count += 1
+
+                # Skip verified users and users without email
+                if user.email_verified or not user.email:
+                    continue
+
+                # Skip users with Google/OAuth providers (always verified)
+                has_password_provider = any(
+                    p.provider_id == 'password' for p in user.provider_data
+                )
+                if not has_password_provider:
+                    continue
+
+                # Check creation time
+                if user.user_metadata and user.user_metadata.creation_timestamp:
+                    created_at = datetime.fromtimestamp(
+                        user.user_metadata.creation_timestamp / 1000,
+                        tz=timezone.utc
+                    )
+                    if created_at < cutoff:
+                        try:
+                            firebase_auth.delete_user(user.uid, app=app)
+                            deleted_count += 1
+                            logger.info(
+                                "cleanup_unverified_user uid=%s email=%s created_at=%s",
+                                user.uid, user.email, created_at.isoformat()
+                            )
+                        except Exception as e:
+                            logger.error(
+                                "cleanup_unverified_user_delete_error uid=%s error=%s",
+                                user.uid, repr(e)
+                            )
+
+            page = page.get_next_page()
+
+        logger.info(
+            "cleanup_unverified_users_complete checked=%s deleted=%s cutoff=%s",
+            checked_count, deleted_count, cutoff.isoformat()
+        )
+        return {
+            "status": "success",
+            "checked": checked_count,
+            "deleted": deleted_count,
+            "cutoff": cutoff.isoformat(),
+        }
+    except Exception as e:
+        logger.error("cleanup_unverified_users_error error=%s", repr(e), exc_info=True)
+        return {"status": "error", "error": str(e)}
+
+
 @celery_app.task(name='app.maintenance_tasks.cleanup_expired_registries')
 def cleanup_expired_registries():
     """
@@ -216,6 +287,7 @@ def finalize_daily_chat_billing(target_date: str | None = None, days_back: int =
 
         for td in target_dates:
             # Collection group query sur tous les token_usage (clients/*/token_usage/*)
+            # Requiert index composite collection group: billing_kind ASC, billing_date ASC
             query = (
                 db.collection_group("token_usage")
                 .where(filter=FieldFilter("billing_kind", "==", "chat_daily"))

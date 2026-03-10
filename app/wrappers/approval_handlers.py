@@ -169,6 +169,11 @@ class ApprovalHandlers:
                 # Get document ID - department is determined by ID prefix, not a field
                 doc_id = item.get("id", "")
 
+                # Only show items with status 'pending' (skip completed/rejected/approved)
+                item_status = item.get("status", "pending")
+                if item_status not in ("pending",):
+                    continue
+
                 if doc_id.startswith("router_"):
                     # Use base formatter for Router (already has all fields)
                     approval_item = self._format_approval_item(item)
@@ -225,10 +230,17 @@ class ApprovalHandlers:
         item = _serialize_value(item)
         confidence_score = item.get("confidence_score", 0)
 
-        # Calculate confidence color
-        if confidence_score >= 0.8:
+        # Normalize confidence: workers store 0-100 (percent), normalize to 0-1 for display
+        confidence_unit = item.get("confidence_unit", "")
+        if confidence_unit == "percent_0_100" or confidence_score > 1.0:
+            confidence_normalized = confidence_score / 100.0
+        else:
+            confidence_normalized = confidence_score
+
+        # Calculate confidence color (on 0-1 scale)
+        if confidence_normalized >= 0.8:
             confidence_color = "green"
-        elif confidence_score >= 0.5:
+        elif confidence_normalized >= 0.5:
             confidence_color = "yellow"
         else:
             confidence_color = "red"
@@ -253,8 +265,8 @@ class ApprovalHandlers:
             "account": item.get("account", ""),
             # Agent note comes from context_payload.selected_motivation
             "agentNote": context_payload.get("selected_motivation", "") or item.get("agent_note", ""),
-            "confidenceScore": confidence_score,
-            "confidenceScoreStr": f"{int(confidence_score * 100)}%",
+            "confidenceScore": confidence_normalized,
+            "confidenceScoreStr": f"{int(confidence_normalized * 100)}%",
             "confidenceColor": confidence_color,
             # Drive file ID for document viewer modal URL
             "driveFileId": drive_file_id,
@@ -286,68 +298,164 @@ class ApprovalHandlers:
         Formate un item d'approbation Banker avec tous les champs selon le mode.
 
         Modes:
-        - gl_entry: Écritures comptables manuelles
-        - expense_entry: Réconciliation avec note de frais
-        - counterpart_exists (invoice): Réconciliation avec facture existante
+        - gl_entry: Écritures comptables manuelles (no_counterpart)
+        - expense_entry: Réconciliation avec note de frais (no_counterpart)
+        - counterpart_exists: Réconciliation avec facture existante
+
+        Données structurées du worker (nested):
+        - context_payload: snapshot transaction + accounting_lines + expense info
+        - dropdown_options: accounts, taxes, currencies, expense_reports, invoices
+        - editable_fields: schéma de formulaire par mode
         """
         # Serialize to handle Firestore DatetimeWithNanoseconds
         item = _serialize_value(item)
         base = self._format_approval_item(item)
-        
-        # Mode detection
-        entry_type = item.get("entry_type", "expense_entry")  # gl_entry | expense_entry
-        bank_case = item.get("bank_case", "")  # counterpart_exists = invoice mode
-        
-        # Banker specific fields (tous modes)
+
+        # Extract nested containers (worker stores data in structured dicts)
+        ctx = item.get("context_payload", {}) or {}
+        dropdown = item.get("dropdown_options", {}) or {}
+        editable = item.get("editable_fields", {}) or {}
+
+        # Mode detection (nested first, then flat fallback)
+        entry_type = ctx.get("entry_type") or item.get("entry_type", "expense_entry")
+        bank_case = ctx.get("bank_case") or item.get("bank_case", "")
+
+        # Resolve effective mode for frontend
+        # counterpart_exists → invoice_reconciliation (overrides entry_type)
+        effective_entry_type = "invoice_reconciliation" if bank_case == "counterpart_exists" else entry_type
+
+        # Transaction details from context_payload
+        tx_amount = ctx.get("transaction_amount") or item.get("transaction_amount", 0)
+        tx_currency = ctx.get("transaction_currency") or item.get("currency", "CHF")
+
+        # Banker specific fields (all modes)
         base.update({
-            "entryType": entry_type,
+            "entryType": effective_entry_type,
             "bankCase": bank_case,
-            "transactionId": item.get("transaction_id", ""),
-            "batchId": item.get("batch_id", ""),
-            "transactionAmount": item.get("transaction_amount", 0),
-            "transactionAmountStr": self._format_amount(
-                item.get("transaction_amount", 0),
-                item.get("currency", "EUR")
-            ),
-            "transactionAmountColor": (
-                "red" if item.get("transaction_amount", 0) < 0 else "green"
-            ),
-            "currency": item.get("currency", "EUR"),
+            "transactionId": ctx.get("transaction_id") or item.get("transaction_id", ""),
+            "batchId": ctx.get("batch_id") or item.get("batch_id", ""),
+            "transactionAmount": tx_amount,
+            "transactionAmountStr": self._format_amount(tx_amount, tx_currency),
+            "transactionAmountColor": "red" if tx_amount < 0 else "green",
+            "currency": tx_currency,
+            "transactionDate": ctx.get("transaction_date", ""),
+            "transactionPaymentRef": ctx.get("transaction_payment_ref", ""),
+            "transactionRef": ctx.get("transaction_ref", ""),
         })
-        
-        # GL Entry mode - Écritures comptables manuelles
-        if entry_type == "gl_entry":
+
+        # ── Accounting lines (GL + Expense modes) ──
+        raw_lines = ctx.get("accounting_lines") or item.get("accounting_lines", [])
+        if raw_lines:
+            # Normalize lines: resolve account names from dropdown if missing
+            accounts_list = dropdown.get("accounts", [])
+            accounts_map = {}
+            for a in accounts_list:
+                aid = a.get("id") or a.get("account_id")
+                if aid:
+                    accounts_map[int(aid)] = a
+
+            normalized_lines = []
+            for line in raw_lines:
+                nl = dict(line)
+                acct_id = nl.get("account_id")
+                if acct_id and not nl.get("account_name") and int(acct_id) in accounts_map:
+                    acct = accounts_map[int(acct_id)]
+                    nl["account_name"] = acct.get("name", "")
+                    nl["account_number"] = acct.get("code") or acct.get("account_number", "")
+                normalized_lines.append(nl)
+            base["accountingLines"] = normalized_lines
+
+        # ── GL Entry mode ──
+        if effective_entry_type == "gl_entry":
+            # Build glLines for read-only summary (backward compat)
+            gl_lines = []
+            for line in (normalized_lines if raw_lines else []):
+                if line.get("role") == "bank" and line.get("locked"):
+                    continue  # Skip locked bank line from summary
+                gl_lines.append({
+                    "accountNumber": line.get("account_number", ""),
+                    "accountName": line.get("account_name", ""),
+                    "description": line.get("description") or line.get("name", ""),
+                    "debit": line.get("debit", 0),
+                    "credit": line.get("credit", 0),
+                })
+            base["glLines"] = gl_lines
+
+        # ── Expense Entry mode ──
+        if effective_entry_type == "expense_entry":
             base.update({
-                "accountingLines": item.get("accounting_lines", []),
-                "glTotals": item.get("gl_totals", {}),  # debit, credit, matches
+                "selectedExpenseJobId": ctx.get("selected_expense_job_id", ""),
+                "expenseData": {
+                    "supplier": ctx.get("expense_supplier", ""),
+                    "concern": ctx.get("expense_concern", ""),
+                    "description": ctx.get("expense_concern") or ctx.get("expense_supplier", ""),
+                    "category": ctx.get("expense_concern", ""),
+                    "date": ctx.get("expense_date", ""),
+                    "amount": ctx.get("expense_amount", 0),
+                    "currency": ctx.get("expense_currency", ""),
+                    "paymentMethod": ctx.get("expense_payment_method", ""),
+                    "baseCurrencyAmount": ctx.get("transaction_amount_base_estimate") or tx_amount,
+                    "vatAmount": 0,  # Computed from tax_ids if needed
+                },
             })
-        
-        # Expense mode - Réconciliation avec note de frais
-        if entry_type == "expense_entry":
-            base.update({
-                "expenseReportId": item.get("expense_report_id", ""),
-                "selectedExpenseAccount": item.get("selected_expense_account", ""),
-                "selectedTaxIds": item.get("selected_tax_ids", []),
-                "expenseDetails": item.get("expense_details", {}),
-            })
-        
-        # Invoice reconcile mode - Réconciliation avec facture
-        if bank_case == "counterpart_exists":
-            base.update({
-                "selectedInvoiceId": item.get("selected_invoice_id", ""),
-                "selectedInvoiceIds": item.get("selected_invoice_ids", []),  # Multi-select
-                "fullReconcile": item.get("full_reconcile", True),
-                "invoiceCandidates": item.get("invoice_candidates", []),
-                "sortNewestFirst": item.get("sort_newest_first", True),
-            })
-        
-        # Fields UI metadata (dropdowns, options)
-        base.update({
-            "fieldsUI": item.get("fields_ui", []),  # Dynamic form fields
-            "availableAccounts": item.get("available_accounts", []),
-            "availableTaxes": item.get("available_taxes", []),
-        })
-        
+
+        # ── Invoice Reconciliation mode ──
+        if effective_entry_type == "invoice_reconciliation":
+            # Build invoice candidates from dropdown_options
+            contact_type = ctx.get("odoo_contact_type") or "supplier"
+            # Try supplier first, then customer; fallback: try both if primary is empty
+            raw_invoices = dropdown.get("supplier_invoices", []) if contact_type == "supplier" else dropdown.get("customer_invoices", [])
+            if not raw_invoices:
+                raw_invoices = dropdown.get("supplier_invoices", []) or dropdown.get("customer_invoices", [])
+
+            selected_ids = ctx.get("odoo_move_id") or []
+            if isinstance(selected_ids, int):
+                selected_ids = [selected_ids]
+            elif not isinstance(selected_ids, list):
+                selected_ids = []
+
+            candidates = []
+            for inv in raw_invoices:
+                inv_id = inv.get("invoice_id") or inv.get("id")
+                raw_date = inv.get("invoice_date", "")
+                # Normalize ISO datetime to date string (2026-02-06T00:00:00+00:00 → 2026-02-06)
+                if isinstance(raw_date, str) and "T" in raw_date:
+                    raw_date = raw_date.split("T")[0]
+                candidates.append({
+                    "id": str(inv_id),
+                    "invoiceRef": inv.get("supplier_invoice_ref") or inv.get("invoice_ref", ""),
+                    "invoiceDate": raw_date,
+                    "amount": inv.get("amount_total_in_currency_signed") or inv.get("amount", 0),
+                    "amountSigned": inv.get("amount_total_signed") or inv.get("amount_total_in_currency_signed") or 0,
+                    "currency": inv.get("currency_code") or tx_currency,
+                    "supplierName": inv.get("supplier_name", ""),
+                    "isSelected": inv_id in selected_ids if inv_id else False,
+                })
+            base["invoiceCandidates"] = candidates
+            base["selectedInvoiceIds"] = [str(sid) for sid in selected_ids]
+            base["reconcileMode"] = ctx.get("reconcile") or "full_reconcile"
+            base["contactType"] = contact_type
+            base["partnerName"] = ctx.get("odoo_partner_name", "")
+            base["totalInvoiceBalance"] = ctx.get("total_invoice_balance", 0)
+            base["invoiceDifference"] = ctx.get("difference", 0)
+
+        # ── Dropdown options (all modes) ──
+        base["availableAccounts"] = dropdown.get("accounts", [])
+        base["availableTaxes"] = dropdown.get("taxes", [])
+        base["availableCurrencies"] = dropdown.get("currencies", [])
+        base["availableExpenseReports"] = dropdown.get("expense_reports", [])
+        base["availableInvoices"] = dropdown.get(
+            "supplier_invoices", dropdown.get("customer_invoices", [])
+        )
+        base["reconcileModes"] = dropdown.get("reconcile_modes", [
+            {"value": "full_reconcile", "label": "Complète"},
+            {"value": "partial_reconcile", "label": "Partielle"},
+        ])
+
+        # ── Editable fields schema ──
+        base["editableFields"] = editable
+        base["dropdownOptions"] = dropdown
+
         return base
 
     def _format_apbookeeper_item(self, item: Dict) -> Dict[str, Any]:
@@ -570,7 +678,8 @@ class ApprovalHandlers:
                             item_id=item_id,
                             selected_service=decision.get("selectedService", ""),
                             selected_fiscal_year=decision.get("selectedFiscalYear", ""),
-                            user_id=user_id
+                            user_id=user_id,
+                            instructions=decision.get("instructions", ""),
                         )
                     else:
                         # Process rejection
@@ -673,8 +782,9 @@ class ApprovalHandlers:
                             firebase.process_banker_approval,
                             mandate_path=mandate_path,
                             item_id=item_id,
-                            batch_id=decision.get("batchId", ""),
-                            user_id=user_id
+                            user_id=user_id,
+                            instructions=decision.get("instructions", ""),
+                            updated_data=decision.get("updatedData"),
                         )
                     else:
                         result = await asyncio.to_thread(

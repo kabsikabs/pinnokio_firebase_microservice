@@ -37,6 +37,7 @@ WORKER_PORTS = {
     "router": 8080,
     "apbookeeper": 8081,
     "bankbookeeper": 8082,
+    # llm_worker n'écoute pas sur un port (BRPOP Redis), pas de check port
 }
 
 # Worker configurations: cwd must match repo checkout paths in Codespace
@@ -55,6 +56,11 @@ WORKER_CONFIG = {
         "cwd": "/workspaces/klk_bank",
         "cmd": ["python", "main.py"],
         "log": "/tmp/klk_bank.log",
+    },
+    "llm_worker": {
+        "cwd": "/workspaces/pinnokio_agentic_worker",
+        "cmd": ["python", "-m", "pinnokio_worker.main"],
+        "log": "/tmp/pinnokio_llm_worker.log",
     },
 }
 

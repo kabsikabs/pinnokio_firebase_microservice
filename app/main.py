@@ -1047,6 +1047,14 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
 
         return _accounting_wrapper, "ACCOUNTING"
 
+    # === FIXED_ASSETS (Neon PostgreSQL - Fixed Assets / Immobilisations) ===
+    if method.startswith("FIXED_ASSETS."):
+        name = method.split(".", 1)[1]
+        from .fixed_asset_rpc_handlers import get_fixed_asset_handlers
+        target = getattr(get_fixed_asset_handlers(), name, None)
+        if callable(target):
+            return target, "FIXED_ASSETS"
+
     # === DASHBOARD (Next.js Dashboard - NEW) ===
     # Ce namespace est NOUVEAU et ne modifie pas les méthodes existantes
     # Endpoints: DASHBOARD.full_data, DASHBOARD.get_metrics, DASHBOARD.invalidate_cache
@@ -1233,6 +1241,10 @@ async def rpc_endpoint(req: RpcRequest, authorization: str | None = Header(defau
         elif _ns == "ACCOUNTING":
             # ACCOUNTING: Pas d'injection - les methodes utilisent mandate_path
             # fourni explicitement dans kwargs par le caller
+            pass
+
+        elif _ns == "FIXED_ASSETS":
+            # FIXED_ASSETS: Pas d'injection - les methodes utilisent mandate_path
             pass
 
         elif _ns == "DASHBOARD":
@@ -2951,6 +2963,24 @@ async def websocket_endpoint(ws: WebSocket):
                         )
                         logger.info(f"[WS] Company settings create_fiscal_folders handled - uid={uid}")
 
+                    elif msg_type == "company_settings.save_erp_connections":
+                        from .frontend.pages.company_settings import handle_save_erp_connection
+                        await handle_save_erp_connection(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings save_erp_connection handled - uid={uid}")
+
+                    elif msg_type == "company_settings.test_erp_connection":
+                        from .frontend.pages.company_settings import handle_test_erp_connection
+                        await handle_test_erp_connection(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Company settings test_erp_connection handled - uid={uid}")
+
                     elif msg_type == "company_settings.save_email_settings":
                         from .frontend.pages.company_settings import handle_save_email_settings
                         await handle_save_email_settings(
@@ -3212,6 +3242,15 @@ async def websocket_endpoint(ws: WebSocket):
                         )
                         logger.info(f"[WS] Banking stop handled - uid={uid}")
 
+                    elif msg_type == "banking.restart":
+                        from .frontend.pages.banking import handle_banking_restart
+                        await handle_banking_restart(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] Banking restart handled - uid={uid}")
+
                     elif msg_type == "banking.delete":
                         from .frontend.pages.banking import handle_banking_delete
                         await handle_banking_delete(
@@ -3340,6 +3379,153 @@ async def websocket_endpoint(ws: WebSocket):
                             payload=msg_payload
                         )
                         logger.info(f"[WS] HR settings_update handled - uid={uid}")
+
+                    # ============================================
+                    # FIXED ASSETS EVENTS (Immobilisations - PostgreSQL Neon)
+                    # ============================================
+                    elif msg_type == "fixed_assets.orchestrate_init":
+                        from .frontend.pages.fixed_assets.orchestration import handle_orchestrate_init as handle_fa_orchestrate_init
+                        await handle_fa_orchestrate_init(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] FA orchestrate_init handled - uid={uid}")
+
+                    elif msg_type == "fixed_assets.refresh":
+                        from .frontend.pages.fixed_assets.orchestration import handle_refresh as handle_fa_refresh
+                        await handle_fa_refresh(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] FA refresh handled - uid={uid}")
+
+                    elif msg_type == "fixed_assets.asset_get":
+                        from .frontend.pages.fixed_assets.orchestration import handle_asset_get as handle_fa_asset_get
+                        await handle_fa_asset_get(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] FA asset_get handled - uid={uid}")
+
+                    elif msg_type == "fixed_assets.asset_create":
+                        from .frontend.pages.fixed_assets.orchestration import handle_asset_create as handle_fa_asset_create
+                        await handle_fa_asset_create(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] FA asset_create handled - uid={uid}")
+
+                    elif msg_type == "fixed_assets.asset_update":
+                        from .frontend.pages.fixed_assets.orchestration import handle_asset_update as handle_fa_asset_update
+                        await handle_fa_asset_update(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] FA asset_update handled - uid={uid}")
+
+                    elif msg_type == "fixed_assets.asset_delete":
+                        from .frontend.pages.fixed_assets.orchestration import handle_asset_delete as handle_fa_asset_delete
+                        await handle_fa_asset_delete(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] FA asset_delete handled - uid={uid}")
+
+                    elif msg_type == "fixed_assets.asset_confirm":
+                        from .frontend.pages.fixed_assets.orchestration import handle_asset_confirm as handle_fa_asset_confirm
+                        await handle_fa_asset_confirm(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] FA asset_confirm handled - uid={uid}")
+
+                    elif msg_type == "fixed_assets.asset_reset_draft":
+                        from .frontend.pages.fixed_assets.orchestration import handle_asset_reset_draft as handle_fa_asset_reset_draft
+                        await handle_fa_asset_reset_draft(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] FA asset_reset_draft handled - uid={uid}")
+
+                    elif msg_type == "fixed_assets.asset_dispose":
+                        from .frontend.pages.fixed_assets.orchestration import handle_asset_dispose as handle_fa_asset_dispose
+                        await handle_fa_asset_dispose(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] FA asset_dispose handled - uid={uid}")
+
+                    elif msg_type == "fixed_assets.run_depreciation":
+                        from .frontend.pages.fixed_assets.orchestration import handle_run_depreciation as handle_fa_run_depreciation
+                        await handle_fa_run_depreciation(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] FA run_depreciation handled - uid={uid}")
+
+                    elif msg_type == "fixed_assets.reverse_depreciation":
+                        from .frontend.pages.fixed_assets.orchestration import handle_reverse_depreciation as handle_fa_reverse_depreciation
+                        await handle_fa_reverse_depreciation(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] FA reverse_depreciation handled - uid={uid}")
+
+                    elif msg_type == "fixed_assets.generate_pdf":
+                        from .frontend.pages.fixed_assets.orchestration import handle_generate_pdf as handle_fa_generate_pdf
+                        await handle_fa_generate_pdf(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] FA generate_pdf handled - uid={uid}")
+
+                    elif msg_type == "fixed_assets.asset_report":
+                        from .frontend.pages.fixed_assets.orchestration import handle_asset_report as handle_fa_asset_report
+                        await handle_fa_asset_report(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] FA asset_report handled - uid={uid}")
+
+                    elif msg_type == "fixed_assets.model_create":
+                        from .frontend.pages.fixed_assets.orchestration import handle_model_create as handle_fa_model_create
+                        await handle_fa_model_create(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] FA model_create handled - uid={uid}")
+
+                    elif msg_type == "fixed_assets.model_update":
+                        from .frontend.pages.fixed_assets.orchestration import handle_model_update as handle_fa_model_update
+                        await handle_fa_model_update(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] FA model_update handled - uid={uid}")
+
+                    elif msg_type == "fixed_assets.model_delete":
+                        from .frontend.pages.fixed_assets.orchestration import handle_model_delete as handle_fa_model_delete
+                        await handle_fa_model_delete(
+                            uid=uid,
+                            session_id=session_id,
+                            payload=msg_payload
+                        )
+                        logger.info(f"[WS] FA model_delete handled - uid={uid}")
 
                     # ============================================
                     # COCKPIT DASHBOARD EVENTS

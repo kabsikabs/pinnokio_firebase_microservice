@@ -97,6 +97,15 @@ class BulkMatchingSuggestionEngine:
         ar_index = self._build_amount_index(ar_invoices or [], "amount")
         transfer_index = self._build_transfer_index(transactions)
 
+        # ── Pre-phase: Build dismissed index per TX ──
+        # { tx_id: set(cand_key, ...) }
+        tx_dismissed: Dict[str, set] = {}
+        for tx in transactions:
+            tx_id_str = str(tx.get("id", ""))
+            dismissed = (tx.get("match_suggestions") or {}).get("dismissed") or []
+            if dismissed:
+                tx_dismissed[tx_id_str] = set(dismissed)
+
         # ── Phase 1: Score all TX↔candidate pairs ──
         # Collect ALL (tx_id, candidate_key, score, suggestion) tuples
         all_pairs: List[Tuple[str, str, float, Dict]] = []
@@ -146,6 +155,9 @@ class BulkMatchingSuggestionEngine:
         claimed: set = set()
 
         for tx_id, cand_key, score, suggestion in all_pairs:
+            # Skip if candidate was dismissed by user for this TX
+            if cand_key in tx_dismissed.get(tx_id, set()):
+                continue
             # Skip if candidate already assigned to a higher-scoring TX
             if cand_key in claimed:
                 continue
@@ -165,9 +177,11 @@ class BulkMatchingSuggestionEngine:
             transfer = transfer_index.get(tx_id_str)
             matches = tx_matches.get(tx_id_str, [])
 
+            dismissed = list(tx_dismissed.get(tx_id_str, set()))
             results[tx_id_str] = {
                 "top_matches": [] if transfer else matches,
                 "transfer_match": transfer,
+                "dismissed": dismissed,
                 "scored_at": scored_at,
             }
 
@@ -410,6 +424,8 @@ class BulkMatchingSuggestionEngine:
         Score a single candidate against all TX and update their match_suggestions
         in-place. Replaces existing suggestion if the new score is higher.
 
+        Respects dismissed list: candidates dismissed by the user are skipped.
+
         Returns list of tx dicts that were updated (for WSS push).
         """
         scores = self.score_single_candidate(candidate, candidate_type, transactions)
@@ -427,9 +443,15 @@ class BulkMatchingSuggestionEngine:
 
             # Get or init existing suggestions
             existing = tx.get("match_suggestions") or {
-                "top_matches": [], "transfer_match": None, "scored_at": None
+                "top_matches": [], "transfer_match": None, "scored_at": None,
+                "dismissed": [],
             }
             top_matches: List[Dict] = list(existing.get("top_matches") or [])
+
+            # Skip if this candidate was dismissed by the user
+            dismissed = existing.get("dismissed") or []
+            if cand_key in dismissed:
+                continue
 
             # Check if this candidate already exists in top_matches
             replaced = False

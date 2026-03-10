@@ -200,11 +200,12 @@ class RedisSubscriber:
     }
 
     # Fixed channel suffixes per user (ElastiCache Serverless compatible — no psubscribe)
+    # NOTE: job_chats retiré — migré vers queue:job_chat_dispatch (BRPOP)
+    # pour éviter doublons multi-instance et perte si 0 subscriber
     USER_CHANNEL_SUFFIXES = [
         "notifications",
         "direct_message_notif",
         "task_manager",
-        "job_chats",
         "pending_approval",
     ]
 
@@ -500,6 +501,7 @@ class RedisSubscriber:
             from datetime import datetime, timezone
             return datetime.now(timezone.utc).isoformat()
         return v
+
 
     def _resolve_notification_doc_id(self, message_data: Dict[str, Any]) -> str:
         """
@@ -1447,8 +1449,8 @@ class RedisSubscriber:
             return "APBookkeeper"
         elif dept_lower == "router":
             return "Router"
-        elif dept_lower in ("banker", "bank"):
-            return "Banker"
+        elif dept_lower in ("banker", "bank", "bankbookeeper"):
+            return "Bankbookeeper"
         elif dept_lower in ("chat", "chat_usage", "chat_daily"):
             return "Chat"
         elif dept_lower in ("exbookeeper", "ex_bookeeper"):
@@ -1620,13 +1622,61 @@ class RedisSubscriber:
                     if "confidence" in router_data:
                         existing_item["routeConfidence"] = float(router_data["confidence"] or 0)
 
-                # Banker
-                banker_data = dept_data.get("Banker") or dept_data.get("banker") or {}
+                # Bankbookeeper (klk_bank écrit "Bankbookeeper", legacy "Banker"/"banker")
+                banker_data = (
+                    dept_data.get("Bankbookeeper", {})
+                    or dept_data.get("Banker", {})
+                    or dept_data.get("banker", {})
+                    or {}
+                )
                 if banker_data:
-                    if "bank_account" in banker_data:
+                    # Champs initiaux (persist depuis job_actions_handler)
+                    if "bank_account_name" in banker_data:
+                        existing_item["bankAccount"] = banker_data["bank_account_name"]
+                    elif "bank_account" in banker_data:
                         existing_item["bankAccount"] = banker_data["bank_account"]
                     if "transaction_type" in banker_data:
                         existing_item["transactionType"] = banker_data["transaction_type"]
+                    # Champs de transaction (persist initial)
+                    if "txn_amount" in banker_data:
+                        existing_item["txnAmount"] = float(banker_data["txn_amount"] or 0)
+                    if "txn_currency" in banker_data:
+                        existing_item["txnCurrency"] = banker_data["txn_currency"]
+                    if "transaction_date" in banker_data:
+                        existing_item["transactionDate"] = banker_data["transaction_date"]
+                    if "description" in banker_data:
+                        existing_item["txnDescription"] = banker_data["description"]
+                    if "partner_name" in banker_data:
+                        existing_item["partnerName"] = banker_data["partner_name"]
+                    if "payment_ref" in banker_data:
+                        existing_item["paymentRef"] = banker_data["payment_ref"]
+                    # Champs de réconciliation (après traitement)
+                    if "step_label" in banker_data:
+                        existing_item["currentStep"] = banker_data["step_label"]
+                    if "result_code" in banker_data:
+                        existing_item["resultCode"] = banker_data["result_code"]
+                    # Détails de réconciliation (invoice, GL entry, expense)
+                    recon = banker_data.get("reconciliation_details")
+                    if isinstance(recon, dict):
+                        existing_item["reconciliationDetails"] = recon
+                        method = recon.get("method", "")
+                        if method == "invoice":
+                            if "partner_name" in recon:
+                                existing_item["partnerName"] = recon["partner_name"]
+                            if "invoice_ref" in recon:
+                                existing_item["invoiceRef"] = recon["invoice_ref"]
+                            if "reconciliation_type" in recon:
+                                existing_item["reconciliationType"] = recon["reconciliation_type"]
+                        elif method == "gl_entry":
+                            if "account_name" in recon:
+                                existing_item["glAccountName"] = recon["account_name"]
+                            if "account_number" in recon:
+                                existing_item["glAccountNumber"] = recon["account_number"]
+                        elif method == "expense_entry":
+                            if "expense_supplier" in recon:
+                                existing_item["partnerName"] = recon["expense_supplier"]
+                            if "expense_concern" in recon:
+                                existing_item["expenseConcern"] = recon["expense_concern"]
 
             # Reconstruire avec wrapper
             if is_wrapped:
@@ -1667,9 +1717,14 @@ class RedisSubscriber:
             # Normaliser le département pour le frontend (attend "router"|"banker"|"apbookeeper")
             _PENDING_DEPT_MAP = {
                 "routing": "router",
+                "router": "router",
                 "banking": "banker",
+                "banker": "banker",
                 "bankbookeeper": "banker",
+                "bank": "banker",
                 "accounting": "apbookeeper",
+                "apbookeeper": "apbookeeper",
+                "invoices": "apbookeeper",
             }
             department = _PENDING_DEPT_MAP.get(raw_department.lower(), raw_department.lower()) if raw_department else ""
 

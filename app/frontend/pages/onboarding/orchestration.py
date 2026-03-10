@@ -451,7 +451,20 @@ async def handle_submit(
             )
             logger.info(f"[ONBOARDING FLOW] initiate_oauth_flow result: {oauth_result}")
 
-            if oauth_result.get("success") and oauth_result.get("requires_oauth"):
+            if not oauth_result.get("success"):
+                # OAuth initiation FAILED — log error but continue to DMS
+                # (DMS can still work with service account credentials)
+                oauth_error = oauth_result.get("error", "unknown")
+                logger.warning(f"[ONBOARDING FLOW] ⚠️ OAuth initiation FAILED: {oauth_error} — continuing with service account")
+                await hub.broadcast(uid, {
+                    "type": WS_EVENTS.ONBOARDING.PROGRESS,
+                    "payload": {
+                        "step": "google_auth",
+                        "status": "completed",
+                        "message": f"OAuth skipped (config error), using service account"
+                    }
+                })
+            elif oauth_result.get("requires_oauth"):
                 # Send OAuth URL to frontend
                 auth_url = oauth_result.get("auth_url")
                 logger.info(f"[ONBOARDING FLOW] 📤 Envoi OAUTH_URL event")
@@ -471,7 +484,6 @@ async def handle_submit(
                 return
             else:
                 logger.info("[ONBOARDING FLOW] OAuth non requis finalement, continuation...")
-                # OAuth not actually required, continue to DMS
                 await hub.broadcast(uid, {
                     "type": WS_EVENTS.ONBOARDING.PROGRESS,
                     "payload": {

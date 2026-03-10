@@ -11,6 +11,7 @@ Architecture:
 """
 
 import json
+import os
 import uuid
 import logging
 from datetime import datetime, timezone
@@ -18,7 +19,6 @@ from typing import Any, Optional
 
 from ..redis_client import get_redis
 from ..config import get_settings
-from ..ecs_manager import ECSManager
 
 logger = logging.getLogger("llm_service.gateway")
 
@@ -54,14 +54,28 @@ class LLMGateway:
         return self._redis
 
     @staticmethod
-    def _ensure_llm_worker():
-        """Trigger ECS cold start for the LLM worker if not running."""
+    def _ensure_llm_worker() -> dict:
+        """Ensure LLM worker is running (ECS in PROD, LocalWorkerManager in LOCAL).
+
+        Returns:
+            dict with "status" key: "already_running", "starting", "provisioning", or "error"
+        """
         try:
+            environment = os.environ.get("PINNOKIO_ENVIRONMENT", "LOCAL").upper()
+            if environment == "LOCAL":
+                from ..local_worker_manager import LocalWorkerManager
+                result = LocalWorkerManager.ensure_worker_running("llm_worker")
+                if result.get("status") == "starting":
+                    logger.info("[LLM_GATEWAY] LOCAL cold start triggered for llm_worker")
+                return result
+            from ..ecs_manager import ECSManager
             result = ECSManager.ensure_worker_running("llm_worker")
             if result.get("status") == "starting":
-                logger.info("[LLM_GATEWAY] Cold start triggered for llm_worker")
+                logger.info("[LLM_GATEWAY] ECS cold start triggered for llm_worker")
+            return result
         except Exception as e:
             logger.warning(f"[LLM_GATEWAY] Cold start check failed (non-blocking): {e}")
+            return {"status": "error", "error": str(e)}
 
     async def enqueue_message(
         self,
@@ -424,17 +438,20 @@ class LLMGateway:
 
         try:
             self.redis.lpush(self.QUEUE_NAME, json.dumps(job))
-            self._ensure_llm_worker()
+            worker_result = self._ensure_llm_worker()
+            worker_status = worker_result.get("status", "unknown") if worker_result else "unknown"
 
             logger.info(
                 f"[LLM_GATEWAY] Job enqueued: {job_id[:8]}... "
-                f"type=start_onboarding_chat user={user_id} thread={thread_key}"
+                f"type=start_onboarding_chat user={user_id} thread={thread_key} "
+                f"worker={worker_status}"
             )
 
             return {
                 "status": "queued",
                 "job_id": job_id,
                 "message": "Onboarding chat enqueued",
+                "worker_status": worker_status,
             }
 
         except Exception as e:

@@ -19,13 +19,23 @@ import yaml
 from dotenv import load_dotenv
 load_dotenv()
 
+
+def _resolve_source() -> str:
+    """Resolve source from PINNOKIO_SOURCE, fallback to PINNOKIO_ENVIRONMENT."""
+    source = os.environ.get('PINNOKIO_SOURCE')
+    if source is None:
+        env = os.environ.get('PINNOKIO_ENVIRONMENT', 'PROD').upper()
+        return 'local' if env == 'LOCAL' else 'aws'
+    return source
+
+
 class PINNOKIO_DEPARTEMENTS:
     def __init__(self):
         self.aws_service=AWSManager()
     async def run_pinnokio_router(self,payload, source=None, check_health=False,mthd='default'):
         # URL du point de terminaison pour les différentes sources
         if source is None:
-            source = os.environ.get('PINNOKIO_SOURCE', 'aws')  # 'aws' comme valeur par défaut
+            source = _resolve_source()
         if mthd == 'single':
             final_payload = payload  # Utilise directement le dictionnaire fourni
         else:  # méthode par défaut
@@ -97,7 +107,7 @@ class PINNOKIO_DEPARTEMENTS:
         aws_url = 'http://klk-load-balancer-http-https-435479360.us-east-1.elb.amazonaws.com'
         local_url = 'http://127.0.0.1:8080'
         if source is None:
-            source = os.environ.get('PINNOKIO_SOURCE', 'aws')  # 'aws' comme valeur par défaut
+            source = _resolve_source()
         # Choix de l'URL en fonction de la source
         if source == 'docker':
             base_url = docker_url
@@ -153,7 +163,7 @@ class PINNOKIO_DEPARTEMENTS:
     async def async_run_pinnokio_onboarding(self,payload, source=None, check_health=False,mthd='default'):
         # URL du point de terminaison pour les différentes sources
         if source is None:
-            source = os.environ.get('PINNOKIO_SOURCE', 'aws')  # 'aws' comme valeur par défaut
+            source = _resolve_source()
         if mthd == 'single':
             final_payload = payload  # Utilise directement le dictionnaire fourni
         else:  # méthode par défaut
@@ -220,7 +230,7 @@ class PINNOKIO_DEPARTEMENTS:
         """Version synchrone de run_pinnokio_onboarding utilisant requests au lieu de aiohttp"""
         import requests
         if source is None:
-            source = os.environ.get('PINNOKIO_SOURCE', 'aws')  # 'aws' comme valeur par défaut
+            source = _resolve_source()
         # URL du point de terminaison pour les différentes sources
         if mthd == 'single':
             final_payload = payload  # Utilise directement le dictionnaire fourni
@@ -306,7 +316,7 @@ class PINNOKIO_DEPARTEMENTS:
         import os
         
         if source is None:
-            source = os.environ.get('PINNOKIO_SOURCE', 'aws')  # 'aws' comme valeur par défaut
+            source = _resolve_source()
         
         # Préparation du payload final
         if mthd == 'single':
@@ -372,7 +382,7 @@ class PINNOKIO_DEPARTEMENTS:
     def run_pinnokio_apbookeeper(self, payload, source=None, check_health=False, mthd='default'):
         # URL du point de terminaison pour les différentes sources
         if source is None:
-            source = os.environ.get('PINNOKIO_SOURCE', 'aws')  # 'aws' comme valeur par défaut
+            source = _resolve_source()
          # Traitement du payload selon la méthode
         if mthd == 'single':
             final_payload = payload  # Utilise directement le dictionnaire fourni
@@ -431,7 +441,7 @@ class PINNOKIO_DEPARTEMENTS:
         Envoie un signal d'arrêt à l'application Pinnokio APBookkeeper en cours
         """
         if source is None:
-            source = os.environ.get('PINNOKIO_SOURCE', 'aws')  # 'aws' comme valeur par défaut
+            source = _resolve_source()
         # Configuration des URLs
         docker_url = 'http://localhost:8080'
         aws_url = 'http://klk-load-balancer-http-https-435479360.us-east-1.elb.amazonaws.com'
@@ -489,7 +499,7 @@ class PINNOKIO_DEPARTEMENTS:
     def run_pinnokio_banker(self,payload, source=None, check_health=False,mthd='default'):
         
         if source is None:
-            source = os.environ.get('PINNOKIO_SOURCE', 'aws')  # 'aws' comme valeur par défaut
+            source = _resolve_source()
          # Traitement du payload selon la méthode
         if mthd == 'single':
             final_payload = payload  # Utilise directement le dictionnaire fourni
@@ -501,7 +511,7 @@ class PINNOKIO_DEPARTEMENTS:
         aws_url = 'http://klk-load-balancer-http-https-435479360.us-east-1.elb.amazonaws.com'
         local_url = 'http://127.0.0.1:8082'
         if source is None:
-            source = os.environ.get('PINNOKIO_SOURCE', 'aws')  # 'aws' comme valeur par défaut
+            source = _resolve_source()
         # Choix de l'URL en fonction de la source
         if source == 'docker':
             base_url = docker_url
@@ -558,7 +568,7 @@ class PINNOKIO_DEPARTEMENTS:
         """
         
         if source is None:
-            source = os.environ.get('PINNOKIO_SOURCE', 'aws')  # 'aws' comme valeur par défaut
+            source = _resolve_source()
         
         # URLs des points de terminaison pour les différentes sources
         docker_url = 'http://localhost:8080'

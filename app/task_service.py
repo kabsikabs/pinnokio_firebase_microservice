@@ -91,6 +91,12 @@ celery_app.conf.beat_schedule = {
         'task': 'app.maintenance_tasks.cleanup_expired_listeners',
         'schedule': 60.0,  # Toutes les minutes - Nettoie les listeners expirés
     },
+    # 🧹 Suppression comptes non vérifiés (email) après 1h
+    'cleanup-unverified-users': {
+        'task': 'app.maintenance_tasks.cleanup_unverified_users',
+        'schedule': 900.0,  # Toutes les 15 minutes
+        'kwargs': {'max_age_hours': 1},
+    },
     # 💳 Facturation chat journalière (veille UTC)
     'billing-finalize-daily-chat': {
         'task': 'app.maintenance_tasks.finalize_daily_chat_billing',

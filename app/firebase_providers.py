@@ -376,6 +376,7 @@ class FirebaseManagement:
             
             # Initialiser la structure de retour
             result = {
+                "to_process": [],
                 "processed": [],
                 "pending": [],
                 "in_process": {}  # Dict groupé par batch_id
@@ -456,14 +457,18 @@ class FirebaseManagement:
                         result["in_process"][batch_id] = []
                     
                     result["in_process"][batch_id].append(item)
-            
+
+                # Cas 4: Stopped/to_process/error/skipped -> to_process
+                elif status in ["stopped", "to_process", "error", "skipped"]:
+                    result["to_process"].append(data)
+
             return result
             
         except Exception as e:
             print(f"❌ Erreur get_banker_jobs_from_task_manager: {e}")
             import traceback
             traceback.print_exc()
-            return {"processed": [], "pending": [], "in_process": {}}
+            return {"to_process": [], "processed": [], "pending": [], "in_process": {}}
 
     def get_apbookeeper_jobs_from_task_manager(self, user_id: str, mandate_path: str) -> Dict[str, Any]:
         """
@@ -1230,7 +1235,7 @@ class FirebaseManagement:
                 mandate_path = current_data.get("mandate_path", None)
                 file_name = current_data.get("file_name", None)
                 department = current_data.get("department", None)
-                departement = current_data.get("departement", None)
+                departement = current_data.get("departement", None)  # legacy typo field
                 # timestamps possibles selon les writers
                 timestamp = current_data.get("timestamp", None)
                 updated_at = current_data.get("updated_at", None)
@@ -1253,7 +1258,7 @@ class FirebaseManagement:
                             **({"mandate_path": mandate_path} if mandate_path is not None else {}),
                             **({"file_name": file_name} if file_name is not None else {}),
                             **({"department": department} if department is not None else {}),
-                            **({"departement": departement} if departement is not None else {}),
+                            # NB: ne PAS re-écrire le champ typo "departement" — on utilise "department" uniquement
                             **({"timestamp": timestamp} if timestamp is not None else {}),
                             **({"updated_at": updated_at} if updated_at is not None else {}),
                             "purged": True,
@@ -2338,7 +2343,7 @@ class FirebaseManagement:
                 "payload": {...},           # Données du payload
                 "metrics": {...},            # Métriques de traitement (APBookeeper_step_status, etc.)
                 "initial_data": {...},       # Données depuis document/initial_data
-                "departement": str,          # Validation du département
+                "department": str,           # Validation du département
                 "found": bool                # Si le document existe
             }
             ou None si erreur
@@ -2393,7 +2398,7 @@ class FirebaseManagement:
                     "payload": {},
                     "metrics": {},
                     "initial_data": {},
-                    "departement": None
+                    "department": None
                 }
             
             # Utiliser l'ID du document réellement trouvé
@@ -2401,10 +2406,10 @@ class FirebaseManagement:
             task_data = task_doc.to_dict() or {}
             
             # Validation: vérifier que le département correspond (case-insensitive)
-            task_department = task_data.get('departement', '').lower()
-            # Aussi chercher dans le champ 'department' (sans 'e')
+            task_department = task_data.get('department', '').lower()
+            # Fallback: legacy typo field 'departement'
             if not task_department:
-                task_department = task_data.get('department', '').lower()
+                task_department = task_data.get('departement', '').lower()
             
             if task_department and task_department != department_lower:
                 print(f"⚠️ [TASK_MANAGER] Département mismatch: attendu={department_lower}, trouvé={task_department}")
@@ -2417,7 +2422,7 @@ class FirebaseManagement:
                 "found": True,
                 "job_id_clean": found_doc_id,
                 "job_id_original": job_id,
-                "departement": task_data.get('departement') or task_data.get('department', department),
+                "department": task_data.get('department') or task_data.get('departement', department),
                 "status": task_data.get('status', ''),
                 "uri_file_link": task_data.get('uri_file_link', ''),
                 "payload": {},
@@ -9872,23 +9877,15 @@ class FirebaseManagement:
         """
         Traite l'approbation d'un item Router.
 
+        Dispatch via queue:agentic_dispatch → handle_job_process() (pipeline standard).
+        Le worker reçoit le même payload qu'un job normal + approval_response_mode: True.
+
         1. Charge l'item depuis approval_pendinglist
-        2. Crée une notification avec approval_response_mode: true
-        3. Supprime l'item de approval_pendinglist
-        4. Publie sur Redis pour mise à jour temps réel
-
-        Args:
-            mandate_path: Chemin du mandat
-            item_id: ID de l'item (ex: "router_abc123")
-            selected_service: Service sélectionné par l'utilisateur
-            selected_fiscal_year: Année fiscale sélectionnée
-            user_id: ID de l'utilisateur Firebase
-            instructions: Instructions additionnelles (optionnel)
-
-        Returns:
-            bool: True si traitement réussi
+        2. Dispatch via queue:agentic_dispatch (pipeline standard)
+        3. Marque l'item comme 'approved' (status=completed) — le worker le supprimera après traitement
+        4. Publie sur Redis pour mise à jour temps réel dashboard
         """
-        import uuid
+        import json as json_mod
         from datetime import datetime, timezone
 
         try:
@@ -9906,65 +9903,71 @@ class FirebaseManagement:
             item_data = doc.to_dict()
             context_payload = item_data.get("context_payload", {})
 
-            # Extraire les informations nécessaires
             drive_file_id = context_payload.get("drive_file_id", "")
             file_name = context_payload.get("file_name", "") or item_data.get("file_name", "")
 
-            # Extraire company_id depuis mandate_path (format: bo_clients/{client}/mandates/{company})
             path_parts = mandate_path.split("/")
             company_id = path_parts[-1] if len(path_parts) >= 4 else ""
             client_uuid = path_parts[1] if len(path_parts) >= 2 else ""
 
-            # 2. Créer la notification avec approval_response_mode
-            batch_id = f"approval_batch_{uuid.uuid4().hex[:10]}"
-            notification_path = f"clients/{user_id}/notifications"
-
-            notification_data = {
-                "job_id": item_id,
-                "file_id": drive_file_id,
-                "file_name": file_name,
-                "function_name": "Router",
-                "status": "in_queue",
-                "read": False,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "collection_id": company_id,
-                "collection_name": company_id,
-                "batch_id": batch_id,
-                "approval_response_mode": True,  # ← Clé importante pour le jobbeur
-                "approval_status": "approved",
-                "selected_service": selected_service,
-                "selected_fiscal_year": selected_fiscal_year,
-                "instructions": instructions or "",
-                "user_id": user_id,
-                "client_uuid": client_uuid,
-                "mandates_path": mandate_path,
+            # 2. Dispatch via queue:agentic_dispatch → handle_job_process (pipeline standard)
+            dispatch_data = {
+                "uid": user_id,
+                "job_type": "router",
+                "payload": {
+                    "document_ids": [drive_file_id],
+                    "jobs_data": [{
+                        "file_name": str(file_name),
+                        "drive_file_id": str(drive_file_id),
+                        "job_id": str(drive_file_id),
+                        "instructions": instructions or "",
+                        "approval_required": False,
+                        "automated_workflow": True,
+                        "selected_service": selected_service,
+                        "selected_fiscal_year": selected_fiscal_year,
+                    }],
+                    "approval_response_mode": True,
+                },
+                "company_data": {
+                    "mandate_path": mandate_path,
+                    "company_id": company_id,
+                    "client_uuid": client_uuid,
+                },
+                "source": "approval_response",
             }
 
-            # Ajouter la notification
-            notifications_ref = self.db.collection(notification_path)
-            notifications_ref.document(item_id).set(notification_data)
-            logger.info(f"[APPROVAL] Notification created: {notification_path}/{item_id}")
-
-            # 3. Supprimer l'item de approval_pendinglist
-            doc_ref.delete()
-            logger.info(f"[APPROVAL] Item deleted from pendinglist: {pending_path}")
-
-            # 4. Supprimer aussi le contexte d'approbation s'il existe
-            context_path = f"{mandate_path}/approval_context/{item_id}"
             try:
-                context_ref = self.db.document(context_path)
-                if context_ref.get().exists:
-                    context_ref.delete()
-                    logger.info(f"[APPROVAL] Context deleted: {context_path}")
-            except Exception:
-                pass  # Le contexte peut ne pas exister
+                redis_client = self._get_redis()
+                if redis_client:
+                    redis_client.lpush(
+                        "queue:agentic_dispatch",
+                        json_mod.dumps(dispatch_data, default=str)
+                    )
+                    logger.info(f"[APPROVAL] Router dispatched to queue:agentic_dispatch for {item_id}")
+                else:
+                    logger.error(f"[APPROVAL] Redis client unavailable for router dispatch {item_id}")
+                    return False
+            except Exception as redis_err:
+                logger.error(f"[APPROVAL] Redis dispatch failed for router {item_id}: {redis_err}")
+                return False
 
-            # 5. Publier sur Redis pour mise à jour temps réel (action: remove)
+            # 3. Marquer l'item comme approved (le worker le supprimera après traitement)
+            doc_ref.update({
+                "status": "completed",
+                "approval_status": "approved",
+                "instructions": instructions or "",
+                "approved_by": user_id,
+                "approved_at": datetime.now(timezone.utc).isoformat(),
+            })
+            logger.info(f"[APPROVAL] Item marked as approved: {pending_path}")
+
+            # 4. Publier sur Redis pour mise à jour dashboard (action: remove — plus affiché en pending)
             self._publish_pending_approval_redis(
                 user_id=user_id,
                 company_id=company_id,
                 item_id=item_id,
-                action="remove"
+                action="remove",
+                department="routing"
             )
 
             logger.info(f"[APPROVAL] Router approval processed successfully: {item_id}")
@@ -10044,6 +10047,7 @@ class FirebaseManagement:
                 # Mettre à jour le statut
                 update_data = {
                     "status": "rejected",
+                    "approval_status": "rejected",
                     "rejection_reason": rejection_reason,
                     "instructions": instructions or "",
                     "rejected_by": user_id,
@@ -10052,12 +10056,12 @@ class FirebaseManagement:
                 doc_ref.update(update_data)
                 logger.info(f"[APPROVAL] Item marked as rejected: {pending_path}")
 
-                # Publier sur Redis (action: update)
+                # Publier sur Redis (action: remove — plus affiché en pending)
                 self._publish_pending_approval_redis(
                     user_id=user_id,
                     company_id=company_id,
                     item_id=item_id,
-                    action="update",
+                    action="remove",
                     data={"status": "rejected", "rejection_reason": rejection_reason}
                 )
 
@@ -10123,20 +10127,25 @@ class FirebaseManagement:
         item_id: str,
         user_id: str,
         instructions: str = None,
+        updated_data: dict = None,
         **extra_fields
     ) -> bool:
         """
         Traite l'approbation d'un item Banker.
 
+        Dispatch via queue:agentic_dispatch → handle_job_process() (pipeline standard).
+        Le worker reçoit le même payload qu'un job normal + approval_response_mode: True.
+
         1. Charge l'item depuis approval_pendinglist
-        2. Crée une notification avec approval_response_mode: true
-        3. Supprime l'item de approval_pendinglist
-        4. Publie sur Redis pour mise à jour temps réel
+        2. Dispatch via queue:agentic_dispatch (pipeline standard)
+        3. Marque l'item comme 'approved' (status=completed) — le worker le supprimera après traitement
+        4. Publie sur Redis pour mise à jour temps réel dashboard
         """
-        import uuid as uuid_mod
+        import json as json_mod
         from datetime import datetime, timezone
 
         try:
+            # 1. Charger l'item depuis approval_pendinglist
             pending_path = f"{mandate_path}/approval_pendinglist/{item_id}"
             logger.info(f"[APPROVAL] Processing banker approval: {pending_path}")
 
@@ -10148,49 +10157,82 @@ class FirebaseManagement:
                 return False
 
             item_data = doc.to_dict()
+            context_payload = item_data.get("context_payload", {})
 
-            # Extraire company_id depuis mandate_path
+            # Extraire les données de la transaction depuis le pending item
+            transaction_id = item_data.get("transaction_id", context_payload.get("transaction_id", ""))
+            bank_account_id = item_data.get("bank_account_id", context_payload.get("bank_account_id", ""))
+            bank_account_name = item_data.get("bank_account", context_payload.get("bank_account", ""))
+
+            # Reconstruire la transaction telle que le worker l'attend
+            transaction_data = {
+                "id": str(transaction_id),
+                "transaction_id": str(transaction_id),
+                "approval_status": "approved",
+            }
+            # Copier les champs de contexte utiles (amount, date, description, etc.)
+            for key in ("amount", "currency", "currency_name", "date", "created_at",
+                        "description", "payment_ref", "partner_name", "reference",
+                        "account_id", "account_name", "journal_id", "journal_name"):
+                val = context_payload.get(key, item_data.get(key))
+                if val is not None:
+                    transaction_data[key] = val
+
             path_parts = mandate_path.split("/")
             company_id = path_parts[-1] if len(path_parts) >= 4 else ""
             client_uuid = path_parts[1] if len(path_parts) >= 2 else ""
 
-            # 2. Créer la notification avec approval_response_mode
-            notification_data = {
-                "job_id": item_id,
-                "file_id": item_data.get("transaction_id", item_id),
-                "file_name": item_data.get("file_name", item_data.get("transaction_name", "")),
-                "function_name": "Bankbookeeper",
-                "status": "in_queue",
-                "read": False,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "collection_id": company_id,
-                "collection_name": company_id,
-                "batch_id": item_data.get("batch_id", f"approval_batch_{uuid_mod.uuid4().hex[:10]}"),
-                "approval_response_mode": True,
-                "approval_status": "approved",
-                "instructions": instructions or "",
-                "user_id": user_id,
-                "client_uuid": client_uuid,
-                "mandates_path": mandate_path,
+            # 2. Dispatch via queue:agentic_dispatch → handle_job_process (pipeline standard)
+            dispatch_data = {
+                "uid": user_id,
+                "job_type": "bankbookeeper",
+                "payload": {
+                    "document_ids": [str(transaction_id)],
+                    "jobs_data": [{
+                        "bank_account_id": str(bank_account_id),
+                        "bank_account": str(bank_account_name),
+                        "transactions": [transaction_data],
+                        "instructions": instructions or "",
+                    }],
+                    "approval_response_mode": True,
+                },
+                "company_data": {
+                    "mandate_path": mandate_path,
+                    "company_id": company_id,
+                    "client_uuid": client_uuid,
+                },
+                "source": "approval_response",
             }
 
-            notification_path = f"clients/{user_id}/notifications"
-            self.db.collection(notification_path).document(item_id).set(notification_data)
-            logger.info(f"[APPROVAL] Banker notification created: {notification_path}/{item_id}")
-
-            # 3. Supprimer l'item de approval_pendinglist
-            doc_ref.delete()
-            logger.info(f"[APPROVAL] Item deleted from pendinglist: {pending_path}")
-
-            # 4. Cleanup approval_context
             try:
-                ctx_ref = self.db.document(f"{mandate_path}/approval_context/{item_id}")
-                if ctx_ref.get().exists:
-                    ctx_ref.delete()
-            except Exception:
-                pass
+                redis_client = self._get_redis()
+                if redis_client:
+                    redis_client.lpush(
+                        "queue:agentic_dispatch",
+                        json_mod.dumps(dispatch_data, default=str)
+                    )
+                    logger.info(f"[APPROVAL] Banker dispatched to queue:agentic_dispatch for {item_id}")
+                else:
+                    logger.error(f"[APPROVAL] Redis client unavailable for banker dispatch {item_id}")
+                    return False
+            except Exception as redis_err:
+                logger.error(f"[APPROVAL] Redis dispatch failed for banker {item_id}: {redis_err}")
+                return False
 
-            # 5. Publish Redis (action: remove)
+            # 3. Marquer l'item comme approved (le worker le supprimera après traitement)
+            update_fields = {
+                "status": "completed",
+                "approval_status": "approved",
+                "instructions": instructions or "",
+                "approved_by": user_id,
+                "approved_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if updated_data:
+                update_fields["updated_data"] = updated_data
+            doc_ref.update(update_fields)
+            logger.info(f"[APPROVAL] Item marked as approved: {pending_path}")
+
+            # 4. Publier sur Redis pour mise à jour dashboard (action: remove — plus affiché en pending)
             self._publish_pending_approval_redis(
                 user_id=user_id,
                 company_id=company_id,
@@ -10253,6 +10295,7 @@ class FirebaseManagement:
             else:
                 update_data = {
                     "status": "rejected",
+                    "approval_status": "rejected",
                     "rejection_reason": rejection_reason,
                     "instructions": instructions or "",
                     "rejected_by": user_id,
@@ -10262,7 +10305,7 @@ class FirebaseManagement:
 
                 self._publish_pending_approval_redis(
                     user_id=user_id, company_id=company_id,
-                    item_id=item_id, action="update", department="bank",
+                    item_id=item_id, action="remove", department="bank",
                     data={"status": "rejected", "rejection_reason": rejection_reason}
                 )
 
@@ -10290,15 +10333,16 @@ class FirebaseManagement:
         """
         Traite l'approbation d'un item APBookkeeper.
 
+        Dispatch via queue:agentic_dispatch → handle_job_process() (pipeline standard).
+        Le worker reçoit le même payload qu'un job normal + approval_response_mode: True.
+
         1. Charge l'item depuis approval_pendinglist
         2. Merge updated_data dans context_payload (mode PATCH)
-        3. Crée une notification avec approval_response_mode: true
-        4. Dispatch vers le worker via Redis queue
-        5. Supprime l'item de approval_pendinglist
-        6. Publie un delta PENDING_APPROVAL_UPDATE action=remove
+        3. Dispatch via queue:agentic_dispatch (pipeline standard)
+        4. Marque l'item comme 'approved' (status=completed) + écrit updated_data + context_payload mergé
+        5. Publie sur Redis pour mise à jour temps réel dashboard
         """
         import json as json_mod
-        import uuid as uuid_mod
         from datetime import datetime, timezone
 
         try:
@@ -10313,6 +10357,7 @@ class FirebaseManagement:
                 return False
 
             item_data = doc.to_dict()
+            context_payload = item_data.get("context_payload", {})
 
             path_parts = mandate_path.split("/")
             company_id = path_parts[-1] if len(path_parts) >= 4 else ""
@@ -10320,90 +10365,104 @@ class FirebaseManagement:
 
             # 2. Merge updated_data into context_payload (PATCH mode)
             if updated_data:
-                ctx = item_data.get("context_payload", {})
                 # Merge invoice_details fields
-                if "invoice_details" in ctx and isinstance(updated_data, dict):
+                if "invoice_details" in context_payload and isinstance(updated_data, dict):
                     invoice_edits = {
                         k: v for k, v in updated_data.items()
                         if k != "accounting_lines"
                     }
                     if invoice_edits:
-                        ctx["invoice_details"] = {**ctx.get("invoice_details", {}), **invoice_edits}
+                        context_payload["invoice_details"] = {
+                            **context_payload.get("invoice_details", {}),
+                            **invoice_edits,
+                        }
                 # Merge accounting_lines (full replace)
                 if "accounting_lines" in updated_data:
-                    ctx["accounting_lines"] = updated_data["accounting_lines"]
-                item_data["context_payload"] = ctx
+                    context_payload["accounting_lines"] = updated_data["accounting_lines"]
+                # Merge supplier_data (full replace)
+                if "supplier_data" in updated_data:
+                    context_payload["supplier_data"] = updated_data["supplier_data"]
+                # Merge immobilisation_data (deep merge)
+                if "immobilisation_data" in updated_data:
+                    existing_immo = context_payload.get("immobilisation_data", {})
+                    context_payload["immobilisation_data"] = {**existing_immo, **updated_data["immobilisation_data"]}
+                # Merge assets_to_create / expenses_to_post (full replace)
+                if "assets_to_create" in updated_data:
+                    immo = context_payload.get("immobilisation_data", {})
+                    immo["assets_to_create"] = updated_data["assets_to_create"]
+                    context_payload["immobilisation_data"] = immo
+                if "expenses_to_post" in updated_data:
+                    immo = context_payload.get("immobilisation_data", {})
+                    immo["expenses_to_post"] = updated_data["expenses_to_post"]
+                    context_payload["immobilisation_data"] = immo
                 logger.info(f"[APPROVAL] Merged updated_data into context_payload for {item_id}")
 
-            # 3. Créer la notification avec approval_response_mode
-            notification_data = {
-                "job_id": item_id,
-                "file_id": item_data.get("file_id", item_data.get("drive_file_id", item_id)),
-                "file_name": item_data.get("file_name", ""),
-                "function_name": "APbookeeper",
-                "status": "in_queue",
-                "read": False,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "collection_id": company_id,
-                "collection_name": company_id,
-                "batch_id": item_data.get("batch_id", f"approval_batch_{uuid_mod.uuid4().hex[:10]}"),
-                "approval_response_mode": True,
-                "approval_status": "approved",
-                "approval_type": approval_type,
+            # Extraire les identifiants du document
+            file_id = item_data.get("file_id", context_payload.get("drive_file_id", ""))
+            file_name = item_data.get("file_name", context_payload.get("file_name", ""))
+
+            # 3. Dispatch via queue:agentic_dispatch → handle_job_process (pipeline standard)
+            # jobs_data suit le format normal AP: un item par fichier
+            job_item = {
+                "file_name": str(file_name),
+                "drive_file_id": str(file_id),
+                "job_id": str(file_id),
                 "instructions": instructions or "",
-                "user_id": user_id,
-                "client_uuid": client_uuid,
-                "mandates_path": mandate_path,
+                "approval_required": False,
+                "approval_type": approval_type,
+            }
+            # Inclure le context_payload mergé pour que le worker ait les données éditées
+            if context_payload:
+                job_item["context_payload"] = context_payload
+
+            dispatch_data = {
+                "uid": user_id,
+                "job_type": "apbookeeper",
+                "payload": {
+                    "document_ids": [str(file_id)],
+                    "jobs_data": [job_item],
+                    "approval_response_mode": True,
+                },
+                "company_data": {
+                    "mandate_path": mandate_path,
+                    "company_id": company_id,
+                    "client_uuid": client_uuid,
+                },
+                "source": "approval_response",
             }
 
-            # Include the merged context_payload so the worker has updated data
-            if updated_data:
-                notification_data["context_payload"] = item_data.get("context_payload", {})
-
-            notification_path = f"clients/{user_id}/notifications"
-            self.db.collection(notification_path).document(item_id).set(notification_data)
-            logger.info(f"[APPROVAL] APBookkeeper notification created: {notification_path}/{item_id}")
-
-            # 4. Dispatch to worker via Redis queue
             try:
                 redis_client = self._get_redis()
                 if redis_client:
-                    dispatch_payload = {
-                        "job_id": item_id,
-                        "function_name": "APbookeeper",
-                        "mandate_path": mandate_path,
-                        "collection_id": company_id,
-                        "user_id": user_id,
-                        "client_uuid": client_uuid,
-                        "approval_response_mode": True,
-                        "approval_type": approval_type,
-                        "file_id": item_data.get("file_id", ""),
-                        "file_name": item_data.get("file_name", ""),
-                        "batch_id": notification_data["batch_id"],
-                        "context_payload": item_data.get("context_payload", {}),
-                        "instructions": instructions or "",
-                    }
                     redis_client.lpush(
                         "queue:agentic_dispatch",
-                        json_mod.dumps(dispatch_payload, default=str)
+                        json_mod.dumps(dispatch_data, default=str)
                     )
-                    logger.info(f"[APPROVAL] Dispatched to queue:agentic_dispatch for {item_id}")
+                    logger.info(f"[APPROVAL] APBookkeeper dispatched to queue:agentic_dispatch for {item_id}")
+                else:
+                    logger.error(f"[APPROVAL] Redis client unavailable for AP dispatch {item_id}")
+                    return False
             except Exception as redis_err:
-                logger.warning(f"[APPROVAL] Redis dispatch failed (notification still created): {redis_err}")
+                logger.error(f"[APPROVAL] Redis dispatch failed for AP {item_id}: {redis_err}")
+                return False
 
-            # 5. Supprimer l'item de approval_pendinglist
-            doc_ref.delete()
-            logger.info(f"[APPROVAL] Item deleted from pendinglist: {pending_path}")
+            # 4. Marquer l'item comme approved + écrire updated_data et context_payload mergé
+            #    Le worker lira ces données depuis Firebase puis supprimera l'item après traitement
+            update_fields = {
+                "status": "completed",
+                "approval_status": "approved",
+                "approval_type": approval_type,
+                "instructions": instructions or "",
+                "approved_by": user_id,
+                "approved_at": datetime.now(timezone.utc).isoformat(),
+                "context_payload": context_payload,
+            }
+            if updated_data:
+                update_fields["updated_data"] = updated_data
+            doc_ref.update(update_fields)
+            logger.info(f"[APPROVAL] Item marked as approved with merged data: {pending_path}")
 
-            # 6. Cleanup approval_context
-            try:
-                ctx_ref = self.db.document(f"{mandate_path}/approval_context/{item_id}")
-                if ctx_ref.get().exists:
-                    ctx_ref.delete()
-            except Exception:
-                pass
-
-            # 7. Publish Redis (action: remove)
+            # 5. Publier sur Redis pour mise à jour dashboard (action: remove — plus affiché en pending)
             self._publish_pending_approval_redis(
                 user_id=user_id,
                 company_id=company_id,
@@ -10466,6 +10525,7 @@ class FirebaseManagement:
             else:
                 update_data = {
                     "status": "rejected",
+                    "approval_status": "rejected",
                     "rejection_reason": rejection_reason,
                     "instructions": instructions or "",
                     "rejected_by": user_id,
@@ -10475,7 +10535,7 @@ class FirebaseManagement:
 
                 self._publish_pending_approval_redis(
                     user_id=user_id, company_id=company_id,
-                    item_id=item_id, action="update", department="invoices",
+                    item_id=item_id, action="remove", department="invoices",
                     data={"status": "rejected", "rejection_reason": rejection_reason}
                 )
 

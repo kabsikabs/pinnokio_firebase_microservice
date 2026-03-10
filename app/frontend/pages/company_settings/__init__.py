@@ -49,6 +49,8 @@ from .orchestration import (
     handle_email_approve_draft,
     handle_save_email_type,
     handle_initiate_email_auth,
+    handle_test_erp_connection,
+    handle_save_erp_connection,
 )
 from .telegram_handler import (
     handle_telegram_start_registration,
@@ -84,6 +86,9 @@ __all__ = [
     # Email Provider Type
     "handle_save_email_type",
     "handle_initiate_email_auth",
+    # ERP Connection
+    "handle_test_erp_connection",
+    "handle_save_erp_connection",
     # Telegram
     "handle_telegram_start_registration",
     "handle_telegram_remove_user",

@@ -176,6 +176,11 @@ class CronScheduler:
         self._lock = DistributedLock()
         self._instance_id = f"cron_{uuid.uuid4().hex[:8]}"
 
+        # Builtin billing: dernière exécution (None = jamais)
+        self._last_billing_run: Optional[datetime] = None
+        # Builtin depreciation: dernière exécution (None = jamais)
+        self._last_depreciation_run: Optional[datetime] = None
+
         logger.info(f"[CRON] Scheduler initialisé (intervalle: {check_interval}s, instance={self._instance_id})")
 
     async def start(self):
@@ -214,6 +219,18 @@ class CronScheduler:
                 await self._check_and_execute_tasks()
             except Exception as e:
                 logger.error(f"[CRON] Erreur dans la boucle: {e}", exc_info=True)
+
+            # Tâches builtin (billing chat, etc.) — exécutées 1x/heure
+            try:
+                await self._run_builtin_billing()
+            except Exception as e:
+                logger.error(f"[CRON] Erreur builtin billing: {e}", exc_info=True)
+
+            # Builtin depreciation — exécuté 1x/jour
+            try:
+                await self._run_builtin_depreciation()
+            except Exception as e:
+                logger.error(f"[CRON] Erreur builtin depreciation: {e}", exc_info=True)
 
             # Attendre avant la prochaine itération
             await asyncio.sleep(self.check_interval)
@@ -463,6 +480,88 @@ class CronScheduler:
 
         except Exception as e:
             logger.error(f"[CRON] Erreur _disable_one_time_task: {e}", exc_info=True)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Builtin: Facturation chat quotidienne (remplace Celery Beat)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    _BILLING_INTERVAL_SECONDS = 3600  # 1x par heure
+
+    async def _run_builtin_billing(self):
+        """
+        Exécute finalize_daily_chat_billing toutes les heures.
+
+        Utilise un lock Redis distribué pour éviter les doublons multi-instance.
+        """
+        now = datetime.now(timezone.utc)
+
+        # Throttle: skip si dernière exécution < 1h
+        if self._last_billing_run and (now - self._last_billing_run).total_seconds() < self._BILLING_INTERVAL_SECONDS:
+            return
+
+        # Lock distribué (TTL 10 min) pour éviter les exécutions parallèles multi-instance
+        lock_key = f"builtin_billing_{now.strftime('%Y%m%d_%H')}"
+        if not self._lock.acquire(lock_key, self._instance_id, ttl=600):
+            logger.debug("[BILLING] Skipped (autre instance en cours)")
+            self._last_billing_run = now
+            return
+
+        try:
+            logger.info("[BILLING] Démarrage facturation chat (builtin, instance=%s)", self._instance_id)
+
+            # Appel synchrone dans un thread pour ne pas bloquer l'event loop
+            from .maintenance_tasks import finalize_daily_chat_billing
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: finalize_daily_chat_billing(days_back=7)
+            )
+
+            self._last_billing_run = now
+            logger.info("[BILLING] Facturation terminée: %s", result)
+
+        except Exception as e:
+            logger.error("[BILLING] Erreur facturation: %s", repr(e), exc_info=True)
+        finally:
+            self._lock.release(lock_key, self._instance_id)
+
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Builtin: Fixed Assets Depreciation Posting (1x/jour)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    _DEPRECIATION_INTERVAL_SECONDS = 86400  # 24h
+
+    async def _run_builtin_depreciation(self):
+        """
+        Post due depreciation entries to ERP once per day.
+
+        Uses DistributedLock to prevent multi-instance double-posting.
+        """
+        now = datetime.now(timezone.utc)
+
+        # Throttle: skip if last run < 24h ago
+        if self._last_depreciation_run and (now - self._last_depreciation_run).total_seconds() < self._DEPRECIATION_INTERVAL_SECONDS:
+            return
+
+        # Lock distribué (TTL 30 min) — depreciation posting can take time
+        lock_key = f"builtin_depreciation_{now.strftime('%Y%m%d')}"
+        if not self._lock.acquire(lock_key, self._instance_id, ttl=1800):
+            logger.debug("[DEPRECIATION] Skipped (autre instance en cours)")
+            self._last_depreciation_run = now
+            return
+
+        try:
+            logger.info("[DEPRECIATION] Starting daily depreciation posting (instance=%s)", self._instance_id)
+
+            from .depreciation_cron import run_depreciation_cron
+            result = await run_depreciation_cron()
+
+            self._last_depreciation_run = now
+            logger.info("[DEPRECIATION] Done: %s", result)
+
+        except Exception as e:
+            logger.error("[DEPRECIATION] Error: %s", repr(e), exc_info=True)
+        finally:
+            self._lock.release(lock_key, self._instance_id)
 
 
 # Singleton global

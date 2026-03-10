@@ -35,6 +35,26 @@ logger = logging.getLogger("company_settings.orchestration")
 
 
 # ============================================
+# HELPER: Resolve mandate_path from company context
+# ============================================
+
+def _resolve_mandate_path(uid: str, company_id: str) -> str:
+    """Resolve mandate_path from Level 2 Redis cache (same as FA pattern)."""
+    import json
+    try:
+        from app.redis_client import get_redis
+        redis_client = get_redis()
+        level2_key = f"company:{uid}:{company_id}:context"
+        cached = redis_client.get(level2_key)
+        if cached:
+            data = json.loads(cached if isinstance(cached, str) else cached.decode())
+            return data.get("mandate_path", "") or data.get("path", "")
+    except Exception as e:
+        logger.warning(f"[COMPANY_SETTINGS] Could not resolve mandate_path: {e}")
+    return ""
+
+
+# ============================================
 # HELPER: Re-broadcast COMPANY.DETAILS after save
 # ============================================
 
@@ -795,6 +815,11 @@ async def handle_save_asset_config(
             }
         })
 
+        # Refresh Redis L2 cache + re-broadcast COMPANY.DETAILS so frontend store
+        # and sidebar reflect the new assetManagementActivated value after refresh
+        if result.get("success"):
+            await _rebroadcast_company_details(uid, company_id, mandate_path)
+
     except Exception as e:
         logger.error(f"[COMPANY_SETTINGS] Save asset config failed: {e}")
         await hub.broadcast(uid, {
@@ -819,8 +844,13 @@ async def handle_list_asset_models(
     """
     company_id = payload.get("company_id", "")
     erp_type = payload.get("erp_type", "odoo")
+    mandate_path = payload.get("mandate_path", "")
 
-    logger.info(f"[COMPANY_SETTINGS] list_asset_models company_id={company_id} erp_type={erp_type}")
+    # Resolve mandate_path from company context if not provided
+    if not mandate_path:
+        mandate_path = _resolve_mandate_path(uid, company_id)
+
+    logger.info(f"[COMPANY_SETTINGS] list_asset_models company_id={company_id}")
 
     try:
         handlers = get_company_settings_handlers()
@@ -828,6 +858,7 @@ async def handle_list_asset_models(
             user_id=uid,
             company_id=company_id,
             erp_type=erp_type,
+            mandate_path=mandate_path,
         )
 
         await hub.broadcast(uid, {
@@ -872,12 +903,13 @@ async def handle_create_asset_model(
     """
     company_id = payload.get("company_id", "")
     name = payload.get("name", "")
-    account_asset_id = payload.get("accountAssetId", 0)
-    account_depreciation_id = payload.get("accountDepreciationId", 0)
-    account_depreciation_expense_id = payload.get("accountDepreciationExpenseId", 0)
+    account_asset_id = payload.get("accountAssetId", "")
+    account_depreciation_id = payload.get("accountDepreciationId", "")
+    account_depreciation_expense_id = payload.get("accountDepreciationExpenseId", "")
     method = payload.get("method", "linear")
     method_period = payload.get("methodPeriod", 12)
     duration_years = payload.get("durationYears", 5)
+    mandate_path = payload.get("mandate_path", "") or _resolve_mandate_path(uid, company_id)
 
     logger.info(f"[COMPANY_SETTINGS] create_asset_model company_id={company_id} name={name}")
 
@@ -893,6 +925,7 @@ async def handle_create_asset_model(
             method=method,
             method_period=method_period,
             duration_years=duration_years,
+            mandate_path=mandate_path,
         )
 
         await hub.broadcast(uid, {
@@ -934,11 +967,12 @@ async def handle_update_asset_model(
         }
     """
     company_id = payload.get("company_id", "")
-    model_id = payload.get("modelId", 0)
+    model_id = payload.get("modelId", "")
     name = payload.get("name")
     method = payload.get("method")
     method_period = payload.get("methodPeriod")
     duration_years = payload.get("durationYears")
+    mandate_path = payload.get("mandate_path", "") or _resolve_mandate_path(uid, company_id)
 
     logger.info(f"[COMPANY_SETTINGS] update_asset_model company_id={company_id} model_id={model_id}")
 
@@ -952,6 +986,7 @@ async def handle_update_asset_model(
             method=method,
             method_period=method_period,
             duration_years=duration_years,
+            mandate_path=mandate_path,
         )
 
         await hub.broadcast(uid, {
@@ -989,7 +1024,8 @@ async def handle_delete_asset_model(
         }
     """
     company_id = payload.get("company_id", "")
-    model_id = payload.get("modelId", 0)
+    model_id = payload.get("modelId", "")
+    mandate_path = payload.get("mandate_path", "") or _resolve_mandate_path(uid, company_id)
 
     logger.info(f"[COMPANY_SETTINGS] delete_asset_model company_id={company_id} model_id={model_id}")
 
@@ -999,6 +1035,7 @@ async def handle_delete_asset_model(
             user_id=uid,
             company_id=company_id,
             model_id=model_id,
+            mandate_path=mandate_path,
         )
 
         await hub.broadcast(uid, {
@@ -1036,7 +1073,7 @@ async def handle_load_asset_accounts(
         }
     """
     company_id = payload.get("company_id", "")
-    mandate_path = payload.get("mandate_path", "")
+    mandate_path = payload.get("mandate_path", "") or _resolve_mandate_path(uid, company_id)
 
     logger.info(f"[COMPANY_SETTINGS] load_asset_accounts company_id={company_id}")
 
@@ -1250,7 +1287,28 @@ async def handle_delete_company(
                             "company_id": company_id,
                         }
                     })
-                    
+
+                    # ── Last company: delete entire clients/{uid} document + subcollections ──
+                    try:
+                        client_doc_path = f"clients/{uid}"
+                        deleted = await asyncio.to_thread(
+                            firebase_mgmt.delete_document_recursive,
+                            client_doc_path,
+                        )
+                        if deleted:
+                            logger.info(
+                                f"[COMPANY_SETTINGS] Last company deleted: cleaned up "
+                                f"entire client document at {client_doc_path}"
+                            )
+                        else:
+                            logger.warning(
+                                f"[COMPANY_SETTINGS] Failed to delete client document at {client_doc_path}"
+                            )
+                    except Exception as client_e:
+                        logger.error(
+                            f"[COMPANY_SETTINGS] Client document cleanup failed: {client_e}"
+                        )
+
             except Exception as post_e:
                 logger.error(f"[COMPANY_SETTINGS] Post-deletion action failed: {post_e}")
                 # Don't fail the whole operation, just log the error
@@ -1487,4 +1545,124 @@ async def handle_initiate_email_auth(
         await hub.broadcast(uid, {
             "type": WS_EVENTS.COMPANY_SETTINGS.ERROR,
             "payload": {"error": str(e)}
+        })
+
+
+async def handle_test_erp_connection(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """
+    Handle company_settings.test_erp_connection event.
+
+    Tests ERP connectivity from the settings page.
+
+    Payload:
+        company_id: str - Company/Mandate ID
+        erp_type: str - ERP type (odoo, banana, etc.)
+        connection_data: dict - Connection parameters
+            - url: Server URL
+            - database: Database name
+            - username: Username
+            - apiKey: API key
+
+    Response:
+        type: company_settings.erp_connection_result
+        payload:
+            success: bool
+            connected: bool
+            message: str
+            details?: dict
+            durationMs: int
+    """
+    handlers = get_company_settings_handlers()
+
+    try:
+        company_id = payload.get("company_id", "")
+        mandate_path = payload.get("mandate_path", "")
+        erp_type = payload.get("erp_type", "odoo")
+        connection_data = payload.get("connection_data", {})
+
+        result = await handlers.test_erp_connection(
+            user_id=uid,
+            company_id=company_id,
+            erp_type=erp_type,
+            connection_data=connection_data,
+            mandate_path=mandate_path,
+        )
+
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.ERP_CONNECTION_RESULT,
+            "payload": result,
+        })
+
+    except Exception as e:
+        logger.error(f"[COMPANY_SETTINGS] test_erp_connection failed: {e}")
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.ERP_CONNECTION_RESULT,
+            "payload": {
+                "success": False,
+                "connected": False,
+                "error": str(e),
+            }
+        })
+
+
+async def handle_save_erp_connection(
+    uid: str,
+    session_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """
+    Handle company_settings.save_erp_connections event.
+
+    Saves ERP connection config (username + API key rotation via Secret Manager).
+
+    Payload:
+        company_id: str
+        mandate_path: str
+        erp_type: str
+        connection_data: dict (username, apiKey, companyName, database, url, hasSecret)
+
+    Response:
+        type: company_settings.erp_connections_saved
+    """
+    handlers = get_company_settings_handlers()
+
+    try:
+        company_id = payload.get("company_id", "")
+        mandate_path = payload.get("mandate_path", "")
+        erp_type = payload.get("erp_type", "odoo")
+        connection_data = payload.get("connection_data", {})
+
+        if not mandate_path:
+            await hub.broadcast(uid, {
+                "type": WS_EVENTS.COMPANY_SETTINGS.ERP_CONNECTIONS_SAVED,
+                "payload": {"success": False, "error": "Missing mandate_path"},
+            })
+            return
+
+        result = await handlers.save_erp_connection(
+            user_id=uid,
+            company_id=company_id,
+            mandate_path=mandate_path,
+            erp_type=erp_type,
+            connection_data=connection_data,
+        )
+
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.ERP_CONNECTIONS_SAVED,
+            "payload": result,
+        })
+
+        # Invalidate additional_data cache so next fetch gets fresh ERP data
+        if result.get("success"):
+            await handlers._invalidate_page_cache(uid, company_id)
+
+    except Exception as e:
+        logger.error(f"[COMPANY_SETTINGS] save_erp_connection failed: {e}")
+        await hub.broadcast(uid, {
+            "type": WS_EVENTS.COMPANY_SETTINGS.ERP_CONNECTIONS_SAVED,
+            "payload": {"success": False, "error": str(e)},
         })

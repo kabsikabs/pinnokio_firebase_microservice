@@ -31,6 +31,8 @@ colorama==0.4.6
 # Multipart form data pour FastAPI UploadFile
 python-multipart>=0.0.9
 Pillow>=10.0.0
+# ReportLab pour la génération de PDF (depreciation schedule, etc.)
+reportlab>=4.0.0
 # Dépendances pour la conversion PDF en images
 pdf2image>=1.16.0
 # Dépendances pour le traitement des dates

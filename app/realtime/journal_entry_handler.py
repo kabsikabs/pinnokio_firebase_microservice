@@ -121,39 +121,35 @@ class JournalEntryHandler:
         approval_id: str,
         payload: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Approuve l'ecriture: post DIRECTEMENT vers ERP (IDs deja resolus)."""
+        """Approuve l'ecriture: post vers ERP via JournalEntryPoster centralise."""
         entry = payload.get("entry", {})
         mandate_path = payload.get("mandate_path", "")
 
         if not mandate_path:
             return self._error_response("mandate_path manquant dans le payload")
 
-        # Verifier que les IDs ERP sont bien resolus (pre-condition)
+        # Verifier que les IDs ERP sont bien resolus (pre-condition pour approval cards)
         if not entry.get("_erp_journal_id"):
             return self._error_response(
                 "_erp_journal_id manquant — le payload n'a pas ete resolu correctement"
             )
 
         try:
-            # 1. Get ERP provider et poster directement
-            # Les IDs ERP (_erp_journal_id, _erp_account_id) sont deja dans le payload
-            # (resolus par SUBMIT_FOR_APPROVAL dans le worker AVANT l'approbation)
-            from app.erp.erp_provider import get_erp_provider
+            # Post via centralized poster (IDs already resolved → skip resolution)
+            from app.erp.journal_entry_poster import get_journal_entry_poster
 
-            provider = await get_erp_provider(uid, company_id, mandate_path)
-            result = await provider.post_journal_entry(entry)
+            poster = get_journal_entry_poster()
+            result = await poster.post(
+                entry=entry,
+                mandate_path=mandate_path,
+                uid=uid,
+                collection_id=company_id,
+                trigger_gl_sync=True,
+                source="approval_card",
+            )
 
             if not result.get("success"):
                 error_msg = result.get("error", "Erreur inconnue")
-                logger.error("[JE_HANDLER] ERP post failed: %s", error_msg)
-                # Cleanup draft entry left in ERP if posting failed
-                draft_id = result.get("draft_erp_id")
-                if draft_id:
-                    try:
-                        await provider.delete_draft_entry(draft_id)
-                        logger.info("[JE_HANDLER] Draft entry %s cleaned up", draft_id)
-                    except Exception as cleanup_err:
-                        logger.warning("[JE_HANDLER] Draft cleanup failed: %s", cleanup_err)
                 await self._notify_user(uid, thread_key, {
                     "type": "journal_entry.error",
                     "message": f"Erreur lors du posting ERP: {error_msg}",
@@ -161,10 +157,10 @@ class JournalEntryHandler:
                 }, company_id=company_id)
                 return self._error_response(f"Erreur posting ERP: {error_msg}")
 
-            # 3. Nettoyer Redis
+            # Nettoyer Redis
             self.redis.delete(f"je_approval:{approval_id}")
 
-            # 4. Notifier succes
+            # Notifier succes
             erp_entry_id = result.get("erp_entry_id", "")
             erp_entry_name = result.get("erp_entry_name", str(erp_entry_id))
 
@@ -175,9 +171,6 @@ class JournalEntryHandler:
                 "erp_entry_name": erp_entry_name,
                 "approval_id": approval_id,
             }, company_id=company_id)
-
-            # 5. Optionnel: declencher sync GL incrementale
-            await self._trigger_gl_sync(uid, company_id, mandate_path)
 
             logger.info(
                 "[JE_HANDLER] Ecriture postee: erp_id=%s name=%s uid=%s",
@@ -286,27 +279,6 @@ class JournalEntryHandler:
 
         except Exception as e:
             logger.warning("[JE_HANDLER] Notification failed: %s", e)
-
-    async def _trigger_gl_sync(self, uid: str, company_id: str, mandate_path: str):
-        """Declenche une sync GL incrementale en arriere-plan (optionnel)."""
-        try:
-            import json as _json
-
-            channel = f"user:{uid}/task_manager"
-            self.redis.publish(channel, _json.dumps({
-                "type": "gl_sync_requested",
-                "department": "coa",
-                "collection_id": company_id,
-                "mandate_path": mandate_path,
-                "data": {
-                    "force_full": False,
-                    "overlap_months": 1,
-                    "requested_by": "journal_entry_handler",
-                },
-            }))
-            logger.info("[JE_HANDLER] GL sync triggered for mandate=%s", mandate_path)
-        except Exception as e:
-            logger.warning("[JE_HANDLER] GL sync trigger failed (non-blocking): %s", e)
 
     # ═══════════════════════════════════════════════════════════════
     # HELPERS
