@@ -7293,6 +7293,10 @@ class FirebaseManagement:
             if 'current_step' in current_data:
                 fields_to_delete['current_step'] = firestore.DELETE_FIELD
                 print(f"Marking current_step for deletion")
+
+            if 'current_step_technical' in current_data:
+                fields_to_delete['current_step_technical'] = firestore.DELETE_FIELD
+                print(f"Marking current_step_technical for deletion")
             
             if 'Document_information' in current_data:
                 fields_to_delete['Document_information'] = firestore.DELETE_FIELD
@@ -7326,6 +7330,11 @@ class FirebaseManagement:
                         failed_deletions.append('current_step')
                         print(f"WARNING: current_step still exists after deletion")
                         print(f"Current value: {doc_data['current_step']}")
+
+                    if 'current_step_technical' in doc_data:
+                        failed_deletions.append('current_step_technical')
+                        print(f"WARNING: current_step_technical still exists after deletion")
+                        print(f"Current value: {doc_data['current_step_technical']}")
                     
                     if 'Document_information' in doc_data:
                         failed_deletions.append('Document_information')
