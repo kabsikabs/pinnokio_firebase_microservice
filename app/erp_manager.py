@@ -55,14 +55,16 @@ class OdooModelManager:
             },
             
             'account.move': {
-                'base_fields': ['id', 'name', 'journal_id', 'partner_id', 'invoice_date', 
-                              'date', 'payment_reference', 'invoice_date_due', 'ref', 
-                              'amount_residual', 'payment_state', 'payment_id', 
-                              'transaction_ids', 'amount_residual_signed', 'amount_paid', 
-                              'currency_id'],
+                'base_fields': ['id', 'name', 'journal_id', 'partner_id', 'invoice_date',
+                              'date', 'payment_reference', 'invoice_date_due', 'ref',
+                              'amount_residual', 'payment_state', 'company_id',
+                              'transaction_ids', 'amount_residual_signed',
+                              'currency_id', 'move_type', 'amount_untaxed', 'amount_tax',
+                              'amount_total', 'amount_total_signed',
+                              'state', 'write_date'],
                 'version_fields': {
-                    '<18': ['company_id'],
-                    '>=18': ['company_ids']
+                    '<18': ['origin', 'payment_id', 'amount_paid'],
+                    '>=18': ['payment_ids']
                 }
             },
             
@@ -81,6 +83,32 @@ class OdooModelManager:
             
             'res.company': {
                 'base_fields': ['name', 'id', 'partner_id'],
+                'version_fields': {
+                    '<18': [],
+                    '>=18': []
+                }
+            },
+
+            'res.partner': {
+                'base_fields': ['id', 'name', 'display_name', 'is_company', 'parent_id',
+                              'supplier_rank', 'customer_rank',
+                              'email', 'phone', 'mobile', 'website',
+                              'street', 'street2', 'city', 'zip',
+                              'state_id', 'country_id', 'vat',
+                              'property_account_payable_id', 'property_account_receivable_id',
+                              'property_payment_term_id', 'property_supplier_payment_term_id',
+                              'write_date', 'active'],
+                'version_fields': {
+                    '<18': ['company_id'],
+                    '>=18': ['company_id']  # res.partner garde company_id en v18+
+                }
+            },
+
+            'account.move.line.sync': {
+                'base_fields': ['id', 'move_id', 'name', 'quantity', 'price_unit', 'discount',
+                              'account_id', 'price_subtotal', 'price_total',
+                              'debit', 'credit', 'balance', 'tax_ids',
+                              'product_id', 'display_type'],
                 'version_fields': {
                     '<18': [],
                     '>=18': []

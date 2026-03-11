@@ -1055,6 +1055,22 @@ def _resolve_method(method: str) -> Tuple[Callable[..., Any], str]:
         if callable(target):
             return target, "FIXED_ASSETS"
 
+    # === CONTACTS (Neon PostgreSQL - Contacts / Partners) ===
+    if method.startswith("CONTACTS."):
+        name = method.split(".", 1)[1]
+        from .contacts_invoices_rpc_handlers import get_contacts_invoices_handlers
+        target = getattr(get_contacts_invoices_handlers(), name, None)
+        if callable(target):
+            return target, "CONTACTS"
+
+    # === INVOICES (Neon PostgreSQL - Invoices + Aging) ===
+    if method.startswith("INVOICES."):
+        name = method.split(".", 1)[1]
+        from .contacts_invoices_rpc_handlers import get_contacts_invoices_handlers
+        target = getattr(get_contacts_invoices_handlers(), name, None)
+        if callable(target):
+            return target, "INVOICES"
+
     # === DASHBOARD (Next.js Dashboard - NEW) ===
     # Ce namespace est NOUVEAU et ne modifie pas les méthodes existantes
     # Endpoints: DASHBOARD.full_data, DASHBOARD.get_metrics, DASHBOARD.invalidate_cache
@@ -2502,10 +2518,65 @@ async def websocket_endpoint(ws: WebSocket):
                             logger.warning(f"[WS] Chat balance check error (failsafe): {_bal_err}")
 
                         try:
-                            # Enqueue message for Worker processing
-                            # Worker will handle streaming via Redis PubSub → WorkerBroadcastListener → WebSocket
+                            # ── Step 1: Persist user message in RTDB immediately ──
+                            # This ensures the message is visible in chat UI before
+                            # the worker picks it up (critical during cold start)
+                            import uuid as _uuid
+                            from datetime import datetime, timezone
+                            from .listeners_manager import _get_rtdb_ref
+
+                            _user_msg_id = str(_uuid.uuid4())
+                            _user_timestamp = datetime.now(timezone.utc).isoformat()
+
+                            # Resolve RTDB container based on chat_mode
+                            _ACTIVE_CHAT_MODES = {"apbookeeper_chat", "router_chat", "banker_chat"}
+                            if chat_mode in _ACTIVE_CHAT_MODES:
+                                _container = "active_chats"
+                            elif chat_mode == "cockpit_chat":
+                                _container = "cockpit_chats"
+                            else:
+                                _container = "chats"
+                            _msg_base_path = f"{company_id}/{_container}/{thread_key}/messages"
+                            _user_msg_path = f"{_msg_base_path}/{_user_msg_id}"
+
+                            _user_message_data = {
+                                "id": _user_msg_id,
+                                "content": content,
+                                "sender_id": uid,
+                                "timestamp": _user_timestamp,
+                                "message_type": "MESSAGE_PINNOKIO",
+                                "read": False,
+                                "local_processed": False,
+                            }
+
+                            # Persist attachment metadata if present
+                            if attachments:
+                                _user_message_data["metadata"] = {
+                                    "attachments": [
+                                        {
+                                            "id": a.get("gcs_path", ""),
+                                            "type": "image" if a.get("content_type", "").startswith("image/") else "document",
+                                            "name": a.get("filename", ""),
+                                            "url": a.get("download_url", ""),
+                                            "size": a.get("size", 0),
+                                            "mimeType": a.get("content_type", ""),
+                                        }
+                                        for a in attachments
+                                    ]
+                                }
+
+                            try:
+                                _get_rtdb_ref(_user_msg_path).set(_user_message_data)
+                                logger.info(f"[WS] Chat user message persisted in RTDB: {_user_msg_id[:8]}... path={_msg_base_path}")
+                            except Exception as _rtdb_err:
+                                # Non-blocking: worker will persist as fallback
+                                logger.warning(f"[WS] Chat RTDB persist failed (worker fallback): {_rtdb_err}")
+
+                            # ── Step 2: Enqueue message for Worker processing ──
                             gateway = get_llm_gateway()
-                            enqueue_kwargs = {}
+                            enqueue_kwargs = {
+                                "user_message_id": _user_msg_id,  # Pass pre-persisted msg ID to worker
+                            }
                             if attachments:
                                 enqueue_kwargs["attachments"] = attachments
                             queue_result = await gateway.enqueue_message(
@@ -2517,14 +2588,18 @@ async def websocket_endpoint(ws: WebSocket):
                                 **enqueue_kwargs,
                             )
 
-                            logger.info(f"[WS] Chat send_message enqueued: job_id={queue_result.get('job_id', 'unknown')[:8]}...")
+                            _is_cold_start = queue_result.get("is_cold_start", False)
+                            logger.info(f"[WS] Chat send_message enqueued: job_id={queue_result.get('job_id', 'unknown')[:8]}... cold_start={_is_cold_start}")
 
+                            # ── Step 3: Send response with cold_start info ──
                             response = {
                                 "type": "chat.message_sent",
                                 "payload": {
                                     "success": True,
                                     "status": "queued",
                                     "job_id": queue_result.get("job_id"),
+                                    "user_message_id": _user_msg_id,
+                                    "is_cold_start": _is_cold_start,
                                 }
                             }
                         except Exception as e:

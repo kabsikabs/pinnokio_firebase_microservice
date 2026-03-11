@@ -204,7 +204,7 @@ class ExpensesHandlers:
                 logger.warning(f"[EXPENSES] Legacy Firebase update skipped for {expense_id} (migrated?)")
 
             # 1b. Source de vérité: task_manager (TOUJOURS exécuté)
-            self._update_task_manager(user_id, expense_id, {"status": "processed"})
+            self._update_task_manager(user_id, expense_id, {"status": "processed"}, company_id=company_id, mandate_path=mandate_path)
 
             # 2. Apply optimistic update to business cache
             cache_result = self._apply_list_change(
@@ -282,7 +282,7 @@ class ExpensesHandlers:
                 logger.warning(f"[EXPENSES][FLOW] Legacy Firebase update skipped for {expense_id} (migrated?)")
 
             # Source de vérité: task_manager (TOUJOURS exécuté)
-            self._update_task_manager(user_id, expense_id, {"status": "to_process"})
+            self._update_task_manager(user_id, expense_id, {"status": "to_process"}, company_id=company_id, mandate_path=mandate_path)
 
             # Apply optimistic update to business cache
             logger.info(f"[EXPENSES][FLOW] STEP 2b: Applying list change via ListManager")
@@ -380,7 +380,7 @@ class ExpensesHandlers:
                 for k, v in dept_fields.items():
                     tm_updates[f"department_data.EXbookeeper.{k}"] = v
             if tm_updates:
-                self._update_task_manager(user_id, expense_id, tm_updates)
+                self._update_task_manager(user_id, expense_id, tm_updates, company_id=company_id, mandate_path=mandate_path)
 
             # Apply optimistic update to business cache
             # If status changed, use ListManager to move between lists
@@ -916,14 +916,17 @@ class ExpensesHandlers:
     # TASK_MANAGER WRITE HELPERS
     # ===============================================
 
-    def _update_task_manager(self, user_id: str, expense_id: str, updates: Dict[str, Any]) -> None:
+    def _update_task_manager(self, user_id: str, expense_id: str, updates: Dict[str, Any], company_id: str = None, mandate_path: str = None) -> None:
         """
         Update a document in task_manager (source of truth for expenses).
+        Publishes Redis event so frontend store can apply delta in real-time.
 
         Args:
             user_id: Firebase UID
             expense_id: Document ID in task_manager
             updates: Dict of fields to update (supports dot notation for nested fields)
+            company_id: Company ID (for Redis publish)
+            mandate_path: Mandate path (for Redis publish)
         """
         try:
             from app.firebase_client import get_firestore
@@ -933,6 +936,24 @@ class ExpensesHandlers:
             if doc.exists:
                 doc_ref.update(updates)
                 logger.info(f"[EXPENSES] task_manager updated: {expense_id} fields={list(updates.keys())}")
+
+                # Publish Redis event so frontend receives the delta
+                try:
+                    from datetime import datetime, timezone
+                    redis_payload = json.dumps({
+                        "type": "task_manager_update",
+                        "job_id": expense_id,
+                        "status": updates.get("status", ""),
+                        "department": "EXbookeeper",
+                        "collection_id": company_id or "",
+                        "mandate_path": mandate_path or "",
+                        "data": updates,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+                    self._redis.publish(f"user:{user_id}/task_manager", redis_payload)
+                    logger.info(f"[EXPENSES] Redis publish task_manager for {expense_id}")
+                except Exception as re:
+                    logger.warning(f"[EXPENSES] Redis publish failed for {expense_id}: {re}")
             else:
                 logger.warning(f"[EXPENSES] task_manager doc not found: {expense_id} (skip update)")
         except Exception as e:

@@ -131,11 +131,13 @@ class LLMGateway:
         try:
             # Enqueue le job (LPUSH pour FIFO avec BRPOP)
             self.redis.lpush(self.QUEUE_NAME, json.dumps(job))
-            self._ensure_llm_worker()
+            worker_result = self._ensure_llm_worker()
+            is_cold_start = worker_result.get("status") == "starting"
 
             logger.info(
                 f"[LLM_GATEWAY] Job enqueued: {job_id[:8]}... "
                 f"type=send_message user={user_id} thread={thread_key}"
+                f"{' (COLD START)' if is_cold_start else ''}"
             )
 
             # Clear stale Telegram comm_thread mapping when Pinnokio session starts
@@ -153,6 +155,7 @@ class LLMGateway:
                 "status": "queued",
                 "job_id": job_id,
                 "message": "Message enqueued for processing",
+                "is_cold_start": is_cold_start,
             }
 
         except Exception as e:
