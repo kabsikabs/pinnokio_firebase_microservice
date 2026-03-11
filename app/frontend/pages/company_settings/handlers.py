@@ -718,6 +718,8 @@ class CompanySettingsHandlers:
                     "forbidden_terms": [],
                     "required_terms": [],
                 }),
+                "send_from": doc.get("send_from", ""),
+                "user_instructions": doc.get("user_instructions", ""),
             }
         except Exception as e:
             logger.error(f"Error fetching email settings: {e}")
@@ -2198,6 +2200,8 @@ class CompanySettingsHandlers:
             email_settings = {
                 "contact_groups": data.get("contact_groups", []),
                 "default_policy": data.get("default_policy", {}),
+                "send_from": data.get("send_from", ""),
+                "user_instructions": data.get("user_instructions", ""),
                 "updated_at": datetime.utcnow().isoformat(),
                 "updated_by": user_id,
             }
