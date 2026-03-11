@@ -554,17 +554,17 @@ class BulkMatchingSuggestionEngine:
         is_expense = candidate_type == "expense"
         date_score = _score_date(tx_date, cand_date, is_expense=is_expense)
 
-        # Text score
+        # Text score (directional: is invoice supplier name IN bank text?)
         tx_text = _build_tx_text(tx)
-        text_score = _text_similarity(tx_text, cand_text)
+        text_score = _directional_text_score(cand_text, tx_text)
 
-        # Reference score
+        # Reference score (directional: is invoice ref IN bank text?)
         ref_score = 0.0
         if cand_ref:
-            ref_score = _text_similarity(
-                tx.get("reference", "") + " " + tx.get("payment_ref", ""),
-                cand_ref,
-            )
+            bank_ref_text = (tx.get("reference", "") or "") + " " + (tx.get("payment_ref", "") or "")
+            ref_score = _directional_ref_score(cand_ref, bank_ref_text)
+            # Also check full tx_text (some banks put ref in description)
+            ref_score = max(ref_score, _directional_ref_score(cand_ref, tx_text))
 
         # Adjust weights if FX
         w = dict(weights)
@@ -778,6 +778,7 @@ def _score_date(
 
 
 def _text_similarity(text1: str, text2: str) -> float:
+    """Basic symmetric similarity (fallback)."""
     if not text1 or not text2:
         return 0.0
     t1 = text1.lower().strip()
@@ -785,6 +786,84 @@ def _text_similarity(text1: str, text2: str) -> float:
     if t1 in t2 or t2 in t1:
         return 1.0
     return SequenceMatcher(None, t1, t2).ratio()
+
+
+# Suffixes juridiques courants à ignorer lors du matching fournisseur
+_LEGAL_SUFFIXES = {
+    "sarl", "sa", "ag", "gmbh", "srl", "ltd", "inc", "llc", "sas",
+    "se", "plc", "co", "corp", "eg", "kg", "ohg", "snc",
+}
+
+
+def _directional_text_score(needle: str, haystack: str) -> float:
+    """
+    Score directionnel : les mots de needle sont-ils présents dans haystack ?
+    needle = info facture (fournisseur), haystack = texte bancaire.
+    """
+    if not needle or not haystack:
+        return 0.0
+
+    hay_lower = haystack.lower()
+
+    # Nettoyage : retirer les suffixes juridiques du needle
+    needle_tokens = [
+        w for w in needle.lower().split()
+        if w not in _LEGAL_SUFFIXES and len(w) > 1
+    ]
+
+    if not needle_tokens:
+        return 0.0
+
+    # Comptage : combien de mots facture se trouvent dans le texte bancaire
+    found = sum(1 for w in needle_tokens if w in hay_lower)
+    token_score = found / len(needle_tokens)
+
+    # Fallback SequenceMatcher symétrique
+    sym_score = SequenceMatcher(None, needle.lower(), hay_lower).ratio()
+
+    return max(token_score, sym_score)
+
+
+def _normalize_ref(ref: str) -> str:
+    """Normalise une référence : supprime espaces, tirets, points, underscore, lowercase."""
+    import re
+    return re.sub(r'[\s\-._/\\]+', '', ref.lower().strip())
+
+
+def _directional_ref_score(invoice_ref: str, bank_text: str) -> float:
+    """
+    Score directionnel : la référence facture est-elle contenue dans le texte bancaire ?
+    Normalise les deux avant comparaison.
+    """
+    if not invoice_ref or not bank_text:
+        return 0.0
+
+    ref_norm = _normalize_ref(invoice_ref)
+    bank_norm = _normalize_ref(bank_text)
+
+    if not ref_norm:
+        return 0.0
+
+    # Containment exact après normalisation
+    if ref_norm in bank_norm:
+        return 1.0
+
+    # SequenceMatcher sur versions normalisées
+    seq_score = SequenceMatcher(None, ref_norm, bank_norm).ratio()
+
+    # Aussi tester chaque token bancaire individuellement (la ref peut être un token isolé)
+    bank_tokens = bank_text.lower().split()
+    best_token = 0.0
+    for token in bank_tokens:
+        token_norm = _normalize_ref(token)
+        if not token_norm:
+            continue
+        if ref_norm in token_norm or token_norm in ref_norm:
+            best_token = 1.0
+            break
+        best_token = max(best_token, SequenceMatcher(None, ref_norm, token_norm).ratio())
+
+    return max(seq_score, best_token)
 
 
 def _build_tx_text(tx: Dict) -> str:

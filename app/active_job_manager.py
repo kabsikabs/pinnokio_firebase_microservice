@@ -352,6 +352,7 @@ class ActiveJobManager:
             "success": False,
             "location": "not_found",
             "stopped_on_process": [],
+            "stopped_on_process_payload": {},  # {job_id: payload_data} for composite key reconstruction
             "synthetic_stops": [],
             "message": "",
         }
@@ -382,6 +383,8 @@ class ActiveJobManager:
                             "last_updated": now,
                         })
                         result["stopped_on_process"].extend(matching_ids)
+                        # Capture payload for composite key reconstruction (banker)
+                        result["stopped_on_process_payload"][batch_key] = data.get("payload", data)
                         result["success"] = True
                         result["location"] = "on_process"
                         logger.info(
@@ -392,6 +395,8 @@ class ActiveJobManager:
                     else:  # pending
                         # Job hasn't started → delete the entire document
                         synthetic_ids = list(jobs_status.keys())
+                        # Capture payload before deletion for composite key reconstruction
+                        result["stopped_on_process_payload"][batch_key] = data.get("payload", data)
                         doc.reference.delete()
                         result["synthetic_stops"].extend(synthetic_ids)
                         result["success"] = True

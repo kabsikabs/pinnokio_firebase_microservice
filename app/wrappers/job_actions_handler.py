@@ -905,10 +905,32 @@ async def handle_job_stop(
         )
 
         # Step 1b: For on_process jobs, update task_manager status to "stopping"
+        # For banker: reconstruct composite_key ({company_id}_{account_id}_{move_id})
+        # because active_jobs stores raw transaction_ids but task_manager uses composite keys
+        _banker_acct_map = {}  # {transaction_id: account_id}
+        if job_type == "bankbookeeper":
+            for _payload_data in stop_result.get("stopped_on_process_payload", {}).values():
+                for jd in (_payload_data.get("jobs_data") or []):
+                    acct = str(jd.get("bank_account_id", ""))
+                    for tx in jd.get("transactions", []):
+                        tid = str(tx.get("transaction_id") or tx.get("id", ""))
+                        if tid and acct:
+                            _banker_acct_map[tid] = acct
+
         for jid in stop_result.get("stopped_on_process", []):
             try:
+                task_mgr_job_id = jid
+                # Banker: convert raw transaction_id to composite key
+                if job_type == "bankbookeeper" and company_id:
+                    acct_id = _banker_acct_map.get(jid, "")
+                    if acct_id:
+                        task_mgr_job_id = f"{company_id}_{acct_id}_{jid}"
+                        logger.info(
+                            f"[JOB_ACTIONS] Banker composite key: {jid} → {task_mgr_job_id}"
+                        )
+
                 await _update_task_manager_status(
-                    uid=uid, job_id=jid, status="stopping",
+                    uid=uid, job_id=task_mgr_job_id, status="stopping",
                     mandate_path=mandate_path, company_data=company_data,
                     job_type=job_type,
                 )
@@ -921,10 +943,17 @@ async def handle_job_stop(
         synthetic_count = 0
         for stopped_job_id in stop_result.get("synthetic_stops", []):
             try:
+                task_mgr_job_id_synth = stopped_job_id
+                # Banker: convert raw transaction_id to composite key
+                if job_type == "bankbookeeper" and company_id:
+                    acct_id_synth = _banker_acct_map.get(stopped_job_id, "")
+                    if acct_id_synth:
+                        task_mgr_job_id_synth = f"{company_id}_{acct_id_synth}_{stopped_job_id}"
+
                 await _send_synthetic_stopped_notification(
                     uid=uid,
                     job_type=job_type,
-                    job_id=stopped_job_id,
+                    job_id=task_mgr_job_id_synth,
                     mandate_path=mandate_path,
                     company_data=company_data,
                 )
